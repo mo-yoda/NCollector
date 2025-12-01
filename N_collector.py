@@ -28,6 +28,21 @@ class NCollectorApp:
                                        command=self.select_folder)
         self.select_button.pack(pady=10, padx=10)
 
+    def dissect_folder_name(self, folder_name):
+        """
+        Seperates a folder name into components (expected format: Date_Experiment_Ncount).
+        Returns (Date, Experiment, Ncount)
+        """
+        parts = folder_name.split("_")
+        # Check expected structure
+        if len(parts) >= 3 and parts[-1].startswith("n") and parts[0].isdigit():
+            date = parts[0]
+            n_count = int(parts[-1][-1])
+            # Experiment is everything in between date and N count
+            experiment = "_".join(parts[1:-1])
+            return date, experiment, n_count
+        return None, folder_name, None
+
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
