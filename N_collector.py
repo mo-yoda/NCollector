@@ -179,19 +179,19 @@ class NCollectorApp:
                 if has_xlsx: # save path if xlsx files are found
                     self.subfolder_paths_with_files.append(root)
 
-                # Update GUI
-                if self.subfolder_paths_with_files:
-                    count = len(self.subfolder_paths_with_files)
-                    folder_names = [os.path.basename(path) for path in self.subfolder_paths_with_files]
-                    folder_names_string = "\n ".join(folder_names)
-                    self.folder_path.set(
-                        f"Selected Path: {directory}\n\n Found following subfolders with xlsx files:\n {folder_names_string}")
-                    self.collect_button.config(state="normal")
-                    print(f"Found {count} folders: {folder_names}")
-                else:
-                    self.folder_path.set(f"Error: No .xlsx files found in {directory} or any subfolder.")
-                    self.collect_button.config(state="disabled")
-                    print(f"No .xlsx files found starting from: {directory}")
+            # Update GUI
+            if self.subfolder_paths_with_files:
+                count = len(self.subfolder_paths_with_files)
+                folder_names = [os.path.basename(path) for path in self.subfolder_paths_with_files]
+                folder_names_string = "\n ".join(folder_names)
+                self.folder_path.set(
+                    f"Selected Path: {directory}\n\n Found following subfolders with xlsx files:\n {folder_names_string}")
+                self.collect_button.config(state="normal")
+                print(f"Found {count} folders: {folder_names_string}")
+            else:
+                self.folder_path.set(f"Error: No .xlsx files found in {directory} or any subfolder.")
+                self.collect_button.config(state="disabled")
+                print(f"No .xlsx files found starting from: {directory}")
 
     def collect_files(self):
         """Imports xlsx files found in the subfolders, separating protocol and result
