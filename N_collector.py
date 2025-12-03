@@ -96,6 +96,71 @@ class NCollectorApp:
 
         return metadata
 
+    def extract_transfection_scheme(self, file_path):
+        """
+        Reads the 'Protocol' sheet of the protocol file and finds the transfection table by identifying
+        'Transfection scheme:'. Returns a pandas dataframe of the transfection scheme.
+        """
+        protocol_worksheet = "Protocol"
+        row_marker = "Transfection scheme:"
+
+        try:
+            df_col1 = pd.read_excel(file_path,
+                                    sheet_name=protocol_worksheet,
+                                    header=None,
+                                    usecols=[0])
+        except ValueError:
+            # Error if sheet is missing
+            print(f"[ERROR] Worksheet '{protocol_worksheet}' not found in file.")
+            return None
+
+        # Find the row index of the marker; idxmax() gets first occurrence of the largest value (True as 1 and False as 0)
+        match = df_col1[0].astype(str).str.contains(row_marker, na=False).idxmax()
+        if df_col1.loc[match, 0] != row_marker:
+            # Check if idxmax found the marker or just the first row
+            print(f"   [ERROR] Transfection table not found in the Protocol sheet by looking for {row_marker}.")
+            return None
+
+        # Table starts 3 rows after the marker;
+        header_row = match + 3
+        print(f"   [PROTOCOL] Transfection scheme marker found at row {match}. Loading table from row {header_row}.")
+
+        # Load transfection scheme table
+        try:
+            df_transfection = pd.read_excel(file_path,
+                                            sheet_name=protocol_worksheet,
+                                            header=header_row)
+
+            # Define end if transfection scheme table cols (first col header starting with "Unnamed")
+            cols_to_keep = [col for col in df_transfection.columns if not str(col).startswith('Unnamed')]
+            df_transfection = df_transfection[cols_to_keep]
+
+            # Define end of transfection scheme (first row with NA in first col)
+            is_dna_na = df_transfection['DNA'].isna()
+
+            if is_dna_na.any():
+                # Find the positional index (0, 1, 2, ...) of the first NA value
+                first_na_position = is_dna_na.values.argmax()
+
+                # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
+                df_transfection = df_transfection.iloc[:first_na_position]
+            else:
+                # If no NA is found, raise an error as the detection of the table end has failed
+                print("   [ERROR] Expected table end delimiter (NaN in 'DNA' column) not found.")
+                return None
+
+            # Validate expected columns are present (DNA, DB#, Conc)
+            required_cols = ['DNA', 'DB#', 'Conc (ng/uL)']
+            if not all(col in df_transfection.columns for col in required_cols):
+                print(f"   [ERROR] Transfection table missing expected columns: {required_cols}.")
+                return None
+
+            return df_transfection
+
+        except Exception as e:
+            print(f"   [ERROR] Failed to load transfection scheme table: {e}")
+            return None
+
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
@@ -153,7 +218,7 @@ class NCollectorApp:
 
             protocol_file_name = f"{folder_name}.xlsx"
             # Initialise dic per folder
-            folder_data = {'protocol': None, 'results': []}
+            folder_data = {'protocol': {'transfection_scheme': None}, 'results': []}
             skipped_files = []
 
             # Iterate over files in subfolder
@@ -172,6 +237,11 @@ class NCollectorApp:
                         if file_name.startswith(folder_date):
                             df = pd.read_excel(file_path)
                             folder_data['protocol'] = df
+                            # Get transfection scheme
+                            transfection_df = self.extract_transfection_scheme(file_path)
+
+                            if transfection_df is not None:
+                                folder_data['protocol'] = {'transfection_scheme': transfection_df}
                             print(f"   [PROTOCOL] Imported: {file_name}")
                             is_imported = True
                         else:
