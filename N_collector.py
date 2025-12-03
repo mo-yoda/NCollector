@@ -1,8 +1,8 @@
 import os
 import tkinter as tk
 from tkinter import filedialog
-
 import pandas as pd
+from datetime import datetime
 
 class NCollectorApp:
     def __init__(self, main_window):
@@ -44,12 +44,57 @@ class NCollectorApp:
         parts = folder_name.split("_")
         # Check expected structure
         if len(parts) >= 3 and parts[-1].startswith("n") and parts[0].isdigit():
-            date = parts[0]
+            date = parts[0] # yymmdd format
             n_count = int(parts[-1][-1])
             # Experiment is everything in between date and N count
             experiment = "_".join(parts[1:-1])
             return date, experiment, n_count
         return None, folder_name, None
+
+    def extract_metadata(self, file_path):
+        """ Reads the 'Table All Cycles' sheet from an analysis file and extracts metadata from the first column
+        (measurement date, ID2: cell line, ID3: transfections #). Returns dictionary of extracted metadata.
+        """
+        metadata = {}
+        metadata_worksheet = "Table All Cycles"
+
+        try:
+            # Read the first column of this sheet
+            df_meta = pd.read_excel(file_path,
+                                    sheet_name = metadata_worksheet,
+                                    header = None,
+                                    usecols = [0]
+            )
+        except ValueError:
+            # Error if sheet is missing
+            print(f"[ERROR] Worksheet '{metadata_worksheet}' not found in file.")
+            return None
+
+        # Iterate through rows of the first column to find metadata
+        for index, row in df_meta.iterrows():
+            line = str(row[0]).strip()  # Get the string value from the cell
+
+            # Extract Date
+            if line.startswith("Date:"):
+                # Expects format like "Date: 21/11/2025"
+                metadata['measurement_date'] = line.split(":", 1)[-1].strip()
+
+            # Extract ID2 (Condition 1)
+            elif line.startswith("ID2:"):
+                # Expects format like "ID2: Con"
+                metadata['cell_line'] = line.split(":", 1)[-1].strip()
+
+            # Extract ID3 (Condition 2)
+            elif line.startswith("ID3:"):
+                # Expects format like "ID3: 1,2,3,4"
+                metadata['transfections'] = line.split(":", 1)[-1].strip()
+
+            # Ensure all required metadata fields were found
+        if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
+            print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
+            return None
+
+        return metadata
 
 
     def select_folder(self):
@@ -77,7 +122,7 @@ class NCollectorApp:
                     self.folder_path.set(
                         f"Selected Path: {directory}\n\n Found following subfolders with xlsx files:\n {folder_names_string}")
                     self.collect_button.config(state="normal")
-                    print(print(f"Found {count} folders: {folder_names}"))
+                    print(f"Found {count} folders: {folder_names}")
                 else:
                     self.folder_path.set(f"Error: No .xlsx files found in {directory} or any subfolder.")
                     self.collect_button.config(state="disabled")
@@ -101,10 +146,10 @@ class NCollectorApp:
             folder_name = os.path.basename(folder_path)
 
             # Get folder details and initialize storage for this folder
-            date, experiment, n_count = self.dissect_folder_name(folder_name)
+            folder_date, experiment, n_count = self.dissect_folder_name(folder_name)
 
             print(f"\n--- Processing Folder: {folder_name} ---")
-            print(f"   Details: Date={date}, Experiment='{experiment}', N={n_count}")
+            print(f"   Details: Date={folder_date}, Experiment='{experiment}', N={n_count}")
 
             protocol_file_name = f"{folder_name}.xlsx"
             # Initialise dic per folder
@@ -123,17 +168,32 @@ class NCollectorApp:
                 try:
                     # Check for the protocol file (same name as folder)
                     if file_name == protocol_file_name:
-                        df = pd.read_excel(file_path)
-                        folder_data['protocol'] = df
-                        print(f"   [PROTOCOL] Imported: {file_name}")
-                        is_imported = True
+                        # Validate that date of folder and protocol match
+                        if file_name.startswith(folder_date):
+                            df = pd.read_excel(file_path)
+                            folder_data['protocol'] = df
+                            print(f"   [PROTOCOL] Imported: {file_name}")
+                            is_imported = True
+                        else:
+                            print(f"   [DATE MISMATCH ERROR] Protocol file name {file_name} does not start with folder date {folder_date}.")
 
                     # Check for results file (_analysis in filename)
                     elif "_analysis" in file_name:
                         df = pd.read_excel(file_path)
-                        folder_data['results'].append(df)
-                        print(f"   [RESULT] Imported: {file_name}")
-                        is_imported = True
+                        # Validate that date of folder and measuring data match
+                        metadata = self.extract_metadata(file_path)
+
+                        # Convert folder date format to analysis sheet format
+                        folder_date_formated = datetime.strptime(folder_date, '%y%m%d').strftime('%d/%m/%Y')
+
+                        if metadata['measurement_date'] == folder_date_formated:
+                             print(f"   [RESULT] Imported: {file_name} (ID2: {metadata['cell_line']}, ID3: {metadata['transfections']})")
+                             # Store the data and its metadata only then
+                             folder_data['results'].append({'df': df, 'meta': metadata})
+                             is_imported = True
+                        else:
+                             print(f"   [DATE MISMATCH ERROR] in file {file_name}: Sheet Date {metadata['date_sheet']} != Folder Date {folder_date_formated}")
+
                     # Files not matching criteria are skipped
                     if not is_imported:
                         skipped_files.append(file_name)
