@@ -36,21 +36,6 @@ class NCollectorApp:
         )
         self.collect_button.pack(pady=15)
 
-    def dissect_folder_name(self, folder_name):
-        """
-        Seperates a folder name into components (expected format: Date_Experiment_Ncount).
-        Returns (Date, Experiment, Ncount)
-        """
-        parts = folder_name.split("_")
-        # Check expected structure
-        if len(parts) >= 3 and parts[-1].startswith("n") and parts[0].isdigit():
-            date = parts[0] # yymmdd format
-            n_count = int(parts[-1][-1])
-            # Experiment is everything in between date and N count
-            experiment = "_".join(parts[1:-1])
-            return date, experiment, n_count
-        return None, folder_name, None
-
     def extract_metadata(self, file_path):
         """ Reads the 'Table All Cycles' sheet from an analysis file and extracts metadata from the first column
         (measurement date, ID2: cell line, ID3: transfections #). Returns dictionary of extracted metadata.
@@ -172,11 +157,11 @@ class NCollectorApp:
                 self.collect_button.config(state="disabled")
                 return
 
-            # Search for xlsx in directory tree
+            # Search for xlsx or xlsm in directory tree
             for root, dirs, files in os.walk(directory):
-                has_xlsx = any(f.endswith(".xlsx") for f in files)
+                has_xlsx = any(f.endswith((".xlsx", ".xlsm")) for f in files)
 
-                if has_xlsx: # save path if xlsx files are found
+                if has_xlsx: # save path if xlsx/xlsm files are found
                     self.subfolder_paths_with_files.append(root)
 
             # Update GUI
@@ -185,17 +170,19 @@ class NCollectorApp:
                 folder_names = [os.path.basename(path) for path in self.subfolder_paths_with_files]
                 folder_names_string = "\n ".join(folder_names)
                 self.folder_path.set(
-                    f"Selected Path: {directory}\n\n Found following subfolders with xlsx files:\n {folder_names_string}")
+                    f"Selected Path: {directory}\n\n Found following subfolders with xlsx/xlsm files:\n {folder_names_string}")
                 self.collect_button.config(state="normal")
                 print(f"Found {count} folders: {folder_names_string}")
             else:
-                self.folder_path.set(f"Error: No .xlsx files found in {directory} or any subfolder.")
+                self.folder_path.set(f"Error: No .xlsx or .xlsm files found in {directory} or any subfolder.")
                 self.collect_button.config(state="disabled")
-                print(f"No .xlsx files found starting from: {directory}")
+                print(f"No .xlsx or .xlsm files found starting from: {directory}")
 
     def collect_files(self):
-        """Imports xlsx files found in the subfolders, separating protocol and result
-        analysis files based on name matching rules."""
+        """EDIT: Reads sheet names of all xlsx and xlsm files to identify and separate protocol and
+        result analysis files. Only these identified files are read. Validation of correct protocol to 
+        analysis files is done via date of measurement."""
+
         if not self.subfolder_paths_with_files:
             print("No folders to analyze.")
             return
@@ -209,60 +196,59 @@ class NCollectorApp:
         # Iterate over subfolders
         for folder_path in self.subfolder_paths_with_files:
             folder_name = os.path.basename(folder_path)
-
-            # Get folder details and initialize storage for this folder
-            folder_date, experiment, n_count = self.dissect_folder_name(folder_name)
-
             print(f"\n--- Processing Folder: {folder_name} ---")
-            print(f"   Details: Date={folder_date}, Experiment='{experiment}', N={n_count}")
 
-            protocol_file_name = f"{folder_name}.xlsx"
-            # Initialise dic per folder
-            folder_data = {'protocol': {'transfection_scheme': None}, 'results': []}
+            # Use date in folder name for validation
+            folder_date = folder_name.split("_")[0]
+
+            # Dic storage for this folder (one protocol, list of results)
+            folder_data = {'protocol': None, 'results': []}
+            # Keep track of skipped files
             skipped_files = []
 
-            # Iterate over files in subfolder
-            files_in_folder = os.listdir(folder_path)
+            files_in_folder = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsm'))]
             for file_name in files_in_folder:
-                # Only look at xlsx files
-                if not file_name.endswith('.xlsx'):
-                    continue
                 file_path = os.path.join(folder_path, file_name)
+                # Logical variable to keep track on skipped files
                 is_imported = False
 
                 try:
-                    # Check for the protocol file (same name as folder)
-                    if file_name == protocol_file_name:
-                        # Validate that date of folder and protocol match
-                        if file_name.startswith(folder_date):
-                            df = pd.read_excel(file_path)
-                            folder_data['protocol'] = df
-                            # Get transfection scheme
-                            transfection_df = self.extract_transfection_scheme(file_path)
+                    # Use ExcelFile to check sheet names
+                    xl = pd.ExcelFile(file_path)
+                    sheet_names = xl.sheet_names
 
-                            if transfection_df is not None:
-                                folder_data['protocol'] = {'transfection_scheme': transfection_df}
-                            print(f"   [PROTOCOL] Imported: {file_name}")
-                            is_imported = True
-                        else:
-                            print(f"   [DATE MISMATCH ERROR] Protocol file name {file_name} does not start with folder date {folder_date}.")
+                    # Identify Protocol File
+                    if "Protocol" in sheet_names:
+                        ### Add extract_protocol_info() here
+                        # Date validation with folder date - only if this matches, store all info in dic
 
-                    # Check for results file (_analysis in filename)
-                    elif "_analysis" in file_name:
-                        df = pd.read_excel(file_path)
-                        # Validate that date of folder and measuring data match
+                        # Get transfection scheme
+                        transfection_df = self.extract_transfection_scheme(file_path)
+
+                        if transfection_df is not None:
+                            folder_data['protocol'] = dict(file_name=file_name, transfection_scheme=transfection_df)
+                        print(f"   [PROTOCOL] Imported: {file_name}")
+                        is_imported = True
+
+                    # Identify Analysis File
+                    elif "Analysis" in sheet_names:
                         metadata = self.extract_metadata(file_path)
 
+                        # Date validation with folder_date, import only then
                         # Convert folder date format to analysis sheet format
                         folder_date_formated = datetime.strptime(folder_date, '%y%m%d').strftime('%d/%m/%Y')
-
                         if metadata['measurement_date'] == folder_date_formated:
-                             print(f"   [RESULT] Imported: {file_name} (ID2: {metadata['cell_line']}, ID3: {metadata['transfections']})")
-                             # Store the data and its metadata only then
-                             folder_data['results'].append({'df': df, 'meta': metadata})
-                             is_imported = True
+                            result_analysis = pd.read_excel(file_path, sheet_name="Analysis")
+                            folder_data['results'].append({
+                                'file_name': file_name,
+                                'Analysis': result_analysis,
+                                'meta': metadata
+                            })
+                            is_imported = True
+                            print(f"   [RESULT] Imported: {file_name} (ID2: {metadata['cell_line']}, ID3: {metadata['transfections']})")
+
                         else:
-                             print(f"   [DATE MISMATCH ERROR] in file {file_name}: Sheet Date {metadata['date_sheet']} != Folder Date {folder_date_formated}")
+                            print(f"   [DATE MISMATCH ERROR] in file {file_name}: Sheet Date {metadata['date_sheet']} != Folder Date {folder_date_formated}")
 
                     # Files not matching criteria are skipped
                     if not is_imported:
