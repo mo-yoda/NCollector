@@ -260,6 +260,31 @@ class NCollectorApp:
             all_data[folder_name] = folder_data
             print(f"   [SKIPPED]: {skipped_files}")
 
+        # Verification of readings
+        print("\n" + "=" * 30)
+        print("COLLECTION SUMMARY")
+        print("=" * 30)
+
+        for folder, data in all_data.items():
+            print(f"\nFolder: {folder}")
+            # data is the 'folder_data' dictionary
+            print(f"  Keys found: {list(data.keys())}")
+
+            # Check Protocol
+            if data['protocol']:
+                p_file = data['protocol'].get('file_name')
+                print(f"  [✓] Protocol: {p_file}")
+                print(f"  Keys found: {list(data['protocol'].keys())}")
+            else:
+                print(f"  [ ] Protocol: MISSING")
+
+            # Check Results
+            res_count = len(data['results'])
+            print(f"  [i] Results: {res_count} file(s) loaded")
+            print(f"  Keys found: {list(data['results'].keys())}")
+
+        print("\n" + "=" * 30)
+
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
