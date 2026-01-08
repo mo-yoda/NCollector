@@ -3,6 +3,39 @@ import tkinter as tk
 from tkinter import filedialog
 import pandas as pd
 from datetime import datetime
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+# --- Dataclass Definition --- #
+
+@dataclass
+class PRresult:
+    """ Information from a single _analysis file """
+    file_name: str
+    measurement_date: str
+    cell_line: str # ID2
+    transfection: str # ID3
+    raw_bret_ratio_df: pd.DataFrame
+
+@dataclass
+class ProtocolData:
+    """Information from a protocol file"""
+    file_name: str
+    transfection_scheme: pd.DataFrame
+
+    # add loads HERE-----------
+
+@dataclass
+class MeasurementFolder:
+    """A subfolder containing one protocol and multiple result files"""
+    folder_name: str
+    folder_path: str
+    measurement_date: str
+    protocol: Optional[ProtocolData] = None # MeasurementFolder is initiated before protocol data is loaded
+    results: List[PRresult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
+    skipped_files: List[str] = field(default_factory=list)
+
+# --- Main Application --- #
 
 class NCollectorApp:
     def __init__(self, main_window):
@@ -13,6 +46,7 @@ class NCollectorApp:
         self.folder_path = tk.StringVar()
         self.folder_path.set("No folder selected.")
         self.subfolder_paths_with_files = []
+        self.experiment: List[MeasurementFolder] = []
 
         # Display label for path
         self.path_label = tk.Label(main_window,
@@ -189,9 +223,8 @@ class NCollectorApp:
 
         print("\n--- Starting Data Collection ---")
 
-        # Create a dictionary to store all imported data for later processing
-        # Dic structure: {'folder_name': {'protocol': df, 'results':[df1, df2, ...]
-        all_data = {}
+        # Collect all subfolder info (experiment repeats) in this list
+        self.experiment = []
 
         # Iterate over subfolders
         for folder_path in self.subfolder_paths_with_files:
@@ -201,10 +234,8 @@ class NCollectorApp:
             # Use date in folder name for validation
             folder_date = folder_name.split("_")[0]
 
-            # Dic storage for this folder (one protocol, list of results)
-            folder_data = {'protocol': None, 'results': []}
-            # Keep track of skipped files
-            skipped_files = []
+            # Create MeasurementFolder object to collect protocol and results
+            folder_data = MeasurementFolder(folder_name=folder_name, folder_path=folder_path, measurement_date=folder_date)
 
             files_in_folder = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsm'))]
             for file_name in files_in_folder:
@@ -219,14 +250,14 @@ class NCollectorApp:
 
                     # Identify Protocol File
                     if "Protocol" in sheet_names:
-                        ### Add extract_protocol_info() here
-                        # Date validation with folder date - only if this matches, store all info in dic
+                        # --- TODO: Add extract_protocol_info() here; date validation with folder date - only if this matches, store info
 
                         # Get transfection scheme
                         transfection_df = self.extract_transfection_scheme(file_path)
 
                         if transfection_df is not None:
-                            folder_data['protocol'] = dict(file_name=file_name, transfection_scheme=transfection_df)
+                            folder_data.protocol = ProtocolData(file_name=file_name,
+                                                                transfection_scheme=transfection_df)
                         print(f"   [PROTOCOL] Imported: {file_name}")
                         is_imported = True
 
@@ -238,12 +269,18 @@ class NCollectorApp:
                         # Convert folder date format to analysis sheet format
                         folder_date_formated = datetime.strptime(folder_date, '%y%m%d').strftime('%d/%m/%Y')
                         if metadata['measurement_date'] == folder_date_formated:
-                            result_analysis = pd.read_excel(file_path, sheet_name="Analysis")
-                            folder_data['results'].append({
-                                'file_name': file_name,
-                                'Analysis': result_analysis,
-                                'meta': metadata
-                            })
+                            # --- TODO: Specify here that really just BRET ratio table is read!
+                            bret_ratio_df = pd.read_excel(file_path, sheet_name="Analysis")
+
+                            result_obj = PRresult(
+                                file_name=file_name,
+                                measurement_date=metadata['measurement_date'],
+                                cell_line=metadata['cell_line'],
+                                transfection=metadata['transfections'],
+                                raw_bret_ratio_df=bret_ratio_df
+                            )
+                            folder_data.results.append(result_obj)
+
                             is_imported = True
                             print(f"   [RESULT] Imported: {file_name} (ID2: {metadata['cell_line']}, ID3: {metadata['transfections']})")
 
@@ -252,36 +289,30 @@ class NCollectorApp:
 
                     # Files not matching criteria are skipped
                     if not is_imported:
-                        skipped_files.append(file_name)
+                        folder_data.skipped_files.append(file_name)
                 except Exception as e:
                     print(f"   [ERROR] Could not read {file_name}: {e}")
 
             # Store the collected data for this experiment
-            all_data[folder_name] = folder_data
-            print(f"   [SKIPPED]: {skipped_files}")
+            self.experiment.append(folder_data)
+            print(f"   [SKIPPED]: {folder_data.skipped_files}")
 
         # Verification of readings
         print("\n" + "=" * 30)
         print("COLLECTION SUMMARY")
         print("=" * 30)
 
-        for folder, data in all_data.items():
-            print(f"\nFolder: {folder}")
-            # data is the 'folder_data' dictionary
-            print(f"  Keys found: {list(data.keys())}")
-
-            # Check Protocol
-            if data['protocol']:
-                p_file = data['protocol'].get('file_name')
-                print(f"  [✓] Protocol: {p_file}")
-                print(f"  Keys found: {list(data['protocol'].keys())}")
+        for rep in self.experiment:
+            print(f"\nFolder: {rep.folder_name}")
+            if rep.protocol:
+                print(f"  [✓] Protocol: {rep.protocol.file_name}")
             else:
                 print(f"  [ ] Protocol: MISSING")
 
-            # Check Results
-            res_count = len(data['results'])
+            res_count = len(rep.results)
             print(f"  [i] Results: {res_count} file(s) loaded")
-            print(f"  Keys found: {list(data['results'].keys())}")
+            if rep.skipped_files:
+                print(f"   [SKIPPED]: {rep.skipped_files}")
 
         print("\n" + "=" * 30)
 
