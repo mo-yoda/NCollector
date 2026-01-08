@@ -52,7 +52,7 @@ class NCollectorApp:
         self.path_label = tk.Label(main_window,
                                    textvariable=self.folder_path,
                                    wraplength=1000,
-                                   justify=tk.LEFT,
+                                   justify="left",
                                    font=('Arial', 10))
         self.path_label.pack(pady=10, padx=10) # placing the text via .pack
 
@@ -74,7 +74,6 @@ class NCollectorApp:
         """ Reads the 'Table All Cycles' sheet from an analysis file and extracts metadata from the first column
         (measurement date, ID2: cell line, ID3: transfections #). Returns dictionary of extracted metadata.
         """
-        metadata = {}
         metadata_worksheet = "Table All Cycles"
 
         try:
@@ -82,38 +81,36 @@ class NCollectorApp:
             df_meta = pd.read_excel(file_path,
                                     sheet_name = metadata_worksheet,
                                     header = None,
-                                    usecols = [0]
+                                    usecols = [0],
+                                    nrows = 30 # Limit rows to read
             )
+            col = df_meta[0].astype(str) # Transform everything to str
+
+            # Mapping: { "Excel Label": "Desired Key" }
+            meta_keys = {
+                "Date:": "measurement_date",
+                "ID2:": "cell_line",
+                "ID3:": "transfections"
+            }
+
+            metadata = {}
+            for label, key in meta_keys.items():
+                # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
+                matches = col[col.str.contains(label, na=False)].str.split(":", n=1).str[-1].str.strip().tolist()
+                if matches:
+                    metadata[key] = matches[0]
+
+            # Ensure all required metadata fields were found
+            if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
+                print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
+                return None
+
+            return metadata
+
         except ValueError:
             # Error if sheet is missing
             print(f"[ERROR] Worksheet '{metadata_worksheet}' not found in file.")
             return None
-
-        # Iterate through rows of the first column to find metadata
-        for index, row in df_meta.iterrows():
-            line = str(row[0]).strip()  # Get the string value from the cell
-
-            # Extract Date
-            if line.startswith("Date:"):
-                # Expects format like "Date: 21/11/2025"
-                metadata['measurement_date'] = line.split(":", 1)[-1].strip()
-
-            # Extract ID2 (Condition 1)
-            elif line.startswith("ID2:"):
-                # Expects format like "ID2: Con"
-                metadata['cell_line'] = line.split(":", 1)[-1].strip()
-
-            # Extract ID3 (Condition 2)
-            elif line.startswith("ID3:"):
-                # Expects format like "ID3: 1,2,3,4"
-                metadata['transfections'] = line.split(":", 1)[-1].strip()
-
-            # Ensure all required metadata fields were found
-        if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
-            print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
-            return None
-
-        return metadata
 
     def extract_transfection_scheme(self, file_path):
         """
@@ -158,7 +155,7 @@ class NCollectorApp:
             is_dna_na = df_transfection['DNA'].isna()
 
             if is_dna_na.any():
-                # Find the positional index (0, 1, 2, ...) of the first NA value
+                # Find the positional index of the first NA value
                 first_na_position = is_dna_na.values.argmax()
 
                 # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
