@@ -10,30 +10,38 @@ from typing import List, Optional
 def slice_table(
         df: pd.DataFrame,
         col_to_search: int,
-        row_marker: str
+        row_marker: str,
+        second_table: bool = False
 ):
     """
     Extracts a table within a df without headers. Looks for row_marker in a specified column (col_to_search) to find
     the header line of the table. End of table is defined by first empty cell in header line and the first empty row
     in the first col of this table. Returns pandas dataframe with header.
+    second_table: If True, looks for the 2nd occurrence of row_marker.
+                  If False (default), uses the 1st occurrence.
     """
-    # Find the row index of the marker
+    # Find the row index of the marker (can be multiple);
+    # returns True, False col; regex for handling row_markers containing ()
     contains_marker = df.iloc[:, col_to_search].astype(str).str.contains(row_marker, na=False, regex=False)
-    # Above returns True, False col; regex for handling row_markers containing ()
+    marker_indices = contains_marker.index[contains_marker].tolist()
 
-    if not contains_marker.any():
+    if not marker_indices:
         # The row_marker was not found
         print(f"   [ERROR] {row_marker} was not found in protocol.")
         return None
-    # idxmax() gets first occurrence of largest value (True 1, False 0)
-    header_row_idx = contains_marker.idxmax()
+
+    # Specify to look for first or second occurrence (needed for ligand tables)
+    if second_table:
+        if len(marker_indices) <2:
+            print(f"   [ERROR] Second occurrence of {row_marker} requested, but only one found.")
+            return None
+        header_row_idx = marker_indices[1]  # Second occurrence
+    else:
+        header_row_idx = marker_indices[0]  # First occurrence
 
     # Look for col cutoff in header row
     header_row_content = df.iloc[header_row_idx, col_to_search:].astype(str)
 
-    # Find the first column index that contains col end marker
-    # Note: list comprehension is safer than .idxmax() on a row
-    col_end_match = [i for i, val in enumerate(header_row_content) if col_end_marker in val]
     # Find the first index where the cell is 'nan' or empty; width of table is defined by header content
     col_width = next((i for i, val in enumerate(header_row_content)
                        if val.lower() == "nan" or not val.strip()), len(header_row_content))
