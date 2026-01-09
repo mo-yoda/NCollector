@@ -317,7 +317,7 @@ class NCollectorApp:
                     if "Protocol" in sheet_names:
                         # --- TODO: date validation with folder date - only if this matches, store info
 
-                        protocol_info = self.extract_protocol_info(file_path)
+                        protocol_info = extract_protocol_info(file_path)
 
                         if protocol_info is not None:
                             folder_data.protocol = protocol_info
