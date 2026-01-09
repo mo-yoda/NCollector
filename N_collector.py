@@ -37,6 +37,7 @@ class MeasurementFolder:
     skipped_files: List[str] = field(default_factory=list)
 
 # --- Tool Functions --- #
+
 def slice_table(
         df: pd.DataFrame,
         col_to_search: int,
@@ -128,8 +129,9 @@ def extract_ligand_table(df):
 
     return df_ligand
 
-def extract_protocol_info(file_path):
+def extract_protocol_info(xls_obj: pd.ExcelFile):
     """
+    Uses already opened pd.ExcelFiles (faster and more flexible than reading from path).
     Reads the 'Protocol' sheet of the protocol file and extracts all needed information.
     Stores and returns ProtocolData class with all info.
 
@@ -140,7 +142,7 @@ def extract_protocol_info(file_path):
     protocol_worksheet = "Protocol"
 
     try:
-        protocol_sheet = pd.read_excel(file_path,
+        protocol_sheet = pd.read_excel(xls_obj,
                                        sheet_name=protocol_worksheet,
                                        header=None)
     except ValueError:
@@ -148,7 +150,7 @@ def extract_protocol_info(file_path):
         print(f"[ERROR] Worksheet '{protocol_worksheet}' not found in file.")
         return None
 
-    file_name = os.path.basename(file_path)
+    file_name = os.path.basename(xls_obj.io)
     df_transfection = extract_transfection_scheme(protocol_sheet)
     ligand_conc = extract_ligand_table(protocol_sheet)
 
@@ -166,7 +168,94 @@ def extract_protocol_info(file_path):
 
     return protocol_info
 
-# TODO: move extract_metadata() outside of app!
+def extract_metadata(xls_obj):
+    """
+    Uses already opened pd.ExcelFiles (faster and more flexible than reading from path).
+    Reads the 'Table All Cycles' sheet from an analysis file and extracts metadata from the first column
+    (measurement date, ID2: cell line, ID3: transfections #). Returns dictionary of extracted metadata.
+    """
+    metadata_worksheet = "Table All Cycles"
+
+    try:
+        # Read the first column of this sheet
+        df_meta = pd.read_excel(xls_obj,
+                                sheet_name=metadata_worksheet,
+                                header=None,
+                                usecols=[0],
+                                nrows=30  # Limit rows to read
+                                )
+        col = df_meta[0].astype(str)  # Transform everything to str
+
+        # Mapping: { "Excel Label": "Desired Key" }
+        meta_keys = {
+            "Date:": "measurement_date",
+            "ID2:": "cell_line",
+            "ID3:": "transfections"
+        }
+
+        metadata = {}
+        for label, key in meta_keys.items():
+            # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
+            matches = col[col.str.contains(label, na=False)].str.split(":", n=1).str[-1].str.strip().tolist()
+            if matches:
+                metadata[key] = matches[0]
+
+        # Ensure all required metadata fields were found
+        if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
+            print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
+            return None
+
+        return metadata
+
+    except ValueError:
+        # Error if sheet is missing
+        print(f"[ERROR] Worksheet '{metadata_worksheet}' not found in analysis file.")
+        return None
+
+def extract_bret_data(xls_obj):
+    analysis_worksheet = "Analysis"
+
+    try:
+        bret_sheet = pd.read_excel(xls_obj,
+                                sheet_name=analysis_worksheet,
+                                header=None
+                                )
+        row_marker = "Time (min)"
+        df_bret = slice_table(bret_sheet, 1, row_marker)
+
+        exclude_rows = ["Baseline", "late averg"]
+        df_bret = df_bret[~df_bret["Time (min)"].astype(str).isin(exclude_rows)]
+        df_bret = df_bret.reset_index(drop=True) # Make sure index is clean
+
+        return df_bret
+
+    except ValueError:
+        # Error if sheet is missing
+        print(f"[ERROR] Worksheet '{analysis_worksheet}' not found in analysis file.")
+        return None
+
+def extract_measurement_data(xls_obj):
+    """
+    Gets metadata and BRET ratio from analysis files.
+    Stores and returns PRresult class with all data.
+
+    calls
+        extract_metadata
+        extract_bret_data
+    """
+
+    file_name = os.path.basename(xls_obj.io)
+    metadata_dic = extract_metadata(xls_obj)
+    bret_ratio_df = extract_bret_data(xls_obj)
+
+    result_obj = PRresult(
+        file_name=file_name,
+        measurement_date=metadata_dic['measurement_date'],
+        cell_line=metadata_dic['cell_line'],
+        transfection=metadata_dic['transfections'],
+        raw_bret_ratio_df=bret_ratio_df
+    )
+    return result_obj
 
 # --- Main Application --- #
 
@@ -202,49 +291,6 @@ class NCollectorApp:
                                         command=self.collect_files
         )
         self.collect_button.pack(pady=15)
-
-    def extract_metadata(self, file_path):
-        """ Reads the 'Table All Cycles' sheet from an analysis file and extracts metadata from the first column
-        (measurement date, ID2: cell line, ID3: transfections #). Returns dictionary of extracted metadata.
-        """
-        metadata_worksheet = "Table All Cycles"
-
-        try:
-            # Read the first column of this sheet
-            df_meta = pd.read_excel(file_path,
-                                    sheet_name = metadata_worksheet,
-                                    header = None,
-                                    usecols = [0],
-                                    nrows = 30 # Limit rows to read
-            )
-            col = df_meta[0].astype(str) # Transform everything to str
-
-            # Mapping: { "Excel Label": "Desired Key" }
-            meta_keys = {
-                "Date:": "measurement_date",
-                "ID2:": "cell_line",
-                "ID3:": "transfections"
-            }
-
-            metadata = {}
-            for label, key in meta_keys.items():
-                # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
-                matches = col[col.str.contains(label, na=False)].str.split(":", n=1).str[-1].str.strip().tolist()
-                if matches:
-                    metadata[key] = matches[0]
-
-            # Ensure all required metadata fields were found
-            if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
-                print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
-                return None
-
-            return metadata
-
-        except ValueError:
-            # Error if sheet is missing
-            print(f"[ERROR] Worksheet '{metadata_worksheet}' not found in file.")
-            return None
-
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
@@ -305,19 +351,19 @@ class NCollectorApp:
             files_in_folder = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsm'))]
             for file_name in files_in_folder:
                 file_path = os.path.join(folder_path, file_name)
-                # Logical variable to keep track on skipped files
+                # Logical variable to keep track of skipped files
                 is_imported = False
 
                 try:
                     # Use ExcelFile to check sheet names
-                    xl = pd.ExcelFile(file_path)
-                    sheet_names = xl.sheet_names
+                    xls = pd.ExcelFile(file_path) # fast reading of multiple sheet xls files
+                    sheet_names = xls.sheet_names
 
                     # Identify Protocol File
                     if "Protocol" in sheet_names:
                         # --- TODO: date validation with folder date - only if this matches, store info
 
-                        protocol_info = extract_protocol_info(file_path)
+                        protocol_info = extract_protocol_info(xls)
 
                         if protocol_info is not None:
                             folder_data.protocol = protocol_info
@@ -326,29 +372,17 @@ class NCollectorApp:
 
                     # Identify Analysis File
                     elif "Analysis" in sheet_names:
-                        metadata = self.extract_metadata(file_path)
+                        meas_data = extract_measurement_data(xls)
 
-                        # Date validation with folder_date, import only then
+                        # Date validation with folder_date
                         # Convert folder date format to analysis sheet format
                         folder_date_formated = datetime.strptime(folder_date, '%y%m%d').strftime('%d/%m/%Y')
-                        if metadata['measurement_date'] == folder_date_formated:
-                            # --- TODO: Specify here that really just BRET ratio table is read!
-                            bret_ratio_df = pd.read_excel(file_path, sheet_name="Analysis")
-
-                            result_obj = PRresult(
-                                file_name=file_name,
-                                measurement_date=metadata['measurement_date'],
-                                cell_line=metadata['cell_line'],
-                                transfection=metadata['transfections'],
-                                raw_bret_ratio_df=bret_ratio_df
-                            )
-                            folder_data.results.append(result_obj)
-
+                        if  meas_data.measurement_date == folder_date_formated:
+                            folder_data.results.append(meas_data)
                             is_imported = True
-                            print(f"   [RESULT] Imported: {file_name} (ID2: {metadata['cell_line']}, ID3: {metadata['transfections']})")
-
+                            print(f"   [RESULT] Imported: {file_name} (ID2: {meas_data.cell_line}, ID3: {meas_data.transfection})")
                         else:
-                            print(f"   [DATE MISMATCH ERROR] in file {file_name}: Sheet Date {metadata['date_sheet']} != Folder Date {folder_date_formated}")
+                            print(f"   [DATE MISMATCH ERROR] in file {file_name}: Sheet Date {meas_data.measurement_date} != Folder Date {folder_date_formated}")
 
                     # Files not matching criteria are skipped
                     if not is_imported:
