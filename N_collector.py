@@ -98,7 +98,46 @@ def extract_ligand_table(df):
 
     return df_ligand
 
-# TODO: move extract_metadata() and extract_protocol_info() outside of app!
+def extract_protocol_info(file_path):
+    """
+    Reads the 'Protocol' sheet of the protocol file and extracts all needed information.
+    Stores and returns ProtocolData class with all info.
+
+    calls
+        extract_transfection_scheme
+        extract_ligand_table
+    """
+    protocol_worksheet = "Protocol"
+
+    try:
+        protocol_sheet = pd.read_excel(file_path,
+                                       sheet_name=protocol_worksheet,
+                                       header=None)
+    except ValueError:
+        # Error if sheet is missing
+        print(f"[ERROR] Worksheet '{protocol_worksheet}' not found in file.")
+        return None
+
+    file_name = os.path.basename(file_path)
+    df_transfection = extract_transfection_scheme(protocol_sheet)
+    ligand_conc = extract_ligand_table(protocol_sheet)
+
+    protocol_info = ProtocolData(file_name=file_name,
+                                 transfection_scheme=df_transfection,
+                                 ligand_conc=ligand_conc)
+
+    # TODO: add aspects to collect (date, title, cell lines ...)
+
+    # Date of measurement
+
+    # N
+    # Experiment title
+    # Cell line layout
+
+    return protocol_info
+
+# TODO: move extract_metadata() outside of app!
+
 
 # --- Dataclass Definition --- #
 
@@ -207,44 +246,6 @@ class NCollectorApp:
             print(f"[ERROR] Worksheet '{metadata_worksheet}' not found in file.")
             return None
 
-    def extract_protocol_info(self, file_path):
-        """
-        Reads the 'Protocol' sheet of the protocol file and extracts all needed information.
-        Stores and returns ProtocolData class with all info.
-
-        calls
-            extract_transfection_scheme
-            extract_ligand_table
-        """
-        protocol_worksheet = "Protocol"
-
-        try:
-            protocol_sheet = pd.read_excel(file_path,
-                                    sheet_name=protocol_worksheet,
-                                    header=None)
-        except ValueError:
-            # Error if sheet is missing
-            print(f"[ERROR] Worksheet '{protocol_worksheet}' not found in file.")
-            return None
-
-        file_name = os.path.basename(file_path)
-        df_transfection = extract_transfection_scheme(protocol_sheet)
-        ligand_conc = extract_ligand_table(protocol_sheet)
-
-        protocol_info = ProtocolData(file_name=file_name,
-                                     transfection_scheme=df_transfection,
-                                     ligand_conc=ligand_conc)
-
-        # TODO: add aspects to collect (date, title, cell lines ...)
-
-            # Define end of transfection scheme (first row with NA in first col)
-            is_dna_na = df_transfection['DNA'].isna()
-
-            if is_dna_na.any():
-                # Find the positional index of the first NA value
-                first_na_position = is_dna_na.values.argmax()
-
-        return protocol_info
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
