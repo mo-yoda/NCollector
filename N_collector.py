@@ -7,54 +7,70 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 # --- Tool Functions --- #
+def slice_table(
+        df: pd.DataFrame,
+        col_to_search: int,
+        row_marker: str,
+        col_end_marker: str
+):
+    """
+    Extracts a table within a df without headers. Looks for row_marker in a specified column (col_to_search)
+    to find the header line of the table and the col_end_marker (first col outside of table) within this header line.
+    Returns pandas dataframe with header.
+    """
+
+    # Find the row index of the marker
+    contains_marker = df.iloc[:, col_to_search].astype(str).str.contains(row_marker, na=False) # True vs False
+    if not contains_marker.any():
+        # The row_marker was not found
+        print(f"   [ERROR] {row_marker} was not found in protocol.")
+        return None
+    # idxmax() gets first occurrence of largest value (True 1, False 0)
+    header_row_idx = contains_marker.idxmax()
+
+    # Look for col cutoff in header row
+    header_row_content = df.iloc[header_row_idx].astype(str)
+
+    # Find the first column index that contains col end marker
+    # Note: list comprehension is safer than .idxmax() on a row
+    col_end_match = [i for i, val in enumerate(header_row_content) if col_end_marker in val]
+
+    if not col_end_match:
+        print(f"   [ERROR] Column '{col_end_marker}' not found. No end of table found.")
+        return None
+    else:
+        col_cutoff = col_end_match[0]
+
+    # Extract the table from large df
+    df_extract = df.iloc[header_row_idx + 1:, :col_cutoff].reset_index(drop=True)
+    df_extract.columns = df.iloc[header_row_idx, :col_cutoff].values  # Set header
+
+    # Define row end of transfection scheme (first row with NA in first col)
+    is_col1_na = df_extract.iloc[:,0].isna()
+
+    if is_col1_na.any():
+        # Find the positional index of the first NA value
+        first_na_position = is_col1_na.values.argmax()
+        # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
+        df_extract = df_extract.iloc[:first_na_position]
+    else:
+        # If no NA is found
+        print("   [WARNING] Expected table end delimiter (NaN in first column) not found; using full table.")
+        return None
+
+    print(df_extract)
+    return df_extract
+
 def extract_transfection_scheme(df):
     """
     Uses the pd imported 'Protocol' sheet and finds the transfection table by identifying
     'Transfection scheme:'. Returns a pandas dataframe of the transfection scheme.
     """
     # Marker to find transfection table
-    row_marker = "Transfection scheme:"
+    row_marker = "DNA"
     col_end_marker = "vol per transfection"
 
-    # Find the row index of the marker; idxmax() gets first occurrence of the largest value (True as 1 and False as 0)
-    contains_marker = df.iloc[:, 0].astype(str).str.contains(row_marker, na=False)
-
-    if not contains_marker.any():
-        # The row_marker was not found
-        print(f"   [ERROR] Transfection table not found in the Protocol sheet by looking for {row_marker}.")
-        return None
-    row_match = contains_marker.idxmax()
-
-    # Table starts 3 rows after the marker;
-    header_row_idx = row_match + 3
-    # Look for col cutoff in header row
-    header_row_content = df.iloc[header_row_idx].astype(str).str.lower()
-    # Find the first column index that contains col end marker
-    # Note: list comprehension is safer than .idxmax() on a row
-    col_end_match = [i for i, val in enumerate(header_row_content) if col_end_marker in val]
-
-    if not col_end_match:
-        print(f"   [ERROR] Column '{col_end_marker}' not found. No end of transfection table found.")
-        return None
-    else:
-        col_cutoff = col_end_match[0]
-
-    # Get the transfection table from entire sheet
-    df_transfection = df.iloc[header_row_idx + 1:, :col_cutoff].reset_index(drop=True)
-    df_transfection.columns = df.iloc[header_row_idx, :col_cutoff].values # Set header
-
-    # Define end of transfection scheme (first row with NA in first col)
-    is_dna_na = df_transfection['DNA'].isna()
-    if is_dna_na.any():
-        # Find the positional index of the first NA value
-        first_na_position = is_dna_na.values.argmax()
-
-        # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
-        df_transfection = df_transfection.iloc[:first_na_position]
-    else:
-        # If no NA is found, raise an error as the detection of the table end has failed
-        print("   [ERROR] Expected table end delimiter (NaN in 'DNA' column) not found.")
-        return None
+    df_transfection = slice_table(df, 0, row_marker, col_end_marker)
 
     # Validate expected columns are present (DNA, DB#, Conc)
     required_cols = ['DNA', 'DB#', 'Conc (ng/uL)']
