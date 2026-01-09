@@ -10,17 +10,17 @@ from typing import List, Optional
 def slice_table(
         df: pd.DataFrame,
         col_to_search: int,
-        row_marker: str,
-        col_end_marker: str
+        row_marker: str
 ):
     """
-    Extracts a table within a df without headers. Looks for row_marker in a specified column (col_to_search)
-    to find the header line of the table and the col_end_marker (first col outside of table) within this header line.
-    Returns pandas dataframe with header.
+    Extracts a table within a df without headers. Looks for row_marker in a specified column (col_to_search) to find
+    the header line of the table. End of table is defined by first empty cell in header line and the first empty row
+    in the first col of this table. Returns pandas dataframe with header.
     """
-
     # Find the row index of the marker
-    contains_marker = df.iloc[:, col_to_search].astype(str).str.contains(row_marker, na=False) # True vs False
+    contains_marker = df.iloc[:, col_to_search].astype(str).str.contains(row_marker, na=False, regex=False)
+    # Above returns True, False col; regex for handling row_markers containing ()
+
     if not contains_marker.any():
         # The row_marker was not found
         print(f"   [ERROR] {row_marker} was not found in protocol.")
@@ -29,21 +29,21 @@ def slice_table(
     header_row_idx = contains_marker.idxmax()
 
     # Look for col cutoff in header row
-    header_row_content = df.iloc[header_row_idx].astype(str)
+    header_row_content = df.iloc[header_row_idx, col_to_search:].astype(str)
 
     # Find the first column index that contains col end marker
     # Note: list comprehension is safer than .idxmax() on a row
     col_end_match = [i for i, val in enumerate(header_row_content) if col_end_marker in val]
+    # Find the first index where the cell is 'nan' or empty; width of table is defined by header content
+    col_width = next((i for i, val in enumerate(header_row_content)
+                       if val.lower() == "nan" or not val.strip()), len(header_row_content))
 
-    if not col_end_match:
-        print(f"   [ERROR] Column '{col_end_marker}' not found. No end of table found.")
-        return None
-    else:
-        col_cutoff = col_end_match[0]
+    # Calculate the absolute end column
+    col_end = col_to_search + col_width
 
     # Extract the table from large df
-    df_extract = df.iloc[header_row_idx + 1:, :col_cutoff].reset_index(drop=True)
-    df_extract.columns = df.iloc[header_row_idx, :col_cutoff].values  # Set header
+    df_extract = df.iloc[header_row_idx + 1:, col_to_search:col_end].reset_index(drop=True)
+    df_extract.columns = df.iloc[header_row_idx, col_to_search:col_end].values  # Set header
 
     # Define row end of transfection scheme (first row with NA in first col)
     is_col1_na = df_extract.iloc[:,0].isna()
@@ -55,30 +55,40 @@ def slice_table(
         df_extract = df_extract.iloc[:first_na_position]
     else:
         # If no NA is found
-        print("   [WARNING] Expected table end delimiter (NaN in first column) not found; using full table.")
+        print("   [WARNING] Expected table row end delimiter (NaN in first column) not found; using full table.")
         return None
 
-    print(df_extract)
     return df_extract
 
 def extract_transfection_scheme(df):
     """
     Uses the pd imported 'Protocol' sheet and finds the transfection table by identifying
-    'Transfection scheme:'. Returns a pandas dataframe of the transfection scheme.
+    'DNA' in first column. Returns a pandas dataframe of the transfection scheme.
     """
     # Marker to find transfection table
     row_marker = "DNA"
-    col_end_marker = "vol per transfection"
-
-    df_transfection = slice_table(df, 0, row_marker, col_end_marker)
+    df_transfection = slice_table(df, 0, row_marker)
+    # Remove not needed cols
+    df_transfection_cleaned = df_transfection.drop(columns=["vol per transfection", "vol master"])
 
     # Validate expected columns are present (DNA, DB#, Conc)
     required_cols = ['DNA', 'DB#', 'Conc (ng/uL)']
-    if not all(col in df_transfection.columns for col in required_cols):
+    if not all(col in df_transfection_cleaned.columns for col in required_cols):
         print(f"   [ERROR] Transfection table missing expected columns: {required_cols}.")
         return None
 
-    return df_transfection
+    return df_transfection_cleaned
+
+def extract_ligand_table(df):
+    """
+    Uses the pd imported 'Protocol' sheet and finds the ligand dilution table by identifying
+    'dilution (1:)' in third column. Returns a pandas dataframe of the ligand dilution table.
+    """
+    # Marker to find ligand table
+    row_marker = "final concentration in well (log(M))"
+    df_ligand = slice_table(df, 10, row_marker)
+
+    return df_ligand
 
 # TODO: move extract_metadata() and extract_protocol_info() outside of app!
 
@@ -98,6 +108,7 @@ class ProtocolData:
     """Information from a protocol file"""
     file_name: str
     transfection_scheme: pd.DataFrame
+    ligand_conc: pd.DataFrame
 
     # add loads HERE-----------
 
@@ -194,7 +205,8 @@ class NCollectorApp:
         Stores and returns ProtocolData class with all info.
 
         calls
-            extract_transfection_scheme()
+            extract_transfection_scheme
+            extract_ligand_table
         """
         protocol_worksheet = "Protocol"
 
@@ -207,20 +219,15 @@ class NCollectorApp:
             print(f"[ERROR] Worksheet '{protocol_worksheet}' not found in file.")
             return None
 
-        # Transfection df
+        file_name = os.path.basename(file_path)
         df_transfection = extract_transfection_scheme(protocol_sheet)
+        ligand_conc = extract_ligand_table(protocol_sheet)
 
-        # TODO: add apects to collect (date, title, cell lines ...)
+        protocol_info = ProtocolData(file_name=file_name,
+                                     transfection_scheme=df_transfection,
+                                     ligand_conc=ligand_conc)
 
-        # Load transfection scheme table
-        try:
-            df_transfection = pd.read_excel(file_path,
-                                            sheet_name=protocol_worksheet,
-                                            header=header_row)
-
-            # Define end if transfection scheme table cols (first col header starting with "Unnamed")
-            cols_to_keep = [col for col in df_transfection.columns if not str(col).startswith('Unnamed')]
-            df_transfection = df_transfection[cols_to_keep]
+        # TODO: add aspects to collect (date, title, cell lines ...)
 
             # Define end of transfection scheme (first row with NA in first col)
             is_dna_na = df_transfection['DNA'].isna()
@@ -229,20 +236,7 @@ class NCollectorApp:
                 # Find the positional index of the first NA value
                 first_na_position = is_dna_na.values.argmax()
 
-                # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
-                df_transfection = df_transfection.iloc[:first_na_position]
-            else:
-                # If no NA is found, raise an error as the detection of the table end has failed
-                print("   [ERROR] Expected table end delimiter (NaN in 'DNA' column) not found.")
-                return None
-
-            # Validate expected columns are present (DNA, DB#, Conc)
-            required_cols = ['DNA', 'DB#', 'Conc (ng/uL)']
-            if not all(col in df_transfection.columns for col in required_cols):
-                print(f"   [ERROR] Transfection table missing expected columns: {required_cols}.")
-                return None
-
-        return df_transfection
+        return protocol_info
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
@@ -315,13 +309,11 @@ class NCollectorApp:
                     if "Protocol" in sheet_names:
                         # --- TODO: date validation with folder date - only if this matches, store info
 
-                        # Get protocol_info (------ for now only transfection_df in function)
-                        transfection_df = self.extract_protocol_info(file_path)
+                        protocol_info = self.extract_protocol_info(file_path)
 
-                        if transfection_df is not None:
-                            folder_data.protocol = ProtocolData(file_name=file_name,
-                                                                transfection_scheme=transfection_df)
-                        print(f"   [PROTOCOL] Imported: {file_name}")
+                        if protocol_info is not None:
+                            folder_data.protocol = protocol_info
+                            print(f"   [PROTOCOL] Imported: {file_name}")
                         is_imported = True
 
                     # Identify Analysis File
