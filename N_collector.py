@@ -6,6 +6,36 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+# --- Dataclass Definition --- #
+
+@dataclass
+class PRresult:
+    """ Information from a single _analysis file """
+    file_name: str
+    measurement_date: str
+    cell_line: str # ID2
+    transfection: str # ID3
+    raw_bret_ratio_df: pd.DataFrame
+
+@dataclass
+class ProtocolData:
+    """Information from a protocol file"""
+    file_name: str
+    transfection_scheme: pd.DataFrame
+    ligand_conc: pd.DataFrame
+
+    # add loads HERE-----------
+
+@dataclass
+class MeasurementFolder:
+    """A subfolder containing one protocol and multiple result files"""
+    folder_name: str
+    folder_path: str
+    measurement_date: str
+    protocol: Optional[ProtocolData] = None # MeasurementFolder is initiated before protocol data is loaded
+    results: List[PRresult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
+    skipped_files: List[str] = field(default_factory=list)
+
 # --- Tool Functions --- #
 def slice_table(
         df: pd.DataFrame,
@@ -137,37 +167,6 @@ def extract_protocol_info(file_path):
     return protocol_info
 
 # TODO: move extract_metadata() outside of app!
-
-
-# --- Dataclass Definition --- #
-
-@dataclass
-class PRresult:
-    """ Information from a single _analysis file """
-    file_name: str
-    measurement_date: str
-    cell_line: str # ID2
-    transfection: str # ID3
-    raw_bret_ratio_df: pd.DataFrame
-
-@dataclass
-class ProtocolData:
-    """Information from a protocol file"""
-    file_name: str
-    transfection_scheme: pd.DataFrame
-    ligand_conc: pd.DataFrame
-
-    # add loads HERE-----------
-
-@dataclass
-class MeasurementFolder:
-    """A subfolder containing one protocol and multiple result files"""
-    folder_name: str
-    folder_path: str
-    measurement_date: str
-    protocol: Optional[ProtocolData] = None # MeasurementFolder is initiated before protocol data is loaded
-    results: List[PRresult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
-    skipped_files: List[str] = field(default_factory=list)
 
 # --- Main Application --- #
 
