@@ -28,8 +28,9 @@ class ProtocolData:
     transfection_scheme: pd.DataFrame
     ligand: str
     ligand_conc: pd.DataFrame
-
-    # add loads HERE-----------
+    # Second ligand is optional
+    ligand_2: Optional[str] = None
+    ligand_conc_2: Optional[pd.DataFrame] = None
 
 @dataclass
 class MeasurementFolder:
@@ -72,18 +73,19 @@ def extract_value(
         df: pd.DataFrame,
         marker: str,
         col_offset: int = 1,
-        row_offset: int = 0
+        row_offset: int = 0,
+        match_index: int = 0
 ):
     """
     Finds a marker and returns the value of the cell at a relative position.
+    match_index: 0 for 1st occurrence, 1 for 2nd, etc.
     Default: Returns the value in the cell immediately to the right (col_offset=1).
     """
-
-    coords = get_location(df, marker)
-    if coords is None:
+    coord = get_location(df, marker, match_index)
+    if coord is None:
         return None
 
-    row_idx, col_idx = coords
+    row_idx, col_idx = coord
 
     # Calculate target coordinates
     target_row = row_idx + row_offset
@@ -169,16 +171,31 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
     file_name = os.path.basename(xls_obj.io)
     exp_date = extract_value(protocol_sheet, "date of measurement")
     exp_n = extract_value(protocol_sheet, "n =")
+
     selected_cell_lines = slice_table(protocol_sheet,"Cell line",1)
-    # Transform the selected cell lines into a list
-    used_cell_lines = selected_cell_lines.iloc[:, 0].dropna().tolist()
+    if selected_cell_lines is not None:
+        # Transform the selected cell lines into a list
+        used_cell_lines = selected_cell_lines.iloc[:, 0].dropna().tolist()
+    else:
+        used_cell_lines = []
 
     cell_line_layout = extract_value(protocol_sheet,"Cell line layout", col_offset= 0, row_offset= 1)
-    df_transfection = slice_table(protocol_sheet, "DNA").drop(columns=["vol per transfection", "vol master"])
 
-    ligand = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1)
-    ligand_conc = slice_table(protocol_sheet, "final concentration in well (log(M))")
-    # TODO: implement handling of two ligands in one protocol
+    df_transfection = slice_table(protocol_sheet, "DNA")
+    if df_transfection is not None:
+        df_transfection = df_transfection.drop(columns=["vol per transfection", "vol master"])
+
+    ligand_1 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1)
+    ligand_1_conc = slice_table(protocol_sheet, "final concentration in well (log(M))")
+
+    # Check whether second ligand was selected
+    check_ligand_2 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1, match_index=1)
+    if check_ligand_2 is not None and str(check_ligand_2).strip().lower() not in ["nan", ""]:
+        ligand_2 = check_ligand_2
+        ligand_conc_2 = slice_table(protocol_sheet, "final concentration in well (log(M))", match_index=1)
+    else:
+        ligand_2 = None
+        ligand_conc_2 = None
 
     protocol_info = ProtocolData(file_name=file_name,
                                  exp_date = exp_date,
@@ -186,10 +203,12 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
                                  cell_lines = used_cell_lines,
                                  line_layout = cell_line_layout,
                                  transfection_scheme=df_transfection,
-                                 ligand = ligand,
-                                 ligand_conc=ligand_conc)
+                                 ligand = ligand_1,
+                                 ligand_conc=ligand_1_conc,
+                                 ligand_2 = ligand_2,
+                                 ligand_conc_2= ligand_conc_2)
 
-    # TODO: add aspects to collect (date, title, cell lines ...)
+    print(protocol_info)
 
     return protocol_info
 
