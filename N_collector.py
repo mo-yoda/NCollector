@@ -21,7 +21,12 @@ class PRresult:
 class ProtocolData:
     """Information from a protocol file"""
     file_name: str
+    exp_date: datetime
+    n: int
+    cell_lines: List[str]
+    line_layout: str
     transfection_scheme: pd.DataFrame
+    ligand: str
     ligand_conc: pd.DataFrame
 
     # add loads HERE-----------
@@ -38,51 +43,92 @@ class MeasurementFolder:
 
 # --- Tool Functions --- #
 
-def slice_table(
-        df: pd.DataFrame,
-        col_to_search: int,
-        row_marker: str,
-        second_table: bool = False
-):
+def get_location(df: pd.DataFrame, marker: str, match_index: int = 0):
     """
-    Extracts a table within a df without headers. Looks for row_marker in a specified column (col_to_search) to find
-    the header line of the table. End of table is defined by first empty cell in header line and the first empty row
-    in the first col of this table. Returns pandas dataframe with header.
-    second_table: If True, looks for the 2nd occurrence of row_marker.
-                  If False (default), uses the 1st occurrence.
+    Finds exact coordinates (row_idx, col_idx) of a text marker in the DataFrame.
+    match_index: 0 for 1st occurrence, 1 for 2nd, etc.
     """
-    # Find the row index of the marker (can be multiple);
-    # returns True, False col; regex for handling row_markers containing ()
-    contains_marker = df.iloc[:, col_to_search].astype(str).str.contains(row_marker, na=False, regex=False)
-    marker_indices = contains_marker.index[contains_marker].tolist()
+    # Create a boolean mask of the whole sheet to search the entire sheet
+    # .stack() turns the 2D grid into a 1D Series with double index (row, col)
+    mask = df.astype(str).apply(lambda x: x.str.contains(marker, na=False, regex=False))
 
-    if not marker_indices:
-        # The row_marker was not found
-        print(f"   [ERROR] {row_marker} was not found in protocol.")
+    # Extract coordinates of all True values, again using .stack()
+    all_matches = mask.stack()[mask.stack()].index.tolist()
+
+    if not all_matches:
+        print(f"   [ERROR] Marker '{marker}' not found in sheet.")
         return None
 
-    # Specify to look for first or second occurrence (needed for ligand tables)
-    if second_table:
-        if len(marker_indices) <2:
-            print(f"   [ERROR] Second occurrence of {row_marker} requested, but only one found.")
-            return None
-        header_row_idx = marker_indices[1]  # Second occurrence
-    else:
-        header_row_idx = marker_indices[0]  # First occurrence
+    # Check if the requested occurrence exists
+    if match_index >= len(all_matches):
+        print(
+            f"   [ERROR] Requested occurrence #{match_index + 1} of '{marker}' not found. Only {len(all_matches)} found.")
+        return None
 
-    # Look for col cutoff in header row
-    header_row_content = df.iloc[header_row_idx, col_to_search:].astype(str)
+    # Return the specific (row, col) tuple
+    return all_matches[match_index]
+
+def extract_value(
+        df: pd.DataFrame,
+        marker: str,
+        col_offset: int = 1,
+        row_offset: int = 0
+):
+    """
+    Finds a marker and returns the value of the cell at a relative position.
+    Default: Returns the value in the cell immediately to the right (col_offset=1).
+    """
+
+    coords = get_location(df, marker)
+    if coords is None:
+        return None
+
+    row_idx, col_idx = coords
+
+    # Calculate target coordinates
+    target_row = row_idx + row_offset
+    target_col = col_idx + col_offset
+
+    # Safety check for bounds of sheet
+    if target_row >= df.shape[0] or target_col >= df.shape[1]:
+        print(f"   [ERROR] Target for '{marker}' is outside the sheet boundaries.")
+        return None
+
+    # .iloc uses [row, col]
+    value = df.iloc[target_row, target_col]
+
+    return value
+
+
+def slice_table(
+        df: pd.DataFrame,
+        row_marker: str,
+        match_index: int = 0
+):
+    """
+    Extracts a table starting at the location of row_marker. Returns pandas dataframe with header.
+    """
+    # Get marker coordinates
+    start_coords = get_location(df, row_marker, match_index)
+
+    if start_coords is None:
+        return None
+
+    header_row_idx, col_start_idx = start_coords
+
+    # Look for col cutoff (table width) in header row
+    header_row_content = df.iloc[header_row_idx, col_start_idx:].astype(str)
 
     # Find the first index where the cell is 'nan' or empty; width of table is defined by header content
     col_width = next((i for i, val in enumerate(header_row_content)
                        if val.lower() == "nan" or not val.strip()), len(header_row_content))
 
     # Calculate the absolute end column
-    col_end = col_to_search + col_width
+    col_end_idx = col_start_idx + col_width
 
     # Extract the table from large df
-    df_extract = df.iloc[header_row_idx + 1:, col_to_search:col_end].reset_index(drop=True)
-    df_extract.columns = df.iloc[header_row_idx, col_to_search:col_end].values  # Set header
+    df_extract = df.iloc[header_row_idx + 1:, col_start_idx:col_end_idx].reset_index(drop=True)
+    df_extract.columns = df.iloc[header_row_idx, col_start_idx:col_end_idx].values  # Set header
 
     # Define row end of transfection scheme (first row with NA in first col)
     is_col1_na = df_extract.iloc[:,0].isna()
@@ -98,36 +144,6 @@ def slice_table(
         return None
 
     return df_extract
-
-def extract_transfection_scheme(df):
-    """
-    Uses the pd imported 'Protocol' sheet and finds the transfection table by identifying
-    'DNA' in first column. Returns a pandas dataframe of the transfection scheme.
-    """
-    # Marker to find transfection table
-    row_marker = "DNA"
-    df_transfection = slice_table(df, 0, row_marker)
-    # Remove not needed cols
-    df_transfection_cleaned = df_transfection.drop(columns=["vol per transfection", "vol master"])
-
-    # Validate expected columns are present (DNA, DB#, Conc)
-    required_cols = ['DNA', 'DB#', 'Conc (ng/uL)']
-    if not all(col in df_transfection_cleaned.columns for col in required_cols):
-        print(f"   [ERROR] Transfection table missing expected columns: {required_cols}.")
-        return None
-
-    return df_transfection_cleaned
-
-def extract_ligand_table(df):
-    """
-    Uses the pd imported 'Protocol' sheet and finds the ligand dilution table by identifying
-    'dilution (1:)' in third column. Returns a pandas dataframe of the ligand dilution table.
-    """
-    # Marker to find ligand table
-    row_marker = "final concentration in well (log(M))"
-    df_ligand = slice_table(df, 10, row_marker)
-
-    return df_ligand
 
 def extract_protocol_info(xls_obj: pd.ExcelFile):
     """
@@ -151,20 +167,29 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
         return None
 
     file_name = os.path.basename(xls_obj.io)
-    df_transfection = extract_transfection_scheme(protocol_sheet)
-    ligand_conc = extract_ligand_table(protocol_sheet)
+    exp_date = extract_value(protocol_sheet, "date of measurement")
+    exp_n = extract_value(protocol_sheet, "n =")
+    selected_cell_lines = slice_table(protocol_sheet,"Cell line",1)
+    # Transform the selected cell lines into a list
+    used_cell_lines = selected_cell_lines.iloc[:, 0].dropna().tolist()
+
+    cell_line_layout = extract_value(protocol_sheet,"Cell line layout", col_offset= 0, row_offset= 1)
+    df_transfection = slice_table(protocol_sheet, "DNA").drop(columns=["vol per transfection", "vol master"])
+
+    ligand = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1)
+    ligand_conc = slice_table(protocol_sheet, "final concentration in well (log(M))")
+    # TODO: implement handling of two ligands in one protocol
 
     protocol_info = ProtocolData(file_name=file_name,
+                                 exp_date = exp_date,
+                                 n = exp_n,
+                                 cell_lines = used_cell_lines,
+                                 line_layout = cell_line_layout,
                                  transfection_scheme=df_transfection,
+                                 ligand = ligand,
                                  ligand_conc=ligand_conc)
 
     # TODO: add aspects to collect (date, title, cell lines ...)
-
-    # Date of measurement
-
-    # N
-    # Experiment title
-    # Cell line layout
 
     return protocol_info
 
@@ -221,7 +246,7 @@ def extract_bret_data(xls_obj):
                                 header=None
                                 )
         row_marker = "Time (min)"
-        df_bret = slice_table(bret_sheet, 1, row_marker)
+        df_bret = slice_table(bret_sheet, row_marker)
 
         exclude_rows = ["Baseline", "late averg"]
         df_bret = df_bret[~df_bret["Time (min)"].astype(str).isin(exclude_rows)]
