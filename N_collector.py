@@ -2,7 +2,7 @@ import os
 import tkinter as tk
 from tkinter import filedialog
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -12,7 +12,7 @@ from typing import List, Optional
 class PRresult:
     """ Information from a single _analysis file """
     file_name: str
-    measurement_date: str
+    measurement_date: date
     cell_line: str # ID2
     transfection: str # ID3
     raw_bret_ratio_df: pd.DataFrame
@@ -21,7 +21,7 @@ class PRresult:
 class ProtocolData:
     """Information from a protocol file"""
     file_name: str
-    exp_date: datetime
+    exp_date: date
     n: int
     cell_lines: List[str]
     line_layout: str
@@ -37,7 +37,7 @@ class MeasurementFolder:
     """A subfolder containing one protocol and multiple result files"""
     folder_name: str
     folder_path: str
-    measurement_date: str
+    measurement_date: date
     protocol: Optional[ProtocolData] = None # MeasurementFolder is initiated before protocol data is loaded
     results: List[PRresult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
     skipped_files: List[str] = field(default_factory=list)
@@ -169,7 +169,16 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
         return None
 
     file_name = os.path.basename(xls_obj.io)
-    exp_date = extract_value(protocol_sheet, "date of measurement")
+
+    exp_date = None
+    date_str = extract_value(protocol_sheet, "date of measurement")
+    # Transform date str in real
+    if date_str is not None:
+        try:
+            exp_date = datetime.strptime(date_str.strip(), '%d.%m.%y').date()
+        except ValueError:
+            print(f"   [WARNING] Protocol date '{date_str}' not in DD.MM.YY format.")
+
     exp_n = extract_value(protocol_sheet, "n =")
 
     selected_cell_lines = slice_table(protocol_sheet,"Cell line",1)
@@ -243,6 +252,15 @@ def extract_metadata(xls_obj):
             matches = col[col.str.contains(label, na=False)].str.split(":", n=1).str[-1].str.strip().tolist()
             if matches:
                 metadata[key] = matches[0]
+
+        # Transform date str to actual date
+        if 'measurement_date' in metadata:
+            try:
+                date_str = metadata["measurement_date"]
+                metadata["measurement_date"] = datetime.strptime(date_str.strip(), '%d/%m/%Y').date()
+            except ValueError:
+                print(f"   [WARNING] Analysis date '{date_str}' not in DD/MM/YYYY format.")
+                return None  # Fail extraction if date is invalid
 
         # Ensure all required metadata fields were found
         if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
@@ -387,10 +405,17 @@ class NCollectorApp:
             print(f"\n--- Processing Folder: {folder_name} ---")
 
             # Use date in folder name for validation
-            folder_date = folder_name.split("_")[0]
+            try:
+                # Transform date str to date obj (YYMMDD)
+                folder_date_obj = datetime.strptime(folder_name.split("_")[0], '%y%m%d').date()
+            except ValueError:
+                print(f"   [ERROR] Folder '{folder_name}' invalid date format. Expected YYMMDD. Skipping.")
+                continue
 
             # Create MeasurementFolder object to collect protocol and results
-            folder_data = MeasurementFolder(folder_name=folder_name, folder_path=folder_path, measurement_date=folder_date)
+            folder_data = MeasurementFolder(folder_name=folder_name,
+                                            folder_path=folder_path,
+                                            measurement_date=folder_date_obj)
 
             files_in_folder = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsm'))]
             for file_name in files_in_folder:
@@ -405,28 +430,25 @@ class NCollectorApp:
 
                     # Identify Protocol File
                     if "Protocol" in sheet_names:
-                        # --- TODO: date validation with folder date - only if this matches, store info
-
                         protocol_info = extract_protocol_info(xls)
 
-                        if protocol_info is not None:
+                        if protocol_info and protocol_info.exp_date == folder_date_obj:
                             folder_data.protocol = protocol_info
                             print(f"   [PROTOCOL] Imported: {file_name}")
-                        is_imported = True
+                            is_imported = True
+                        elif protocol_info:
+                            print(f"   [MISMATCH] Protocol {protocol_info.exp_date} != Folder {folder_date_obj}")
 
                     # Identify Analysis File
                     elif "Analysis" in sheet_names:
                         meas_data = extract_measurement_data(xls)
 
-                        # Date validation with folder_date
-                        # Convert folder date format to analysis sheet format
-                        folder_date_formated = datetime.strptime(folder_date, '%y%m%d').strftime('%d/%m/%Y')
-                        if  meas_data.measurement_date == folder_date_formated:
+                        if meas_data and meas_data.measurement_date == folder_date_obj:
                             folder_data.results.append(meas_data)
-                            is_imported = True
                             print(f"   [RESULT] Imported: {file_name} (ID2: {meas_data.cell_line}, ID3: {meas_data.transfection})")
+                            is_imported = True
                         else:
-                            print(f"   [DATE MISMATCH ERROR] in file {file_name}: Sheet Date {meas_data.measurement_date} != Folder Date {folder_date_formated}")
+                            print(f"   [MISMATCH] Analysis {meas_data.measurement_date} != Folder {folder_date_obj}")
 
                     # Files not matching criteria are skipped
                     if not is_imported:
