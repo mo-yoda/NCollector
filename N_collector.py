@@ -255,8 +255,8 @@ def extract_metadata(xls_obj):
 
         # Transform date str to actual date
         if 'measurement_date' in metadata:
+            date_str = metadata["measurement_date"]
             try:
-                date_str = metadata["measurement_date"]
                 metadata["measurement_date"] = datetime.strptime(date_str.strip(), '%d/%m/%Y').date()
             except ValueError:
                 print(f"   [WARNING] Analysis date '{date_str}' not in DD/MM/YYYY format.")
