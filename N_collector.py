@@ -9,7 +9,7 @@ from typing import List, Optional
 # --- Dataclass Definition --- #
 
 @dataclass
-class PRresult:
+class PrResult:
     """ Information from a single _analysis file """
     file_name: str
     measurement_date: date
@@ -39,7 +39,7 @@ class MeasurementFolder:
     folder_path: str
     measurement_date: date
     protocol: Optional[ProtocolData] = None # MeasurementFolder is initiated before protocol data is loaded
-    results: List[PRresult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
+    results: List[PrResult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
     skipped_files: List[str] = field(default_factory=list)
 
 # --- Tool Functions --- #
@@ -152,10 +152,6 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
     Uses already opened pd.ExcelFiles (faster and more flexible than reading from path).
     Reads the 'Protocol' sheet of the protocol file and extracts all needed information.
     Stores and returns ProtocolData class with all info.
-
-    calls
-        extract_transfection_scheme
-        extract_ligand_table
     """
     protocol_worksheet = "Protocol"
 
@@ -282,8 +278,7 @@ def extract_bret_data(xls_obj):
                                 sheet_name=analysis_worksheet,
                                 header=None
                                 )
-        row_marker = "Time (min)"
-        df_bret = slice_table(bret_sheet, row_marker)
+        df_bret = slice_table(bret_sheet, "Time (min)")
 
         exclude_rows = ["Baseline", "late averg"]
         df_bret = df_bret[~df_bret["Time (min)"].astype(str).isin(exclude_rows)]
@@ -299,18 +294,14 @@ def extract_bret_data(xls_obj):
 def extract_measurement_data(xls_obj):
     """
     Gets metadata and BRET ratio from analysis files.
-    Stores and returns PRresult class with all data.
-
-    calls
-        extract_metadata
-        extract_bret_data
+    Stores and returns PrResult class with all data.
     """
 
     file_name = os.path.basename(xls_obj.io)
     metadata_dic = extract_metadata(xls_obj)
     bret_ratio_df = extract_bret_data(xls_obj)
 
-    result_obj = PRresult(
+    result_obj = PrResult(
         file_name=file_name,
         measurement_date=metadata_dic['measurement_date'],
         cell_line=metadata_dic['cell_line'],
@@ -386,9 +377,10 @@ class NCollectorApp:
                 print(f"No .xlsx or .xlsm files found starting from: {directory}")
 
     def collect_files(self):
-        """EDIT: Reads sheet names of all xlsx and xlsm files to identify and separate protocol and
-        result analysis files. Only these identified files are read. Validation of correct protocol to 
-        analysis files is done via date of measurement."""
+        """
+        Reads sheet names of all xlsx and xlsm files to identify and separate protocol and result analysis files.
+        Validation of correct protocol to analysis files is done via date of measurement in the folder name.
+        """
 
         if not self.subfolder_paths_with_files:
             print("No folders to analyze.")
