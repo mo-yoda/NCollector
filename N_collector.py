@@ -4,7 +4,6 @@ from tkinter import filedialog
 import pandas as pd
 from datetime import datetime, date
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 # --- Dataclass Definition --- #
 
@@ -23,14 +22,14 @@ class ProtocolData:
     file_name: str
     exp_date: date
     n: int
-    cell_lines: List[str]
+    cell_lines: list[str]
     line_layout: str
     transfection_scheme: pd.DataFrame
     ligand: str
     ligand_conc: pd.DataFrame
-    # Second ligand is optional
-    ligand_2: Optional[str] = None
-    ligand_conc_2: Optional[pd.DataFrame] = None
+    # Second ligand is optional; by | None = None
+    ligand_2: str | None = None
+    ligand_conc_2: pd.DataFrame | None = None
 
 @dataclass
 class MeasurementFolder:
@@ -38,9 +37,9 @@ class MeasurementFolder:
     folder_name: str
     folder_path: str
     measurement_date: date
-    protocol: Optional[ProtocolData] = None # MeasurementFolder is initiated before protocol data is loaded
-    results: List[PrResult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
-    skipped_files: List[str] = field(default_factory=list)
+    protocol: ProtocolData | None = None # MeasurementFolder is initiated before protocol data is loaded
+    results: list[PrResult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
+    skipped_files: list[str] = field(default_factory=list)
 
 # --- Tool Functions --- #
 
@@ -321,7 +320,7 @@ class NCollectorApp:
         self.folder_path = tk.StringVar()
         self.folder_path.set("No folder selected.")
         self.subfolder_paths_with_files = []
-        self.experiment: List[MeasurementFolder] = []
+        self.experiment: list[MeasurementFolder] = []
 
         # Display label for path
         self.path_label = tk.Label(main_window,
