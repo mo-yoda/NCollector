@@ -25,6 +25,8 @@ class ProtocolData:
     cell_lines: list[str]
     line_layout: str
     transfection_scheme: pd.DataFrame
+    bret_pair: list[str]
+    transfection_conditions: dict[str, list[str]]
     ligand: str
     ligand_conc: pd.DataFrame
     # Second ligand is optional; by | None = None
@@ -146,6 +148,54 @@ def slice_table(
 
     return df_extract
 
+def process_transfection_scheme(df: pd.DataFrame):
+    """
+    Gets the BRET pair (returns as list) and the experimental conditions (returns as dic) from the transfection table.
+    """
+    if df is None or df.empty:
+        return [], {}
+
+    # Separate metadata cols from transfection cols
+    metadata_cols = {'DNA', 'DB#', 'Conc (ng/uL)', 'vol per transfection', 'vol master'}
+    transfection_cols = [c for c in df.columns if c not in metadata_cols]
+
+    if not transfection_cols:
+        return [], {}
+
+    # Remove row with empty DNA
+    ignored_dna = {"pcdna3.1"}
+    # Convert 'DNA' col to string -> strip whitespace -> lowercase -> check if matches ignored list
+    # The tilde (~) means "NOT in"
+    keep_mask = ~df['DNA'].astype(str).str.strip().str.lower().isin(ignored_dna)
+    # Apply filter
+    df = df[keep_mask].copy()
+
+    transfection_dic = {}
+    for col in transfection_cols:
+        # Force column to numeric (coercing errors to NaN but fill them as 0)
+        vals = pd.Series(pd.to_numeric(df[col], errors='coerce')).fillna(0)
+        active_rows = df[vals > 0]
+
+        # Get the DNA names for these rows
+        dna_set = set(active_rows['DNA'].dropna().astype(str).tolist())
+        transfection_dic[col] = dna_set
+
+    # Find DNA present in all transfection sets (BRET pair)
+    if transfection_dic:
+        bret_pair = set.intersection(*transfection_dic.values())
+        print(f"identified bret pair {bret_pair}")
+    else:
+        bret_pair = set()
+    # Find variable DNA (conditions)
+    variable_dic = {}
+    for col, dna_set in transfection_dic.items():
+        # Subtract the common BRET pair from the specific set
+        unique_dna = dna_set - bret_pair
+        variable_dic[col] = sorted(list(unique_dna))
+
+    print(f"identified conditions {variable_dic}")
+    return bret_pair, variable_dic
+
 def extract_protocol_info(xls_obj: pd.ExcelFile):
     """
     Uses already opened pd.ExcelFiles (faster and more flexible than reading from path).
@@ -186,8 +236,13 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
     cell_line_layout = extract_value(protocol_sheet,"Cell line layout", col_offset= 0, row_offset= 1)
 
     df_transfection = slice_table(protocol_sheet, "DNA")
+    bret_pair = []
+    transfection_conditions = {}
+
     if df_transfection is not None:
         df_transfection = df_transfection.drop(columns=["vol per transfection", "vol master"])
+
+        bret_pair, transfection_conditions = process_transfection_scheme(df_transfection)
 
     ligand_1 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1)
     ligand_1_conc = slice_table(protocol_sheet, "final concentration in well (log(M))")
@@ -207,13 +262,12 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
                                  cell_lines = used_cell_lines,
                                  line_layout = cell_line_layout,
                                  transfection_scheme=df_transfection,
+                                 bret_pair= bret_pair,
+                                 transfection_conditions=transfection_conditions,
                                  ligand = ligand_1,
                                  ligand_conc=ligand_1_conc,
                                  ligand_2 = ligand_2,
                                  ligand_conc_2= ligand_conc_2)
-
-    print(protocol_info)
-
     return protocol_info
 
 def extract_metadata(xls_obj):
