@@ -1,6 +1,6 @@
 import os
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 import pandas as pd
 from datetime import datetime, date
 from dataclasses import dataclass, field
@@ -394,14 +394,27 @@ class NCollectorApp:
         self.master = main_window
         main_window.title("N Collector")
 
+        # --- GUI State ---
         # Path to folder variable
-        self.folder_path = tk.StringVar()
-        self.folder_path.set("No folder selected.")
+        self.folder_path = tk.StringVar(value="No folder selected.")
         self.subfolder_paths_with_files = []
         self.experiment: list[MeasurementFolder] = []
 
+        # --- TABS SETUP ---
+        self.notebook = ttk.Notebook(main_window)
+        self.notebook.pack(expand=True, fill='both')
+
+        # Tab 1: Import Data
+        self.tab_import = tk.Frame(self.notebook)
+        self.notebook.add(self.tab_import, text="1. Import Data")
+
+        # Tab 2: Data Selection (TreeView)
+        self.tab_select = tk.Frame(self.notebook)
+        self.notebook.add(self.tab_select, text="2. Data Selection")
+
+        # --- TAB 1 CONTENT ---
         # Display label for path
-        self.path_label = tk.Label(main_window,
+        self.path_label = tk.Label(self.tab_import,
                                    textvariable=self.folder_path,
                                    wraplength=1000,
                                    justify="left",
@@ -409,13 +422,12 @@ class NCollectorApp:
         self.path_label.pack(pady=10, padx=10) # placing the text via .pack
 
         # Select Folder button
-        self.select_button = tk.Button(main_window,
-                                       text="Select folder containing results of experiment",
-                                       command=self.select_folder)
-        self.select_button.pack(pady=10, padx=10)
+        # No self. needed as this does not have to be stored for later changes
+        tk.Button(self.tab_import, text="Select folder containing results of experiment",
+                  command=self.select_folder).pack(pady=10, padx=10)
 
         # Analyse button
-        self.collect_button = tk.Button(main_window,
+        self.collect_button = tk.Button(self.tab_import,
                                         text="Load Files",
                                         state="disabled",
                                         command=self.collect_files
@@ -424,20 +436,19 @@ class NCollectorApp:
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
-            self.subfolder_paths_with_files = []  # Clear previous results
-
             directory = filedialog.askdirectory(title="Select a folder...")
-            if not directory: # User closed dialog without selecting a folder
-                self.folder_path.set(f"No folder selected.")
-                self.collect_button.config(state="disabled")
-                return
+            if not directory: return
+
+            # --- RESET STATE: Clear old data when a new folder is selected
+            self.subfolder_paths_with_files = []
+            self.experiment = []
+            # self.tree_map = {}
 
             # Search for xlsx or xlsm in directory tree
+            # --- Scan new directory ---
             for root, dirs, files in os.walk(directory):
-                has_xlsx = any(f.endswith((".xlsx", ".xlsm")) for f in files)
-
-                if has_xlsx: # save path if xlsx/xlsm files are found
-                    self.subfolder_paths_with_files.append(root)
+                if any(f.endswith((".xlsx", ".xlsm")) for f in files):
+                    self.subfolder_paths_with_files.append(root) # Save paths of files
 
             # Update GUI
             if self.subfolder_paths_with_files:
@@ -447,7 +458,7 @@ class NCollectorApp:
                 self.folder_path.set(
                     f"Selected Path: {directory}\n\n Found following subfolders with xlsx/xlsm files:\n {folder_names_string}")
                 self.collect_button.config(state="normal")
-                print(f"Found {count} folders: {folder_names_string}")
+                print(f"Found {count} folders: \n {folder_names_string}")
             else:
                 self.folder_path.set(f"Error: No .xlsx or .xlsm files found in {directory} or any subfolder.")
                 self.collect_button.config(state="disabled")
