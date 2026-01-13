@@ -178,7 +178,7 @@ def process_transfection_scheme(df: pd.DataFrame):
 
         # Get the DNA names for these rows
         dna_set = set(active_rows['DNA'].dropna().astype(str).tolist())
-        transfection_dic[col] = dna_set
+        transfection_dic[str(int(col))] = dna_set
 
     # Find DNA present in all transfection sets (BRET pair)
     if transfection_dic:
@@ -186,6 +186,8 @@ def process_transfection_scheme(df: pd.DataFrame):
         print(f"identified bret pair {bret_pair}")
     else:
         bret_pair = set()
+    bret_pair = sorted(list(bret_pair))
+
     # Find variable DNA (conditions)
     variable_dic = {}
     for col, dna_set in transfection_dic.items():
@@ -240,7 +242,7 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
     transfection_conditions = {}
 
     if df_transfection is not None:
-        df_transfection = df_transfection.drop(columns=["vol per transfection", "vol master"])
+        df_transfection = df_transfection.drop(columns=["vol per transfection", "vol master"], errors = 'ignore')
 
         bret_pair, transfection_conditions = process_transfection_scheme(df_transfection)
 
