@@ -25,7 +25,7 @@ class ProtocolData:
     cell_lines: list[str]
     line_layout: str
     transfection_scheme: pd.DataFrame
-    bret_pair: list[str]
+    main_plasmids: list[str] # Plasdmids transfected in all conditions
     transfection_conditions: dict[str, list[str]]
     ligand: str
     ligand_conc: pd.DataFrame
@@ -184,19 +184,20 @@ def process_transfection_scheme(df: pd.DataFrame):
     if transfection_dic:
         bret_pair = set.intersection(*transfection_dic.values())
         print(f"identified bret pair {bret_pair}")
+        common_dna = set.intersection(*transfection_dic.values())
     else:
-        bret_pair = set()
-    bret_pair = sorted(list(bret_pair))
+        common_dna = set()
+    main_plasmids = sorted(list(common_dna))
 
     # Find variable DNA (conditions)
     variable_dic = {}
     for col, dna_set in transfection_dic.items():
         # Subtract the common BRET pair from the specific set
-        unique_dna = dna_set - bret_pair
+        unique_dna = dna_set - common_dna
         variable_dic[col] = sorted(list(unique_dna))
 
-    print(f"identified conditions {variable_dic}")
-    return bret_pair, variable_dic
+    # print(f"identified conditions {variable_dic}")
+    return main_plasmids, variable_dic
 
 def extract_protocol_info(xls_obj: pd.ExcelFile):
     """
@@ -238,13 +239,13 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
     cell_line_layout = extract_value(protocol_sheet,"Cell line layout", col_offset= 0, row_offset= 1)
 
     df_transfection = slice_table(protocol_sheet, "DNA")
-    bret_pair = []
+    main_dna = []
     transfection_conditions = {}
 
     if df_transfection is not None:
         df_transfection = df_transfection.drop(columns=["vol per transfection", "vol master"], errors = 'ignore')
 
-        bret_pair, transfection_conditions = process_transfection_scheme(df_transfection)
+        main_dna, transfection_conditions = process_transfection_scheme(df_transfection)
 
     ligand_1 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1)
     ligand_1_conc = slice_table(protocol_sheet, "final concentration in well (log(M))")
@@ -264,7 +265,7 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
                                  cell_lines = used_cell_lines,
                                  line_layout = cell_line_layout,
                                  transfection_scheme=df_transfection,
-                                 bret_pair= bret_pair,
+                                 main_plasmids= main_dna,
                                  transfection_conditions=transfection_conditions,
                                  ligand = ligand_1,
                                  ligand_conc=ligand_1_conc,
