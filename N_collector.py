@@ -466,15 +466,78 @@ class NCollectorApp:
 
                 # Sort to ensure "Rab5 + b2AR" is treated same as "b2AR + Rab5" if order implies same condition
                 result.exp_conditions = sorted(condition_found)
-    # TODO: check that main_plasmid is not different between folders -> where to implement? sth like [ERROR] different bret pairs detected in subfolders, -> if this happens, let user decide which bret pairs should be processed!
 
-    def aggregate_experiments(self):
+    def handle_main_plasmids_selection(self):
+        """
+        Checks main_plasmids consistency. If multiple sets found, user selects one.
+        Filters self.experiment to keep only the selected group.
+        Returns the string representation of the selected set.
+        """
+        # Group experiments by their main_plasmids (convert list to tuple for dictionary key)
+        main_plasmids_groups = {}
+        for folder in self.experiment:
+            if folder.protocol and folder.protocol.main_plasmids:
+                key = tuple(folder.protocol.main_plasmids)
+                if key not in main_plasmids_groups:
+                    main_plasmids_groups[key] = []
+                main_plasmids_groups[key].append(folder)
+
+        if not main_plasmids_groups:
+            return "No Common Plasmids Detected"
+
+        # If only one set exists, return it immediately
+        if len(main_plasmids_groups) == 1:
+            return " + ".join(list(main_plasmids_groups.keys())[0])
+
+        # --- Multiple Sets Detected: Ask User ---
+
+        # Create a modal dialog window
+        dialog = tk.Toplevel(self.master)
+        dialog.title("Select Experiment")
+        dialog.geometry("400x300")
+
+        tk.Label(dialog, text="Different experiment set ups detected across folders.\nSelect one to process:",
+                 font=("Arial", 11, "bold")).pack(pady=10)
+
+        selected_var = tk.StringVar()
+        first_key = list(main_plasmids_groups.keys())[0]
+        selected_var.set(str(first_key))  # Set default
+
+        # Helper to map string back to tuple key
+        str_to_key_map = {}
+
+        for key in main_plasmids_groups:
+            pair_str = " + ".join(key)
+            key_val_str = str(key)
+            str_to_key_map[key_val_str] = key
+
+            text_label = f"{pair_str} ({len(main_plasmids_groups[key])} folders)"
+            tk.Radiobutton(dialog, text=text_label, variable=selected_var, value=key_val_str).pack(anchor="w", padx=20)
+
+        def on_confirm():
+            dialog.destroy()
+
+        tk.Button(dialog, text="Confirm", command=on_confirm).pack(pady=20)
+
+        # Wait until the window is closed
+        self.master.wait_window(dialog)
+
+        # Retrieve selection
+        selected_key_str = selected_var.get()
+        selected_key = str_to_key_map.get(selected_key_str, first_key)
+
+        # Filter the experiment list
+        self.experiment = main_plasmids_groups[selected_key]
+        print(f"   [FILTER] Keeping {len(self.experiment)} folders matching main plasmids: {selected_key}")
+
+        return " + ".join(selected_key)
+
+    def aggregate_experiments(self, main_plasmids_name):
         """
         Groups results by (Cell Line, Condition). Returns a dictionary of groups as preparation
         for optional exclusion by User.
         """
-        print("\n--- Aggregating Repeats ---")
-        # TODO: main plasmids should be in there as title or sth?
+        print(f"\n--- Collecting Ns for measurements with {main_plasmids_name} ---")
 
         # Nested dic as planned treeview GUI expects this
         grouped_data = {}
@@ -600,9 +663,12 @@ class NCollectorApp:
         print("\n" + "=" * 30)
 
         # --- Connecting Protocol and Analysis files ---
+        # Get the transfected plasmids to assign conditions
         self.map_conditions_to_results()
+        # Check for plasmids transfected in all conditions (main plasmids) and filter if needed
+        selected_exp_name = self.handle_main_plasmids_selection()
         # Collect Ns
-        grouped_results = self.aggregate_experiments()
+        grouped_results = self.aggregate_experiments(selected_exp_name)
 
         print("\n" + "=" * 40)
         print("AGGREGATED DATA SUMMARY (N COUNTS)")
