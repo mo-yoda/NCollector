@@ -297,18 +297,34 @@ def extract_metadata(xls_obj):
         col = df_meta[0].astype(str)  # Transform everything to str
 
         # Mapping: { "Excel Label": "Desired Key" }
-        meta_keys = {
-            "Date:": "measurement_date",
-            "ID2:": "cell_line",
-            "ID3:": "transfections"
-        }
-        # TODO: handling potential different spelling of cell lines
+        meta_keys = {"Date:": "measurement_date", "ID2:": "cell_line", "ID3:": "transfections"}
         metadata = {}
         for label, key in meta_keys.items():
             # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
             matches = col[col.str.contains(label, na=False)].str.split(":", n=1).str[-1].str.strip().tolist()
             if matches:
                 metadata[key] = matches[0]
+
+        # Handling of different spellings of cell lines
+        if 'cell_line' in metadata:
+            raw_cell_line = metadata['cell_line']
+            # Split by comma to handle potentially multiple lines
+            lines = [p.strip() for p in raw_cell_line.split(',')]
+            standardised_lines = []
+
+            for cl in lines:
+                p_lower = cl.lower()
+                if "dq" in p_lower:
+                    standardised_lines.append("dQ")
+                elif "ar" in p_lower:  # Covers "bArrKO"
+                    standardised_lines.append("bArrKO")
+                elif "con" in p_lower:  # Covers "Control", "Con", "con"
+                    standardised_lines.append("Control")
+                else:
+                    standardised_lines.append(cl)  # Keep original if no rule matches
+
+            # Re-join unique sorted parts (e.g. "Control, dQ")
+            metadata['cell_line'] = ", ".join(sorted(list(set(standardised_lines))))
 
         # Transform date str to actual date
         if 'measurement_date' in metadata:
@@ -466,6 +482,9 @@ class NCollectorApp:
 
                 # Sort to ensure "Rab5 + b2AR" is treated same as "b2AR + Rab5" if order implies same condition
                 result.exp_conditions = sorted(condition_found)
+
+                # PRINTING
+                print(f"   Mapped {result.file_name} -> {result.exp_conditions}")
 
     def handle_main_plasmids_selection(self):
         """
