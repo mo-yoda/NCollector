@@ -10,11 +10,18 @@ from dataclasses import dataclass, field
 @dataclass
 class PrResult:
     """ Information from a single _analysis file """
+    # Information from analysis xlsx itself
     file_name: str
     measurement_date: date
     cell_line: str # ID2
     transfection: str # ID3
     raw_bret_ratio_df: pd.DataFrame
+
+    # Connection to protocol file
+    exp_conditions: list[str] = field(default_factory=list)
+
+    # User interaction (optionally excluding a plate)
+    is_excluded: bool = False
 
 @dataclass
 class ProtocolData:
@@ -182,8 +189,6 @@ def process_transfection_scheme(df: pd.DataFrame):
 
     # Find DNA present in all transfection sets (BRET pair)
     if transfection_dic:
-        bret_pair = set.intersection(*transfection_dic.values())
-        print(f"identified bret pair {bret_pair}")
         common_dna = set.intersection(*transfection_dic.values())
     else:
         common_dna = set()
@@ -297,7 +302,7 @@ def extract_metadata(xls_obj):
             "ID2:": "cell_line",
             "ID3:": "transfections"
         }
-
+        # TODO: handling potential different spelling of cell lines
         metadata = {}
         for label, key in meta_keys.items():
             # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
@@ -432,6 +437,73 @@ class NCollectorApp:
                 self.collect_button.config(state="disabled")
                 print(f"No .xlsx or .xlsm files found starting from: {directory}")
 
+    def map_conditions_to_results(self):
+        """
+        Iterates through all loaded experiments and resolves the numerical ID3
+        into actual conditions using the Protocol information.
+        """
+        print("\n--- Resolving Experimental Conditions ---")
+        for folder in self.experiment:
+            if not folder.protocol:
+                continue
+
+            # Dic of # transfection to condition {'1': ['plasmid_A', 'plasmid_B'], '2': ...}
+            mapping = folder.protocol.transfection_conditions
+
+            for result in folder.results:
+                if result.transfection:
+                    # Split ID3 by comma and strip whitespace
+                    ids = [x.strip() for x in str(result.transfection).split(',')]
+                else:
+                    ids = []
+
+                condition_found = []
+                for i in ids:
+                    # Look up ID in the protocol mapping, [] list as fallback
+                    plasmids = mapping.get(i, [f"Unknown_ID3_part_{i}"])
+                    cond_name = " + ".join(sorted(plasmids)) # Handling co-transfection
+                    condition_found.append(cond_name)
+
+                # Sort to ensure "Rab5 + b2AR" is treated same as "b2AR + Rab5" if order implies same condition
+                result.exp_conditions = sorted(condition_found)
+    # TODO: check that main_plasmid is not different between folders -> where to implement? sth like [ERROR] different bret pairs detected in subfolders, -> if this happens, let user decide which bret pairs should be processed!
+
+    def aggregate_experiments(self):
+        """
+        Groups results by (Cell Line, Condition). Returns a dictionary of groups as preparation
+        for optional exclusion by User.
+        """
+        print("\n--- Aggregating Repeats ---")
+        # TODO: main plasmids should be in there as title or sth?
+
+        # Nested dic as planned treeview GUI expects this
+        grouped_data = {}
+
+        # sth here takes ages
+        for folder in self.experiment:
+            for result in folder.results:
+                # TODO: for CKs layout, there are several cell lines possible -> edit later to handle this
+                # Get ID2: cell_lines
+                cell_line = result.cell_line
+
+                if not result.exp_conditions:
+                    # Handle case where no conditions were mapped or ID3 was empty
+                    cond_list = ["Undefined Condition"]
+                else:
+                    cond_list = result.exp_conditions
+
+                if cell_line not in grouped_data:
+                    grouped_data[cell_line] = {}
+
+                # Iterate through each separate condition found in the result file
+                for cond_name in cond_list:
+                    if cond_name not in grouped_data[cell_line]:
+                        grouped_data[cell_line][cond_name] = []
+
+                    # TODO: not the entire result has to be appended, only the specific condition! -> BRET processing has to be done first
+                    grouped_data[cell_line][cond_name].append(result)
+        return grouped_data
+
     def collect_files(self):
         """
         Reads sheet names of all xlsx and xlsm files to identify and separate protocol and result analysis files.
@@ -526,6 +598,30 @@ class NCollectorApp:
                 print(f"   [SKIPPED]: {rep.skipped_files}")
 
         print("\n" + "=" * 30)
+
+        # --- Connecting Protocol and Analysis files ---
+        self.map_conditions_to_results()
+        # Collect Ns
+        grouped_results = self.aggregate_experiments()
+
+        print("\n" + "=" * 40)
+        print("AGGREGATED DATA SUMMARY (N COUNTS)")
+        print("=" * 40)
+
+        if not grouped_results:
+            print("No data aggregated.")
+
+        for cell_line, conditions in grouped_results.items():
+            print(f"\nCell Line: {cell_line}")
+            for cond_name, results_list in conditions.items():
+                n_count = len(results_list)
+                print(f"  • Condition: {cond_name}")
+                print(f"      -> N = {n_count}")
+                # Optional: Show which days contributed
+                days = sorted([r.measurement_date.strftime('%y%m%d') for r in results_list])
+                print(f"      -> Days: {', '.join(days)}")
+
+        print("\n" + "=" * 40)
 
 
 # --- Main Execution Block ---
