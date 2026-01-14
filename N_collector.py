@@ -19,6 +19,8 @@ class PrResult:
 
     # Connection to protocol file
     exp_conditions: list[str] = field(default_factory=list)
+    # Stores baseline- and vehicle-normalised BRET ratios
+    processed_df: pd.DataFrame | None = None
 
     # User interaction (optionally excluding a plate)
     is_excluded: bool = False
@@ -387,6 +389,96 @@ def extract_measurement_data(xls_obj):
     )
     return result_obj
 
+def process_bret_measurement(result: PrResult, protocol: ProtocolData):
+    """
+    Performs Baseline Correction and Vehicle Normalization.
+    Calculates AUC.
+    Returns (processed_df, stats_df)
+    """
+    # Get raw BRET ratio table
+    raw_df = result.raw_bret_ratio_df.copy()
+    time_col = "Time (min)"
+
+    # Define Baseline: First 5 rows (Index 0-4)
+    baseline_end_idx = 5
+    # Define Kinetic: Remaining rows (Index 5 onwards)
+    if len(raw_df) < (baseline_end_idx):
+        print(f"   [WARNING] Data has less than {(baseline_end_idx)} rows.")
+        return None, None
+
+    # Prepare the full dataframe for normalization (removing the time col)
+    data_df = raw_df.drop(columns=[time_col]).copy()
+
+    # --- BASELINE CORRECTION ---
+    # Isolate baseline rows for calculation
+    df_baseline_calc = raw_df.iloc[0:baseline_end_idx].copy()
+    bl_corrected_df = data_df.copy()
+
+    for col in data_df.columns:
+        # Mean of baseline rows for this well
+        # Force numeric conversion for baseline values to handle potential strings/decimals
+        base_vals = pd.to_numeric(df_baseline_calc[col], errors='coerce')
+        base_mean = base_vals.mean()
+
+        if base_mean != 0:
+            col_vals = pd.to_numeric(data_df[col], errors='coerce')
+            # Divide ALL values by the baseline mean
+            bl_corrected_df[col] = col_vals / base_mean
+        else:
+            bl_corrected_df[col] = None
+
+    # --- SPECIFY LAYOUT ---
+    # Define starting inx of replicate cols
+    triplicate_block_starts = [1,4,7,10]
+    # Layout map; which col # belong to which starting block
+    plate_layout_map = {}
+    for start in triplicate_block_starts:
+        for offset in range(3):  # 0, 1, 2 (Triplicates)
+            col_idx = start + offset
+            plate_layout_map[col_idx] = start
+
+    # --- VEHICLE CORRECTION ---
+    # Calculate mean vehicle for each condition
+    vehicle_mean = {}
+
+    for start in triplicate_block_starts:
+        wells = [f"H{start + k}" for k in range(3)]
+        # Filter for wells that actually exist in the dataframe
+        # Logic needed for optionally excluding wells
+        valid_wells = [w for w in wells if w in bl_corrected_df.columns]
+
+        if valid_wells:
+            # Get vehicle values and make sure that data is numeric
+            vehicle_data = bl_corrected_df[valid_wells].apply(pd.to_numeric, errors='coerce')
+            # TODO: check if vehicle_date is out of bounds -> recommend exclusion of specific wells; based on mean or for each time point?
+            # Average across valid vehicle wells per time point
+            vehicle_mean[start] = vehicle_data.mean(axis=1)
+            # print(f"vehicle values {vehicle_mean[start]}")
+
+    # Normalise to mean(vehicle)
+    vehicle_corr_df = bl_corrected_df.copy()
+
+    for col in data_df.columns:
+        # Get well number
+        col_num_str = col[1:]
+
+        try:
+            col_num = int(col_num_str)
+
+            # Check map
+            if col_num in plate_layout_map:
+                block_start = plate_layout_map[col_num]
+
+                # Normalize to mean(vehicle) for each block
+                vehicle_corr_df[col] = bl_corrected_df[col] / vehicle_mean[block_start]
+
+        except ValueError:
+            continue
+    # TODO: add AUC calculation
+    return vehicle_corr_df
+
+# TODO: add function to rearrange cols of processed bret df (flexible for user interaction)
+
 # --- Main Application --- #
 
 class NCollectorApp:
@@ -650,6 +742,7 @@ class NCollectorApp:
                         meas_data = extract_measurement_data(xls)
 
                         if meas_data and meas_data.measurement_date == folder_date_obj:
+                            meas_data.processed_df = process_bret_measurement(meas_data, folder_data.protocol)
                             folder_data.results.append(meas_data)
                             print(f"   [RESULT] Imported: {file_name} (ID2: {meas_data.cell_line}, ID3: {meas_data.transfection})")
                             is_imported = True
