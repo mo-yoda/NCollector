@@ -32,7 +32,7 @@ class ProtocolData:
     cell_lines: list[str]
     line_layout: str
     transfection_scheme: pd.DataFrame
-    main_plasmids: list[str] # Plasdmids transfected in all conditions
+    main_plasmids: list[str] # Plasmids transfected in all conditions
     transfection_conditions: dict[str, list[str]]
     ligand: str
     ligand_conc: pd.DataFrame
@@ -408,7 +408,7 @@ class NCollectorApp:
         self.tab_import = tk.Frame(self.notebook)
         self.notebook.add(self.tab_import, text="1. Import Data")
 
-        # Tab 2: Data Selection (TreeView)
+        # Tab 2: Data Selection
         self.tab_select = tk.Frame(self.notebook)
         self.notebook.add(self.tab_select, text="2. Data Selection")
 
@@ -442,10 +442,8 @@ class NCollectorApp:
             # --- RESET STATE: Clear old data when a new folder is selected
             self.subfolder_paths_with_files = []
             self.experiment = []
-            # self.tree_map = {}
 
-            # Search for xlsx or xlsm in directory tree
-            # --- Scan new directory ---
+            # --- Scan new directory for xlsx or xlsm---
             for root, dirs, files in os.walk(directory):
                 if any(f.endswith((".xlsx", ".xlsm")) for f in files):
                     self.subfolder_paths_with_files.append(root) # Save paths of files
@@ -494,9 +492,6 @@ class NCollectorApp:
                 # Sort to ensure "Rab5 + b2AR" is treated same as "b2AR + Rab5" if order implies same condition
                 result.exp_conditions = sorted(condition_found)
 
-                # PRINTING
-                print(f"   Mapped {result.file_name} -> {result.exp_conditions}")
-
     def handle_main_plasmids_selection(self):
         """
         Checks main_plasmids consistency. If multiple sets found, user selects one.
@@ -520,6 +515,7 @@ class NCollectorApp:
             return " + ".join(list(main_plasmids_groups.keys())[0])
 
         # --- Multiple Sets Detected: Ask User ---
+        # TODO: test this function as user!
 
         # Create a modal dialog window
         dialog = tk.Toplevel(self.master)
@@ -546,11 +542,8 @@ class NCollectorApp:
 
         def on_confirm():
             dialog.destroy()
-
         tk.Button(dialog, text="Confirm", command=on_confirm).pack(pady=20)
-
-        # Wait until the window is closed
-        self.master.wait_window(dialog)
+        self.master.wait_window(dialog) # Wait until the window is closed
 
         # Retrieve selection
         selected_key_str = selected_var.get()
@@ -719,6 +712,7 @@ class NCollectorApp:
 
         print("\n" + "=" * 40)
 
+# TODO: implement window to show any ERROR messages + add optional export of log file
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
