@@ -641,12 +641,9 @@ class NCollectorApp:
             return " + ".join(list(main_plasmids_groups.keys())[0])
 
         # --- Multiple Sets Detected: Ask User ---
-        # TODO: test this function as user!
-
         # Create a modal dialog window
         dialog = tk.Toplevel(self.master)
         dialog.title("Select Experiment")
-        dialog.geometry("400x300")
 
         tk.Label(dialog, text="Different experiment set ups detected across folders.\nSelect one to process:",
                  font=("Arial", 11, "bold")).pack(pady=10)
