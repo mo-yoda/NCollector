@@ -8,17 +8,26 @@ from dataclasses import dataclass, field
 # --- Dataclass Definition --- #
 
 @dataclass
+class PlateColMetadata:
+    """Identity of a specific column"""
+    cell_line: str = "Unknown"
+    transfection_id: str  = "N/A"
+    condition_name: str = "Empty"
+    plasmids: list[str] = field(default_factory=list)
+
+@dataclass
 class PrResult:
     """ Information from a single _analysis file """
     # Information from analysis xlsx itself
     file_name: str
     measurement_date: date
     cell_line: str # ID2
-    transfection: str # ID3
+    transfection_id: str # ID3
     raw_bret_ratio_df: pd.DataFrame
 
     # Connection to protocol file
-    exp_conditions: list[str] = field(default_factory=list)
+    # Key = Column Index (1-12), Value = WellMetadata object
+    column_metadata: dict[int, PlateColMetadata] = field(default_factory=dict)
     # Stores baseline- and vehicle-normalised BRET ratios
     processed_df: pd.DataFrame | None = None
 
@@ -330,8 +339,8 @@ def extract_metadata(xls_obj):
                 else:
                     standardised_lines.append(cl)  # Keep original if no rule matches
 
-            # Re-join unique sorted parts (e.g. "Control, dQ")
-            metadata['cell_line'] = ", ".join(sorted(list(set(standardised_lines))))
+            # Re-join unique parts (e.g. "Control, dQ"); set() removed duplicates
+            metadata['cell_line'] = ", ".join(list(set(standardised_lines)))
 
         # Transform date str to actual date
         if 'measurement_date' in metadata:
@@ -389,18 +398,109 @@ def extract_measurement_data(xls_obj):
         file_name=file_name,
         measurement_date=metadata_dic['measurement_date'],
         cell_line=metadata_dic['cell_line'],
-        transfection=metadata_dic['transfections'],
+        transfection_id=metadata_dic['transfections'],
         raw_bret_ratio_df=bret_ratio_df
     )
     return result_obj
 
+def get_cell_line_map(layout_type: str, cell_lines: str):
+    """
+    Defines the plate layout for cell lines based on the dropdown selection protocol (.line_layout)
+    and cell_lines in ID2 of the plate reader metadata (PrResult.cell_line)
+    """
+    print(f"\n[DEBUG] --- Mapping Cell Lines ---")
+    print(f"[DEBUG] Layout Type: '{layout_type}' | Raw ID2: '{cell_lines}'")
+    # Split ID2 string to get potentially multiple cell lines
+    lines = [x.strip() for x in cell_lines.split(',')]
+    print(f"[DEBUG] Parsed Cell Lines: {lines}")
+
+    mapping = {}
+
+    # Handle selection made in dropdown for line layout
+    if "one line" in layout_type.lower():
+        # Use the first (and likely only) cell line for all columns
+        c_name = lines[0] if lines else "Unknown"
+        for col in range(1, 13):
+            mapping[col] = c_name
+
+    elif "half" in layout_type.lower():
+        line_1 = lines[0] if len(lines) > 0 else "Unknown_1"
+        line_2 = lines[1] if len(lines) > 1 else "Unknown_2"
+
+        for col in range(1, 7): mapping[col] = line_1
+        for col in range(7, 13): mapping[col] = line_2
+
+    elif "alternating" in layout_type.lower():
+        line_1 = lines[0] if len(lines) > 0 else "Unknown_1"
+        line_2 = lines[1] if len(lines) > 1 else "Unknown_2"
+
+        # Block 1 (1-3) & Block 3 (7-9) -> Line 1
+        for col in list(range(1, 4)) + list(range(7, 10)):
+            mapping[col] = line_1
+
+        # Block 2 (4-6) & Block 4 (10-12) -> Line 2
+        for col in list(range(4, 7)) + list(range(10, 13)):
+            mapping[col] = line_2
+
+    else:
+        print(f"   [WARNING] Unknown layout type: '{layout_type}'. Defaulting to global.")
+        for col in range(1, 13): mapping[col] = cell_lines
+
+    return mapping
+
+def get_transfection_map(layout_type: str, t_ids: list[str], block_count: int = 4):
+    """
+    Defines the plate layout for blocks of transfection based on the cell line layout
+    dropdown selection protocol (.line_layout) and # transfection in ID3 of
+    the plate reader metadata (PrResult.transfection_id)
+    """
+    print(f"[DEBUG] --- Mapping Transfections ---")
+    print(f"[DEBUG] Raw ID3 List: {t_ids}")
+    # If no IDs, return empty
+    if not t_ids:
+        return ["N/A"] * block_count
+
+    lower_layout = str(layout_type).lower()
+    # IDs 1:1 to blocks
+    if "one line" in lower_layout:
+        # Extend list if shorter than blocks (fill with last or N/A)
+        # Slicing [:block_count] ensures we don't overflow if ID3 has too many
+        mapped_ids = (t_ids + ["N/A"] * block_count)[:block_count]
+        return mapped_ids
+    # IDs alternating in layout to cover all cell line x transfection combinations
+    elif "half" in  lower_layout:
+        if len(t_ids) >= 2:
+            return [t_ids[0], t_ids[1], t_ids[0], t_ids[1]]
+        elif len(t_ids) == 1:
+            return [t_ids[0]] * 4
+        else:
+            return ["N/A"] * 4
+    # IDs half/half of blocks to cover all cell line x transfection combinations
+    elif "alternating" in lower_layout:
+        if len(t_ids) >= 2:
+            return [t_ids[0], t_ids[0], t_ids[1], t_ids[1]]
+        elif len(t_ids) == 1:
+            return [t_ids[0]] * 4
+        else:
+            return ["N/A"] * 4
+
+    # Default fallback
+    return (t_ids + ["N/A"] * block_count)[:block_count]
+
+def get_block_start_for_col(col_index: int, plate_blocks: list[range]):
+    """Finds the start column of the block that contains col_index."""
+    for block in plate_blocks:
+        if col_index in block:
+            return block[0]  # Return the first column of that block (e.g., 1, 4, 7...)
+    return None
+
 def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     """
+    Maps cell line x transfection plate layout using protocl info.
     Performs Baseline Correction and Vehicle Normalization.
     Checks vehicle for outliers.
-    Calculates AUC.
+    Calculates AUC.(PENDING)
     """
-    # TODO: restructure process_bret_measurment for taking transfections for conditions into account
     if result.is_excluded:
         result.processed_df = None
         return result.processed_df
@@ -408,9 +508,54 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # Reset for re-run
     result.warnings = []
     result.vehicle_outliers = {}
-    result.column_condition_map = {} # --- HERE needed?
 
-    # --- Config
+    print(f"\n[DEBUG] === Processing File: {result.file_name} ===")
+    # --- CONFIG LAYOUT ---
+    result.column_metadata = {}
+
+    # Define triplicates (4 blocks); opt. edit for adding labeling layout
+    plate_blocks = [
+        range(1, 4),  # Block 1: Cols 1-3
+        range(4, 7),  # Block 2: Cols 4-6
+        range(7, 10),  # Block 3: Cols 7-9
+        range(10, 13)  # Block 4: Cols 10-12
+    ]
+
+    # Get cell line map
+    cl_map = get_cell_line_map(protocol.line_layout, result.cell_line)
+    # Get transfection map via mapping ID3 info
+    raw_ids = [x.strip() for x in str(result.transfection_id).split(',')] if result.transfection_id else []
+    mapped_t_ids = get_transfection_map(protocol.line_layout, raw_ids, len(plate_blocks))
+    print(f"[DEBUG] Mapped Block Sequence (0-3): {mapped_t_ids}")
+
+    # Apply metadata on cols
+    for i, block_cols in enumerate(plate_blocks):
+        # Get the ID assigned to this block
+        t_id = mapped_t_ids[i]
+
+        # Resolve ID to Name (using Protocol)
+        current_plasmids = []
+        if t_id in protocol.transfection_conditions:
+            current_plasmids = protocol.transfection_conditions[t_id]
+            current_cond_name = " + ".join(sorted(current_plasmids))
+        elif t_id == "N/A":
+            current_cond_name = "Empty/NoID"
+        else:
+            current_cond_name = f"ID {t_id} (Missing)"
+
+        # Assign to all columns in this block
+        for col in block_cols:
+            c_line = cl_map.get(col, "Unknown")
+
+            meta = PlateColMetadata(
+                cell_line=c_line,
+                transfection_id=t_id,
+                condition_name=current_cond_name,
+                plasmids=current_plasmids
+            )
+            result.column_metadata[col] = meta
+
+    # --- CONFIG PROCESSING ---
     # Define accepted vehicle range
     acc_vehicle_range = 0.2
     # Define Baseline: First 5 rows (Index 0-4)
@@ -464,8 +609,10 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # Calculate mean vehicle for each condition
     vehicle_mean = {}
 
-    for start in condition_block_starts:
-        wells = [f"H{start + k}" for k in range(3)]
+    for block in plate_blocks:
+        start_col = block[0]  # e.g., 1, 4, 7, 10 for triplicates
+
+        wells = [f"H{c}" for c in block]
         # Filter for wells that actually exist in the dataframe
         # Logic needed for optionally excluding wells
         valid_vehicles = [w for w in wells if w in bl_corrected_df.columns and w not in result.excluded_wells]
@@ -484,29 +631,24 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
                     result.vehicle_outliers[well] = float(veh_kinetic_mean)
 
             # Calculate mean across valid vehicle wells per time point
-            vehicle_mean[start] = vehicle_data.mean(axis=1)
+            vehicle_mean[start_col] = vehicle_data.mean(axis=1)
         else:
-            vehicle_mean[start] = None
+            vehicle_mean[start_col] = None
 
     # Normalise to mean(vehicle)
     vehicle_corr_df = bl_corrected_df.copy()
 
     for col in data_df.columns:
         # Get well number
-        col_num_str = col[1:]
+        col_num = int(col[1:])
 
-        try:
-            col_num = int(col_num_str)
+        # Find block start dynamically using the list
+        block_start = get_block_start_for_col(col_num, plate_blocks)
 
-            # Check map
-            if col_num in plate_layout_map:
-                block_start = plate_layout_map[col_num]
-
-                # Normalize to mean(vehicle) for each block
-                vehicle_corr_df[col] = bl_corrected_df[col] / vehicle_mean[block_start]
-
-        except ValueError:
-            continue
+        if block_start in vehicle_mean and vehicle_mean[block_start] is not None:
+            vehicle_corr_df[col] = bl_corrected_df[col] / vehicle_mean[block_start]
+        else:
+            vehicle_corr_df[col] = None
     # TODO: add AUC calculation
     return vehicle_corr_df
 
@@ -692,6 +834,7 @@ class NCollectorApp:
         Groups results by (Cell Line, Condition). Returns a dictionary of groups as preparation
         for optional exclusion by User.
         """
+        # TODO: update to take processed and map results; CK layout was addressed by process_bret_measurement fun
         self.log(f"\n--- Collecting Ns for measurements with {main_plasmids_name} ---")
 
         # Nested dic as planned treeview GUI expects this
@@ -700,7 +843,6 @@ class NCollectorApp:
         # sth here takes ages
         for folder in self.experiment:
             for result in folder.results:
-                # TODO: for CKs layout, there are several cell lines possible -> edit later to handle this
                 # Get ID2: cell_lines
                 cell_line = result.cell_line
 
