@@ -740,7 +740,7 @@ class NCollectorApp:
         # Iterate over subfolders
         for folder_path in self.subfolder_paths_with_files:
             folder_name = os.path.basename(folder_path)
-            print(f"\n--- Processing Folder: {folder_name} ---")
+            self.log(f"\n--- Processing Folder: {folder_name} ---")
 
             # Use date in folder name for validation
             try:
@@ -772,7 +772,7 @@ class NCollectorApp:
 
                         if protocol_info and protocol_info.exp_date == folder_date_obj:
                             folder_data.protocol = protocol_info
-                            print(f"   [PROTOCOL] Imported: {file_name}")
+                            self.log(f"   [PROTOCOL] loaded: {file_name}")
                             is_imported = True
                         elif protocol_info:
                             self.log(f"   [MISMATCH] Protocol {protocol_info.exp_date} != Folder {folder_date_obj}")
@@ -782,10 +782,8 @@ class NCollectorApp:
                         meas_data = extract_measurement_data(xls)
 
                         if meas_data and meas_data.measurement_date == folder_date_obj:
-                            # TODO: detach bret processing from file collection for repeating processing after well exclusion
-                            meas_data.processed_df = process_bret_measurement(meas_data, folder_data.protocol)
                             folder_data.results.append(meas_data)
-                            print(f"   [RESULT] Imported: {file_name} (ID2: {meas_data.cell_line}, ID3: {meas_data.transfection})")
+                            self.log(f"   [MEASUREMENT] loaded {file_name}")
                             is_imported = True
                         else:
                             self.log(f"   [MISMATCH] Analysis {meas_data.measurement_date} != Folder {folder_date_obj}")
