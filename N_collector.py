@@ -593,18 +593,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         else:
             bl_corrected_df[col] = None
 
-    # --- SPECIFY LAYOUT ---
-    # Define starting inx of replicate cols
-    # For later adding labeling layout here
-    triplicate_starts = [1,4,7,10]
-    condition_block_starts = triplicate_starts
-
-    # Layout map; which col # belong to which starting block
-    plate_layout_map = {}
-    for start in condition_block_starts:
-        for offset in range(3):  # 0, 1, 2 (Triplicates)
-            plate_layout_map[start + offset] = start
-
     # --- VEHICLE CORRECTION ---
     # Calculate mean vehicle for each condition
     vehicle_mean = {}
@@ -753,9 +741,9 @@ class NCollectorApp:
             mapping = folder.protocol.transfection_conditions
 
             for result in folder.results:
-                if result.transfection:
+                if result.transfection_id:
                     # Split ID3 by comma and strip whitespace
-                    ids = [x.strip() for x in str(result.transfection).split(',')]
+                    ids = [x.strip() for x in str(result.transfection_id).split(',')]
                 else:
                     ids = []
 
