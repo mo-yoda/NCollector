@@ -402,10 +402,13 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     """
     # TODO: restructure process_bret_measurment for taking transfections for conditions into account
     if result.is_excluded:
-        return None
-    result.warnings = []  # Clear previous
         result.processed_df = None
         return result.processed_df
+
+    # Reset for re-run
+    result.warnings = []
+    result.vehicle_outliers = {}
+    result.column_condition_map = {} # --- HERE needed?
 
     # --- Config
     # Define accepted vehicle range
@@ -818,13 +821,34 @@ class NCollectorApp:
 
         print("\n" + "=" * 30)
 
-        # --- Connecting Protocol and Analysis files ---
+        # Call processing
+        self.run_processing_pipeline()
+
+    def run_processing_pipeline(self):
+        """
+        Calls processing functions and is rerun if data was excluded.
+        """
+        self.log("\n--- Starting Processing Pipeline ---")
+
         # Get the transfected plasmids to assign conditions
         self.map_conditions_to_results()
         # Check for plasmids transfected in all conditions (main plasmids) and filter if needed
         selected_exp_name = self.handle_main_plasmids_selection()
+
+        for folder in self.experiment:
+            if not folder.protocol: continue # Protocol is needed for processing
+            for result in folder.results:
+                # Process each result file within one folder (belonging to one protocol)
+                result.processed_df = process_bret_measurement(result, folder.protocol)
+
+            # Handle outliers stored in dic
+            if result.vehicle_outliers:
+                vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
+                self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
+
         # Collect Ns
         grouped_results = self.aggregate_experiments(selected_exp_name)
+        self.log("\n--- Processing Complete ---")
 
         print("\n" + "=" * 40)
         print("AGGREGATED DATA SUMMARY (N COUNTS)")
