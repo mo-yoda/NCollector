@@ -560,6 +560,16 @@ class NCollectorApp:
         )
         self.collect_button.pack(pady=15)
 
+        # Log window to display print statements
+        self.log_text = tk.Text(self.tab_import, height=15)
+        self.log_text.pack(pady=10)
+
+    # Helper function to write to that text box
+    def log(self, message):
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        # print(message)  # Keep printing to console just in case
+
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
             directory = filedialog.askdirectory(title="Select a folder...")
@@ -593,7 +603,7 @@ class NCollectorApp:
         Iterates through all loaded experiments and resolves the numerical ID3
         into actual conditions using the Protocol information.
         """
-        print("\n--- Resolving Experimental Conditions ---")
+        self.log("\n--- Resolving Experimental Conditions ---")
         for folder in self.experiment:
             if not folder.protocol:
                 continue
@@ -683,7 +693,7 @@ class NCollectorApp:
         Groups results by (Cell Line, Condition). Returns a dictionary of groups as preparation
         for optional exclusion by User.
         """
-        print(f"\n--- Collecting Ns for measurements with {main_plasmids_name} ---")
+        self.log(f"\n--- Collecting Ns for measurements with {main_plasmids_name} ---")
 
         # Nested dic as planned treeview GUI expects this
         grouped_data = {}
@@ -723,7 +733,7 @@ class NCollectorApp:
             print("No folders to analyze.")
             return
 
-        print("\n--- Starting Data Collection ---")
+        self.log("\n--- Starting Data Collection ---")
 
         # Collect all subfolder info (experiment repeats) in this list
         self.experiment = []
@@ -738,7 +748,7 @@ class NCollectorApp:
                 # Transform date str to date obj (YYMMDD)
                 folder_date_obj = datetime.strptime(folder_name.split("_")[0], '%y%m%d').date()
             except ValueError:
-                print(f"   [ERROR] Folder '{folder_name}' invalid date format. Expected YYMMDD. Skipping.")
+                self.log(f"   [ERROR] Folder '{folder_name}' invalid date format. Expected YYMMDD. Skipping.")
                 continue
 
             # Create MeasurementFolder object to collect protocol and results
@@ -766,7 +776,7 @@ class NCollectorApp:
                             print(f"   [PROTOCOL] Imported: {file_name}")
                             is_imported = True
                         elif protocol_info:
-                            print(f"   [MISMATCH] Protocol {protocol_info.exp_date} != Folder {folder_date_obj}")
+                            self.log(f"   [MISMATCH] Protocol {protocol_info.exp_date} != Folder {folder_date_obj}")
 
                     # Identify Analysis File
                     elif "Analysis" in sheet_names:
@@ -779,17 +789,19 @@ class NCollectorApp:
                             print(f"   [RESULT] Imported: {file_name} (ID2: {meas_data.cell_line}, ID3: {meas_data.transfection})")
                             is_imported = True
                         else:
-                            print(f"   [MISMATCH] Analysis {meas_data.measurement_date} != Folder {folder_date_obj}")
+                            self.log(f"   [MISMATCH] Analysis {meas_data.measurement_date} != Folder {folder_date_obj}")
 
                     # Files not matching criteria are skipped
                     if not is_imported:
                         folder_data.skipped_files.append(file_name)
                 except Exception as e:
-                    print(f"   [ERROR] Could not read {file_name}: {e}")
+                    self.log(f"   [ERROR] Could not read {file_name}: {e}")
 
             # Store the collected data for this experiment
             self.experiment.append(folder_data)
             print(f"   [SKIPPED]: {folder_data.skipped_files}")
+
+        self.log(f"--- Loading Complete. Loaded {len(self.experiment)} folders. ---")
 
         # Verification of readings
         print("\n" + "=" * 30)
