@@ -26,7 +26,8 @@ class PrResult:
     is_excluded: bool = False
     excluded_wells: list[str] = field(default_factory=list)
 
-    # Internal warnings for helping outlier identification
+    # Internal check and warnings for helping outlier identification
+    vehicle_outliers: dict[str, float] = field(default_factory=dict) # well, value
     warnings : list[str] = field(default_factory=list)
 
 @dataclass
@@ -396,24 +397,29 @@ def extract_measurement_data(xls_obj):
 def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     """
     Performs Baseline Correction and Vehicle Normalization.
+    Checks vehicle for outliers.
     Calculates AUC.
-    Returns (processed_df, stats_df)
     """
+    # TODO: restructure process_bret_measurment for taking transfections for conditions into account
     if result.is_excluded:
         return None
     result.warnings = []  # Clear previous
+        result.processed_df = None
+        return result.processed_df
+
+    # --- Config
     # Define accepted vehicle range
     acc_vehicle_range = 0.2
+    # Define Baseline: First 5 rows (Index 0-4)
+    baseline_end_idx = 5
 
     # Get raw BRET ratio table
     raw_df = result.raw_bret_ratio_df.copy()
     time_col = "Time (min)"
 
-    # Define Baseline: First 5 rows (Index 0-4)
-    baseline_end_idx = 5
     # Define Kinetic: Remaining rows (Index 5 onwards)
-    if len(raw_df) < (baseline_end_idx):
-        print(f"   [WARNING] Data has less than {(baseline_end_idx)} rows.")
+    if len(raw_df) < baseline_end_idx:
+        print(f"   [WARNING] Data has less than {baseline_end_idx} rows.")
         return None, None
 
     # Prepare the full dataframe for normalization (removing the time col)
@@ -422,7 +428,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # --- BASELINE CORRECTION ---
     # Isolate baseline rows for calculation
     df_baseline_calc = raw_df.iloc[0:baseline_end_idx].copy()
-    bl_corrected_df = data_df.copy()
+    bl_corrected_df = pd.DataFrame()
 
     for col in data_df.columns:
         if col in result.excluded_wells:
@@ -441,19 +447,21 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
 
     # --- SPECIFY LAYOUT ---
     # Define starting inx of replicate cols
-    triplicate_block_starts = [1,4,7,10]
+    # For later adding labeling layout here
+    triplicate_starts = [1,4,7,10]
+    condition_block_starts = triplicate_starts
+
     # Layout map; which col # belong to which starting block
     plate_layout_map = {}
-    for start in triplicate_block_starts:
+    for start in condition_block_starts:
         for offset in range(3):  # 0, 1, 2 (Triplicates)
-            col_idx = start + offset
-            plate_layout_map[col_idx] = start
+            plate_layout_map[start + offset] = start
 
     # --- VEHICLE CORRECTION ---
     # Calculate mean vehicle for each condition
     vehicle_mean = {}
 
-    for start in triplicate_block_starts:
+    for start in condition_block_starts:
         wells = [f"H{start + k}" for k in range(3)]
         # Filter for wells that actually exist in the dataframe
         # Logic needed for optionally excluding wells
@@ -462,32 +470,20 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         if valid_vehicles:
             # Get vehicle values and make sure that data is numeric
             vehicle_data = bl_corrected_df[valid_vehicles].apply(pd.to_numeric, errors='coerce')
-            # Average across valid vehicle wells per time point
-            vehicle_mean[start] = vehicle_data.mean(axis=1)
-            # print(f"vehicle values {vehicle_mean[start]}")
 
-            # Check bounds of vehicle; mean of entire kinetic as well as single time points
+            # Check bounds of vehicle
             for well in valid_vehicles:
                 # Check kinetic mean
                 veh_kinetic_mean = vehicle_data[well].mean(axis=0)
 
-                # --- testing individual time points was to conservative
-                # Check individual time points
-                # outlier_vehicle = [i for i in vehicle_data[well] if abs(i - 1) > acc_vehicle_range]
-
                 if abs(veh_kinetic_mean - 1) > acc_vehicle_range:
-                    # TODO: separate text warning from flagged vehicle well
-                    # result.flagged_vehicles.append(well)
-                    result.warnings.append(
-                        f"  [VEHICLE WARNING] Well {well} is {veh_kinetic_mean}. Consider well exclusion.")
-                # --- testing individual time points was to conservative
-                # elif len(outlier_vehicle) > 0:
-                #     result.warnings.append(
-                #         f"  [VEHICLE WARNING] Well {well} has outlier values {outlier_vehicle}. Consider exclusion.")
+                    # Store well name and value in dic
+                    result.vehicle_outliers[well] = float(veh_kinetic_mean)
+
+            # Calculate mean across valid vehicle wells per time point
+            vehicle_mean[start] = vehicle_data.mean(axis=1)
         else:
             vehicle_mean[start] = None
-    if len(result.warnings) > 0:
-        print(result.warnings)
 
     # Normalise to mean(vehicle)
     vehicle_corr_df = bl_corrected_df.copy()
