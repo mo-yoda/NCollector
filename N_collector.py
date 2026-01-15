@@ -22,8 +22,12 @@ class PrResult:
     # Stores baseline- and vehicle-normalised BRET ratios
     processed_df: pd.DataFrame | None = None
 
-    # User interaction (optionally excluding a plate)
+    # User interaction for optional exclusion
     is_excluded: bool = False
+    excluded_wells: list[str] = field(default_factory=list)
+
+    # Internal warnings for helping outlier identification
+    warnings : list[str] = field(default_factory=list)
 
 @dataclass
 class ProtocolData:
@@ -415,10 +419,12 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     bl_corrected_df = data_df.copy()
 
     for col in data_df.columns:
+        if col in result.excluded_wells:
+            bl_corrected_df[col] = None
+            continue
         # Mean of baseline rows for this well
         # Force numeric conversion for baseline values to handle potential strings/decimals
-        base_vals = pd.to_numeric(df_baseline_calc[col], errors='coerce')
-        base_mean = base_vals.mean()
+        base_mean = pd.to_numeric(df_baseline_calc[col], errors='coerce').mean()
 
         if base_mean != 0:
             col_vals = pd.to_numeric(data_df[col], errors='coerce')
@@ -445,15 +451,37 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         wells = [f"H{start + k}" for k in range(3)]
         # Filter for wells that actually exist in the dataframe
         # Logic needed for optionally excluding wells
-        valid_wells = [w for w in wells if w in bl_corrected_df.columns]
+        valid_vehicles = [w for w in wells if w in bl_corrected_df.columns and w not in result.excluded_wells]
 
-        if valid_wells:
+        if valid_vehicles:
             # Get vehicle values and make sure that data is numeric
-            vehicle_data = bl_corrected_df[valid_wells].apply(pd.to_numeric, errors='coerce')
-            # TODO: check if vehicle_date is out of bounds -> recommend exclusion of specific wells; based on mean or for each time point?
+            vehicle_data = bl_corrected_df[valid_vehicles].apply(pd.to_numeric, errors='coerce')
             # Average across valid vehicle wells per time point
             vehicle_mean[start] = vehicle_data.mean(axis=1)
             # print(f"vehicle values {vehicle_mean[start]}")
+
+            # Check bounds of vehicle; mean of entire kinetic as well as single time points
+            for well in valid_vehicles:
+                # Check kinetic mean
+                veh_kinetic_mean = vehicle_data[well].mean(axis=0)
+
+                # --- testing individual time points was to conservative
+                # Check individual time points
+                # outlier_vehicle = [i for i in vehicle_data[well] if abs(i - 1) > acc_vehicle_range]
+
+                if abs(veh_kinetic_mean - 1) > acc_vehicle_range:
+                    # TODO: separate text warning from flagged vehicle well
+                    # result.flagged_vehicles.append(well)
+                    result.warnings.append(
+                        f"  [VEHICLE WARNING] Well {well} is {veh_kinetic_mean}. Consider well exclusion.")
+                # --- testing individual time points was to conservative
+                # elif len(outlier_vehicle) > 0:
+                #     result.warnings.append(
+                #         f"  [VEHICLE WARNING] Well {well} has outlier values {outlier_vehicle}. Consider exclusion.")
+        else:
+            vehicle_mean[start] = None
+    if len(result.warnings) > 0:
+        print(result.warnings)
 
     # Normalise to mean(vehicle)
     vehicle_corr_df = bl_corrected_df.copy()
@@ -742,6 +770,7 @@ class NCollectorApp:
                         meas_data = extract_measurement_data(xls)
 
                         if meas_data and meas_data.measurement_date == folder_date_obj:
+                            # TODO: detach bret processing from file collection for repeating processing after well exclusion
                             meas_data.processed_df = process_bret_measurement(meas_data, folder_data.protocol)
                             folder_data.results.append(meas_data)
                             print(f"   [RESULT] Imported: {file_name} (ID2: {meas_data.cell_line}, ID3: {meas_data.transfection})")
