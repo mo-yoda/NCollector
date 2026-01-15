@@ -399,6 +399,12 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     Calculates AUC.
     Returns (processed_df, stats_df)
     """
+    if result.is_excluded:
+        return None
+    result.warnings = []  # Clear previous
+    # Define accepted vehicle range
+    acc_vehicle_range = 0.2
+
     # Get raw BRET ratio table
     raw_df = result.raw_bret_ratio_df.copy()
     time_col = "Time (min)"
