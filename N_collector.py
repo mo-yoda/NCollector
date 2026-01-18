@@ -695,11 +695,202 @@ class NCollectorApp:
         self.log_text = tk.Text(self.tab_import, height=15)
         self.log_text.pack(pady=10)
 
+        # --- TAB 2 CONTENT ---
+        self.setup_exclusion_tab()
+
     # Helper function to write to that text box
     def log(self, message):
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         # print(message)  # Keep printing to console just in case
+
+    def setup_exclusion_tab(self):
+        """Builds GUI for Tab 2 data selection"""
+
+        # Frame for dropdowns
+        filter_frame = tk.LabelFrame(self.tab_select, text="Exclude Data")
+        filter_frame.pack(fill = "x", pady=10, padx=5)
+
+        # Variables
+        self.var_date = tk.StringVar(value="All")
+        self.var_cell = tk.StringVar(value="All")
+        self.var_cond = tk.StringVar(value="All")
+        self.pending_exclusions = []  # List to store rules
+
+        # 1. Date Dropdown
+        tk.Label(filter_frame, text="Date:").grid(row=0, column=0, padx=5, pady=5)
+        self.cb_date = ttk.Combobox(filter_frame, textvariable=self.var_date, state="readonly")
+        self.cb_date.grid(row=0, column=1, padx=5, pady=5)
+        self.cb_date.bind("<<ComboboxSelected>>", self.update_cell_options)
+
+        # 2. Cell Line Dropdown
+        tk.Label(filter_frame, text="Cell Line:").grid(row=0, column=2, padx=5, pady=5)
+        self.cb_cell = ttk.Combobox(filter_frame, textvariable=self.var_cell, state="readonly")
+        self.cb_cell.grid(row=0, column=3, padx=5, pady=5)
+        self.cb_cell.bind("<<ComboboxSelected>>", self.update_cond_options)
+
+        # 3. Condition Dropdown
+        tk.Label(filter_frame, text="Condition:").grid(row=0, column=4, padx=5, pady=5)
+        self.cb_cond = ttk.Combobox(filter_frame, textvariable=self.var_cond, state="readonly")
+        self.cb_cond.grid(row=0, column=5, padx=5, pady=5)
+
+        # Buttons
+        btn_frame = tk.Frame(filter_frame)
+        btn_frame.grid(row=1, column=0, columnspan=6, pady=10)
+
+        tk.Button(btn_frame, text="Add Rule to List", command=self.add_exclusion_rule).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Clear List", command=self.clear_exclusion_list).pack(side="left", padx=5)
+
+        # Listbox for Pending Exclusions
+        list_frame = tk.LabelFrame(self.tab_select, text="Pending Exclusions (Will be removed upon Apply)")
+        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.lb_exclusions = tk.Listbox(list_frame, height=8)
+        self.lb_exclusions.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Apply Button (Bottom)
+        tk.Button(self.tab_select, text="APPLY EXCLUSIONS & RE-CALCULATE",
+                  command=self.apply_exclusions).pack(pady=10, ipadx=10)
+
+    def refresh_filter_options(self):
+        """Called during built master index. Updates dropdwon options."""
+        if self.master_df.empty: return
+
+        # Get unique dates and add "All"
+        dates = sorted(self.master_df['Date'].unique().tolist())
+        self.cb_date['values'] = ["All"] + dates
+        self.var_date.set("All")
+
+        # Reset others
+        self.update_cell_options()
+
+    def update_cell_options(self, event=None):
+        """Updates Cell Line options based on selected Date."""
+        selected_date = self.var_date.get()
+
+        if self.master_df.empty: return
+
+        if selected_date == "All":
+            # Show all cell lines available in the whole dataset
+            cells = sorted(self.master_df['Cell_Line'].unique().tolist())
+        else:
+            # Filter DF by date
+            subset = self.master_df[self.master_df['Date'] == selected_date]
+            cells = sorted(subset['Cell_Line'].unique().tolist())
+
+        self.cb_cell['values'] = ["All"] + cells
+        self.var_cell.set("All")
+        self.update_cond_options()
+
+    def update_cond_options(self, event=None):
+        """Updates Condition options based on selected Date AND Cell Line."""
+        selected_date = self.var_date.get()
+        selected_cell = self.var_cell.get()
+
+        if self.master_df.empty: return
+
+        # Start with full DF
+        subset = self.master_df.copy()
+
+        # Apply Date Filter
+        if selected_date != "All":
+            subset = subset[subset['Date'] == selected_date]
+
+        # Apply Cell Filter
+        if selected_cell != "All":
+            subset = subset[subset['Cell_Line'] == selected_cell]
+
+        conds = sorted(subset['Condition'].unique().tolist())
+        self.cb_cond['values'] = ["All"] + conds
+        self.var_cond.set("All")
+
+    def add_exclusion_rule(self):
+        """Adds the current dropdown state to the pending list."""
+        rule = {
+            "Date": self.var_date.get(),
+            "Cell_Line": self.var_cell.get(),
+            "Condition": self.var_cond.get()
+        }
+
+        # Check for duplicates or empty
+        rule_str = f"Date: {rule['Date']} | Cell: {rule['Cell_Line']} | Cond: {rule['Condition']}"
+
+        self.pending_exclusions.append(rule)
+        self.lb_exclusions.insert(tk.END, rule_str)
+
+    def clear_exclusion_list(self):
+        self.pending_exclusions = []
+        self.lb_exclusions.delete(0, tk.END)
+
+    def add_exclusion_rule(self):
+        """Adds the current dropdown state to the pending list."""
+        rule = {
+            "Date": self.var_date.get(),
+            "Cell_Line": self.var_cell.get(),
+            "Condition": self.var_cond.get()
+        }
+
+        # Check for duplicates or empty
+        rule_str = f"Date: {rule['Date']} | Cell: {rule['Cell_Line']} | Cond: {rule['Condition']}"
+
+        self.pending_exclusions.append(rule)
+        self.lb_exclusions.insert(tk.END, rule_str)
+
+    def clear_exclusion_list(self):
+        self.pending_exclusions = []
+        self.lb_exclusions.delete(0, tk.END)
+
+    def apply_exclusions(self):
+        """
+        Iterates through pending rules, finds matching rows in Master DF,
+        and updates the 'excluded_wells' list in the Ref_Result objects.
+        """
+        if not self.pending_exclusions:
+            self.log("No exclusion rules defined.")
+            return
+
+        self.log(f"\n--- Applying {len(self.pending_exclusions)} Exclusion Rules ---")
+
+        count = 0
+
+        for rule in self.pending_exclusions:
+            # Start with full dataframe
+            target_rows = self.master_df.copy()
+
+            # Apply filters based on rule
+            if rule['Date'] != "All":
+                target_rows = target_rows[target_rows['Date'] == rule['Date']]
+            if rule['Cell_Line'] != "All":
+                target_rows = target_rows[target_rows['Cell_Line'] == rule['Cell_Line']]
+            if rule['Condition'] != "All":
+                target_rows = target_rows[target_rows['Condition'] == rule['Condition']]
+
+            if target_rows.empty:
+                self.log(f"   [WARNING] Rule {rule} matched 0 records.")
+                continue
+
+            # Apply exclusion to found records
+            for _, row in target_rows.iterrows():
+                result_obj = row['Ref_Result']
+                col_idx = row['Column_Index']
+
+                # Exclude the whole column (Rows A-H for this column index)
+                # Since user dismissed specific Well ID, we assume they want to kill the replicate
+                wells_to_kill = [f"{row_char}{col_idx}" for row_char in "ABCDEFGH"]
+
+                for w in wells_to_kill:
+                    if w not in result_obj.excluded_wells:
+                        result_obj.excluded_wells.append(w)
+                        result_obj.is_excluded = True  # Flag object as modified
+                        count += 1
+
+        self.log(f"   [DONE] Excluded {count} wells based on rules.")
+
+        # Clear list after applying
+        self.clear_exclusion_list()
+
+        # Rerun processing to update graphs/stats
+        self.run_processing_pipeline()
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
@@ -828,7 +1019,7 @@ class NCollectorApp:
             # --- Summary for verification ---
             summary = self.master_df.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
             print("\n[DEBUG] Data Summary:\n", summary)
-
+            self.refresh_filter_options()
             return self.master_df
         else:
             self.master_df = pd.DataFrame()
