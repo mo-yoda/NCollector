@@ -711,12 +711,20 @@ class NCollectorApp:
         self.master = main_window
         main_window.title("N Collector")
 
+        # Separate log window
+        self.log_window = tk.Toplevel(main_window)
+        self.log_window.title("Processing Log")
+        self.log_window.geometry("700x500")
+
+        # Log window to display print statements
+        self.log_text = tk.Text(self.log_window)
+        self.log_text.pack(expand=True, fill='both')
+
         # --- GUI State ---
         # Path to folder variable
         self.folder_path = tk.StringVar(value="No folder selected.")
         self.subfolder_paths_with_files = []
         self.experiment: list[MeasurementFolder] = []
-
         self.master_df = pd.DataFrame()
 
         # --- TABS SETUP ---
@@ -725,27 +733,27 @@ class NCollectorApp:
 
         # Tab 1: Import Data
         self.tab_import = tk.Frame(self.notebook)
-        self.notebook.add(self.tab_import, text="1. Import Data")
+        self.notebook.add(self.tab_import, text="Import & Export Data")
 
         # Tab 2: Data Selection
         self.tab_select = tk.Frame(self.notebook)
-        self.notebook.add(self.tab_select, text="2. Data Selection")
+        self.notebook.add(self.tab_select, text="Optional Selection")
 
         # --- TAB 1 CONTENT ---
+        # Select Folder button
+        # No self. needed as this does not have to be stored for later changes
+        tk.Button(self.tab_import, text="Select folder containing results of experiment",
+                  command=self.select_folder).pack(pady=10, padx=10)
+
         # Display label for path
         self.path_label = tk.Label(self.tab_import,
                                    textvariable=self.folder_path,
                                    wraplength=1000,
                                    justify="left",
                                    font=('Arial', 10))
-        self.path_label.pack(pady=10, padx=10) # placing the text via .pack
+        self.path_label.pack(pady=10, padx=10)
 
-        # Select Folder button
-        # No self. needed as this does not have to be stored for later changes
-        tk.Button(self.tab_import, text="Select folder containing results of experiment",
-                  command=self.select_folder).pack(pady=10, padx=10)
-
-        # Analyse button
+        # Load button
         self.collect_button = tk.Button(self.tab_import,
                                         text="Load Files",
                                         state="disabled",
@@ -770,6 +778,13 @@ class NCollectorApp:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         # print(message)  # Keep printing to console just in case
+        """Logs to the separate window"""
+        try:
+            self.log_text.insert(tk.END, message + "\n")
+            self.log_text.see(tk.END)
+        except tk.TclError:
+            # Handle case where user manually closed log window but app is running
+            print(message)
 
     def setup_exclusion_tab(self):
         """Builds GUI for Tab 2 data selection"""
