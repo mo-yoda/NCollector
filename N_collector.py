@@ -51,6 +51,7 @@ class ProtocolData:
     line_layout: str
     transfection_scheme: pd.DataFrame
     main_plasmids: list[str] # Plasmids transfected in all conditions
+    # keys are col strings, values are transfected plasmids
     transfection_conditions: dict[str, list[str]]
     ligand: str
     ligand_conc: pd.DataFrame
@@ -572,7 +573,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # Get transfection map via mapping ID3 info
     raw_ids = [x.strip() for x in str(result.transfection_id).split(',')] if result.transfection_id else []
     mapped_t_ids = get_transfection_map(protocol.line_layout, raw_ids, len(plate_blocks))
-    print(f"[DEBUG] Mapped Block Sequence (0-3): {mapped_t_ids}")
+    print(f"[DEBUG] Mapped Block Sequence: {mapped_t_ids}")
 
     # Apply metadata on cols
     for i, block_cols in enumerate(plate_blocks):
@@ -1262,7 +1263,7 @@ class NCollectorApp:
                 vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
                 self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
 
-        # Built master indexing table (needed for flexible data exclusion
+        # Built master indexing table (needed for flexible data exclusion)
         self.built_master_index()
 
         self.log("\n--- Processing Complete ---")
