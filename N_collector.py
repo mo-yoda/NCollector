@@ -655,6 +655,8 @@ class NCollectorApp:
         self.subfolder_paths_with_files = []
         self.experiment: list[MeasurementFolder] = []
 
+        self.master_df = pd.DataFrame()
+
         # --- TABS SETUP ---
         self.notebook = ttk.Notebook(main_window)
         self.notebook.pack(expand=True, fill='both')
@@ -727,36 +729,6 @@ class NCollectorApp:
                 self.collect_button.config(state="disabled")
                 print(f"No .xlsx or .xlsm files found starting from: {directory}")
 
-    def map_conditions_to_results(self):
-        """
-        Iterates through all loaded experiments and resolves the numerical ID3
-        into actual conditions using the Protocol information.
-        """
-        self.log("\n--- Resolving Experimental Conditions ---")
-        for folder in self.experiment:
-            if not folder.protocol:
-                continue
-
-            # Dic of # transfection to condition {'1': ['plasmid_A', 'plasmid_B'], '2': ...}
-            mapping = folder.protocol.transfection_conditions
-
-            for result in folder.results:
-                if result.transfection_id:
-                    # Split ID3 by comma and strip whitespace
-                    ids = [x.strip() for x in str(result.transfection_id).split(',')]
-                else:
-                    ids = []
-
-                condition_found = []
-                for i in ids:
-                    # Look up ID in the protocol mapping, [] list as fallback
-                    plasmids = mapping.get(i, [f"Unknown_ID3_part_{i}"])
-                    cond_name = " + ".join(sorted(plasmids)) # Handling co-transfection
-                    condition_found.append(cond_name)
-
-                # Sort to ensure "Rab5 + b2AR" is treated same as "b2AR + Rab5" if order implies same condition
-                result.exp_conditions = sorted(condition_found)
-
     def handle_main_plasmids_selection(self):
         """
         Checks main_plasmids consistency. If multiple sets found, user selects one.
@@ -817,47 +789,60 @@ class NCollectorApp:
 
         return " + ".join(selected_key)
 
-    def aggregate_experiments(self, main_plasmids_name):
+    def built_master_index(self):
         """
-        Groups results by (Cell Line, Condition). Returns a dictionary of groups as preparation
-        for optional exclusion by User.
+        Creates a pd dataframe containing all metadata for all wells.
+        Enables flexible filtering needed for exclusion of data.
         """
-        # TODO: update to take processed and map results; CK layout was addressed by process_bret_measurement fun
-        self.log(f"\n--- Collecting Ns for measurements with {main_plasmids_name} ---")
 
-        # Nested dic as planned treeview GUI expects this
-        grouped_data = {}
+        print("----- building master index ------")
 
-        # sth here takes ages
+        # collect list of records for each col
+        records = []
+
         for folder in self.experiment:
             for result in folder.results:
-                # Get ID2: cell_lines
-                cell_line = result.cell_line
+                # Get col metadata first
+                if not result.column_metadata:
+                    continue
+                # Iterate through the mapped cols (1-12)
+                for col_idx, meta in result.column_metadata.items():
+                    # Filter out empty cols
+                    if not meta.condition_name or "Empty" in meta.condition_name:
+                        continue
+                    # Create a record for this col
+                    record = {
+                        "File_Name": result.file_name,
+                        "Date": result.measurement_date.strftime('%d.%m.%y'),  # String for dropdowns
+                        "Cell_Line": meta.cell_line,
+                        "Condition": meta.condition_name,
+                        "Transfection_ID": meta.transfection_id,
+                        "Column_Index": col_idx,
+                        "Ref_Result": result  # Store the actual object to manipulate later
+                    }
+                    records.append(record)
+        # Built df from records
+        if records:
+            self.master_df = pd.DataFrame(records)
 
-                if not result.exp_conditions:
-                    # Handle case where no conditions were mapped or ID3 was empty
-                    cond_list = ["Undefined Condition"]
-                else:
-                    cond_list = result.exp_conditions
+            # --- Summary for verification ---
+            summary = self.master_df.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
+            print("\n[DEBUG] Data Summary:\n", summary)
 
-                if cell_line not in grouped_data:
-                    grouped_data[cell_line] = {}
+            return self.master_df
+        else:
+            self.master_df = pd.DataFrame()
+            print("No valid data found")
+            return self.master_df
 
-                # Iterate through each separate condition found in the result file
-                for cond_name in cond_list:
-                    if cond_name not in grouped_data[cell_line]:
-                        grouped_data[cell_line][cond_name] = []
 
-                    # TODO: not the entire result has to be appended, only the specific condition! -> BRET processing has to be done first
-                    grouped_data[cell_line][cond_name].append(result)
-        return grouped_data
 
     def collect_files(self):
         """
+        1. LOAD FILES
         Reads sheet names of all xlsx and xlsm files to identify and separate protocol and result analysis files.
         Validation of correct protocol to analysis files is done via date of measurement in the folder name.
         """
-
         if not self.subfolder_paths_with_files:
             print("No folders to analyze.")
             return
@@ -954,19 +939,20 @@ class NCollectorApp:
 
     def run_processing_pipeline(self):
         """
+        2. Processing of raw BRET data and indexing with protocol info
         Calls processing functions and is rerun if data was excluded.
         """
         self.log("\n--- Starting Processing Pipeline ---")
 
-        # Get the transfected plasmids to assign conditions
-        self.map_conditions_to_results()
         # Check for plasmids transfected in all conditions (main plasmids) and filter if needed
         selected_exp_name = self.handle_main_plasmids_selection()
 
+        # Iterate through data and perform mapping+calculations
         for folder in self.experiment:
             if not folder.protocol: continue # Protocol is needed for processing
             for result in folder.results:
                 # Process each result file within one folder (belonging to one protocol)
+                # Also assigns conditions to data
                 result.processed_df = process_bret_measurement(result, folder.protocol)
 
             # Handle outliers stored in dic
@@ -974,30 +960,12 @@ class NCollectorApp:
                 vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
                 self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
 
-        # Collect Ns
-        grouped_results = self.aggregate_experiments(selected_exp_name)
+        # Built master indexing table (needed for flexible data exclusion
+        self.built_master_index()
+
         self.log("\n--- Processing Complete ---")
 
-        print("\n" + "=" * 40)
-        print("AGGREGATED DATA SUMMARY (N COUNTS)")
-        print("=" * 40)
-
-        if not grouped_results:
-            print("No data aggregated.")
-
-        for cell_line, conditions in grouped_results.items():
-            print(f"\nCell Line: {cell_line}")
-            for cond_name, results_list in conditions.items():
-                n_count = len(results_list)
-                print(f"  • Condition: {cond_name}")
-                print(f"      -> N = {n_count}")
-                # Optional: Show which days contributed
-                days = sorted([r.measurement_date.strftime('%y%m%d') for r in results_list])
-                print(f"      -> Days: {', '.join(days)}")
-
-        print("\n" + "=" * 40)
-
-# TODO: implement window to show any ERROR messages + add optional export of log file
+# TODO: implement showing also errors from tool functions in log window
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
