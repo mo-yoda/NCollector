@@ -30,6 +30,8 @@ class PrResult:
     column_metadata: dict[int, PlateColMetadata] = field(default_factory=dict)
     # Stores baseline- and vehicle-normalised BRET ratios
     processed_df: pd.DataFrame | None = None
+    kinetic_mean_df: pd.DataFrame | None = None
+    auc_mean_df:pd.DataFrame | None = None
 
     # User interaction for optional exclusion
     is_excluded: bool = False
@@ -494,15 +496,58 @@ def get_block_start_for_col(col_index: int, plate_blocks: list[range]):
             return block[0]  # Return the first column of that block (e.g., 1, 4, 7...)
     return None
 
+def calculate_replicate_means(processed_df: pd.DataFrame,
+                              plate_blocks: list[range],
+                              col_metadata: dict): # Dic created from PlateColMetadata
+    """
+    Calculates the mean of technical replicates. As in processed_df each col is one well,
+    the mean is performed of three cols within one block.
+    Rows (A-H) are treated as distinct conditions (ligand concentration).
+    """
+    mean_data = {}
+    row_labels = list("ABCDEFGH")
+
+    for block_idx, block_cols in enumerate(plate_blocks):
+        # Identify the Metadata for this block (use first col as it is identical to others)
+        first_col_in_block = block_cols[0]
+        meta = col_metadata.get(first_col_in_block)
+
+        # Create a base name for the condition
+        cond_name = meta.condition_name if meta else f"Block_{block_idx + 1}"
+
+        # Iterate through plate rows (A-H)
+        for row in row_labels:
+            # Construct well IDs for this specific condition (e.g., A1, A2, A3)
+            replicate_wells = [f"{row}{c}" for c in block_cols]
+
+            # Filter for wells that actually exist in the processed dataframe
+            valid_wells = [w for w in replicate_wells if w in processed_df.columns]
+
+            if valid_wells:
+                # Select the data for these wells
+                # axis=1 calculates the mean across columns (replicates) per time point
+                # skipna=True is default, handling excluded wells automatically
+                mean_series = processed_df[valid_wells].apply(pd.to_numeric, errors='coerce').mean(axis=1)
+
+                # Construct a unique column header
+                # Format: "ConditionName | Row" (e.g., "Receptor+Gprot | A")
+                header_key = f"{cond_name} | {row}"
+                mean_data[header_key] = mean_series
+
+    return pd.DataFrame(mean_data)
+
+
 def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     """
-    Maps cell line x transfection plate layout using protocl info.
+    Maps cell line x transfection plate layout using protocol info.
     Performs Baseline Correction and Vehicle Normalization.
     Checks vehicle for outliers.
     Calculates AUC.(PENDING)
     """
     if result.is_excluded:
         result.processed_df = None
+        result.kinetic_mean_df = None
+        result.auc_df = None
         return result.processed_df
 
     # Reset for re-run
@@ -637,8 +682,23 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
             vehicle_corr_df[col] = bl_corrected_df[col] / vehicle_mean[block_start]
         else:
             vehicle_corr_df[col] = None
-    # TODO: add AUC calculation
-    return vehicle_corr_df
+
+    # Store processed df before processing further
+    result.processed_df = vehicle_corr_df
+
+    # --- MEAN OF REPLICATES (KINETIC) ---
+    result.kinetic_mean = calculate_replicate_means(
+        processed_df=result.processed_df,
+        plate_blocks=plate_blocks,
+        col_metadata=result.column_metadata
+    )
+    print("-"*40)
+    print(result.kinetic_mean)
+    print("-" * 40)
+
+    # TODO: add AUC calculation + subsequent mean of replicates
+    return result
+
 
 # TODO: add function to rearrange cols of processed bret df (flexible for user interaction)
 
