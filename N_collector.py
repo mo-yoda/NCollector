@@ -715,7 +715,10 @@ class NCollectorApp:
         self.var_date = tk.StringVar(value="All")
         self.var_cell = tk.StringVar(value="All")
         self.var_cond = tk.StringVar(value="All")
-        self.pending_exclusions = []  # List to store rules
+        self.var_repl = tk.StringVar(value="")
+        self.var_row = tk.StringVar(value="")
+        # List to store rules
+        self.pending_exclusions = []
 
         # 1. Date Dropdown
         tk.Label(filter_frame, text="Date:").grid(row=0, column=0, padx=5, pady=5)
@@ -733,10 +736,29 @@ class NCollectorApp:
         tk.Label(filter_frame, text="Condition:").grid(row=0, column=4, padx=5, pady=5)
         self.cb_cond = ttk.Combobox(filter_frame, textvariable=self.var_cond, state="readonly")
         self.cb_cond.grid(row=0, column=5, padx=5, pady=5)
+        self.cb_cond.bind("<<ComboboxSelected>>", self.update_repl_options)
+
+        # 4. Granular Filters Col (replicate) and Row (ligand conc)
+        granular_frame = tk.Frame(filter_frame)
+        granular_frame.grid(row=1, column=0, columnspan=6, pady=5, sticky="w")
+
+        tk.Label(granular_frame, text="Technical Replicate:").pack(side="left", padx=5)
+        self.cb_rep = ttk.Combobox(granular_frame, textvariable=self.var_repl, state="readonly", width=5)
+        self.cb_rep.pack(side="left", padx=5)
+        self.cb_rep['values'] = ["", "1", "2", "3"]
+        self.cb_rep.bind("<<ComboboxSelected>>", self.toggle_row_dropdown)
+
+        # Row dropdown (Initially disabled/hidden until Replicate is picked)
+        self.lbl_row = tk.Label(granular_frame, text="Specific Row:")
+        self.lbl_row.pack(side="left", padx=5)
+
+        self.cb_row = ttk.Combobox(granular_frame, textvariable=self.var_row, state="disabled", width=5)
+        self.cb_row.pack(side="left", padx=5)
+        self.cb_row['values'] = ["", "A", "B", "C", "D", "E", "F", "G", "H"]
 
         # Buttons
         btn_frame = tk.Frame(filter_frame)
-        btn_frame.grid(row=1, column=0, columnspan=6, pady=10)
+        btn_frame.grid(row=2, column=0, columnspan=6, pady=10)
 
         tk.Button(btn_frame, text="Add Rule to List", command=self.add_exclusion_rule).pack(side="left", padx=5)
         tk.Button(btn_frame, text="Clear List", command=self.clear_exclusion_list).pack(side="left", padx=5)
@@ -752,8 +774,21 @@ class NCollectorApp:
         tk.Button(self.tab_select, text="APPLY EXCLUSIONS & RE-CALCULATE",
                   command=self.apply_exclusions).pack(pady=10, ipadx=10)
 
+    def update_repl_options(self, event=None):
+        """Reset replicate when conditions changes"""
+        self.var_repl.set("")
+        self.toggle_row_dropdown()
+
+    def toggle_row_dropdown(self, event=None):
+        """Enable row dropdown only if a specific replicate is selected"""
+        if self.var_repl.get() != "":
+            self.cb_row.config(state="readonly")
+        else:
+            self.var_repl.set("")
+            self.cb_row.config(state="disabled")
+
     def refresh_filter_options(self):
-        """Called during built master index. Updates dropdwon options."""
+        """Called during built master index. Updates dropdown options of date, cell line and condition."""
         if self.master_df.empty: return
 
         # Get unique dates and add "All"
@@ -805,15 +840,27 @@ class NCollectorApp:
         self.var_cond.set("All")
 
     def add_exclusion_rule(self):
-        """Adds the current dropdown state to the pending list."""
+        """
+        Adds the current dropdown state to the pending list.
+        Handles empty strings for Replicate/Col and Row.
+        """
+        rep_val = self.var_repl.get()
+        row_val = self.var_row.get()
+
         rule = {
             "Date": self.var_date.get(),
             "Cell_Line": self.var_cell.get(),
-            "Condition": self.var_cond.get()
+            "Condition": self.var_cond.get(),
+            "Replicate": rep_val,
+            "Row": row_val
         }
 
+        # Create display string
+        rep_str = rep_val if rep_val else "All (1-3)"
+        row_str = row_val if row_val else "All (A-H)"
+
         # Check for duplicates or empty
-        rule_str = f"Date: {rule['Date']} | Cell: {rule['Cell_Line']} | Cond: {rule['Condition']}"
+        rule_str = f"Date: {rule['Date']} | Cell: {rule['Cell_Line']} | Cond: {rule['Condition']} | Rep:{rep_str} | Row:{row_str}"
 
         self.pending_exclusions.append(rule)
         self.lb_exclusions.insert(tk.END, rule_str)
@@ -837,34 +884,50 @@ class NCollectorApp:
 
         for rule in self.pending_exclusions:
             # Start with full dataframe
-            target_rows = self.master_df.copy()
+            df = self.master_df.copy()
 
-            # Apply filters based on rule
+            # Apply high level filters
             if rule['Date'] != "All":
-                target_rows = target_rows[target_rows['Date'] == rule['Date']]
+                df = df[df['Date'] == rule['Date']]
             if rule['Cell_Line'] != "All":
-                target_rows = target_rows[target_rows['Cell_Line'] == rule['Cell_Line']]
+                df = df[df['Cell_Line'] == rule['Cell_Line']]
             if rule['Condition'] != "All":
-                target_rows = target_rows[target_rows['Condition'] == rule['Condition']]
+                df = df[df['Condition'] == rule['Condition']]
 
-            if target_rows.empty:
+            if df.empty:
                 self.log(f"   [WARNING] Rule {rule} matched 0 records.")
                 continue
 
-            # Apply exclusion to found records
-            for _, row in target_rows.iterrows():
+            # Iterate matched records
+            for _, row in df.iterrows():
                 result_obj = row['Ref_Result']
                 col_idx = row['Column_Index']
 
-                # Exclude the whole column (Rows A-H for this column index)
-                # Since user dismissed specific Well ID, we assume they want to kill the replicate
-                wells_to_kill = [f"{row_char}{col_idx}" for row_char in "ABCDEFGH"]
+                # --- Logic for replicates (cols)
+                target_cols = []
+                if rule['Replicate'] == "":
+                    # If empty, target all 3 cols in the block
+                    target_cols = [col_idx, col_idx + 1, col_idx + 2]
+                elif rule['Replicate'] == "1":
+                    target_cols = [col_idx]
+                elif rule['Replicate'] == "2":
+                    target_cols = [col_idx + 1]
+                elif rule['Replicate'] == "3":
+                    target_cols = [col_idx + 2]
 
-                for w in wells_to_kill:
-                    if w not in result_obj.excluded_wells:
-                        result_obj.excluded_wells.append(w)
-                        result_obj.is_excluded = True  # Flag object as modified
-                        count += 1
+                # --- Logic for rows
+                target_rows = "ABCDEFGH"
+                if rule['Row'] != "": target_rows = rule['Row']
+
+                # Apply exclusion
+                for c in target_cols:
+                    if not (1 <= c <= 12): continue
+                    for r in target_rows:
+                        well_id = f"{r}{c}"
+                        if well_id not in result_obj.excluded_wells:
+                            result_obj.excluded_wells.append(well_id)
+                            result_obj.is_excluded = True
+                            count += 1
 
         self.log(f"   [DONE] Excluded {count} wells based on rules.")
 
