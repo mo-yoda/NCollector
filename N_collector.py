@@ -822,24 +822,6 @@ class NCollectorApp:
         self.pending_exclusions = []
         self.lb_exclusions.delete(0, tk.END)
 
-    def add_exclusion_rule(self):
-        """Adds the current dropdown state to the pending list."""
-        rule = {
-            "Date": self.var_date.get(),
-            "Cell_Line": self.var_cell.get(),
-            "Condition": self.var_cond.get()
-        }
-
-        # Check for duplicates or empty
-        rule_str = f"Date: {rule['Date']} | Cell: {rule['Cell_Line']} | Cond: {rule['Condition']}"
-
-        self.pending_exclusions.append(rule)
-        self.lb_exclusions.insert(tk.END, rule_str)
-
-    def clear_exclusion_list(self):
-        self.pending_exclusions = []
-        self.lb_exclusions.delete(0, tk.END)
-
     def apply_exclusions(self):
         """
         Iterates through pending rules, finds matching rows in Master DF,
