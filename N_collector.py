@@ -503,6 +503,7 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
     Calculates the mean of technical replicates. As in processed_df each col is one well,
     the mean is performed of three cols within one block.
     Rows (A-H) are treated as distinct conditions (ligand concentration).
+    Header format of returned df: "Condition_Name|Cell_Line|Row"
     """
     mean_data = {}
     row_labels = list("ABCDEFGH")
@@ -514,6 +515,7 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
 
         # Create a base name for the condition
         cond_name = meta.condition_name if meta else f"Block_{block_idx + 1}"
+        cell_line = meta.cell_line if meta else "Unknown"
 
         # Iterate through plate rows (A-H)
         for row in row_labels:
@@ -530,12 +532,10 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
                 mean_series = processed_df[valid_wells].apply(pd.to_numeric, errors='coerce').mean(axis=1)
 
                 # Construct a unique column header
-                # Format: "ConditionName | Row" (e.g., "Receptor+Gprot | A")
-                header_key = f"{cond_name} | {row}"
+                header_key = f"{cond_name}|{cell_line}|{row}"
                 mean_data[header_key] = mean_series
 
     return pd.DataFrame(mean_data)
-
 
 def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     """
@@ -544,6 +544,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     Checks vehicle for outliers.
     Calculates AUC.(PENDING)
     """
+    # TODO: handle ligand identitfy and concentrations
     if result.is_excluded:
         result.processed_df = None
         result.kinetic_mean_df = None
@@ -687,13 +688,13 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     result.processed_df = vehicle_corr_df
 
     # --- MEAN OF REPLICATES (KINETIC) ---
-    result.kinetic_mean = calculate_replicate_means(
+    result.kinetic_mean_df = calculate_replicate_means(
         processed_df=result.processed_df,
         plate_blocks=plate_blocks,
         col_metadata=result.column_metadata
     )
     print("-"*40)
-    print(result.kinetic_mean)
+    print(result.kinetic_mean_df)
     print("-" * 40)
 
     # TODO: add AUC calculation + subsequent mean of replicates
@@ -750,6 +751,11 @@ class NCollectorApp:
                                         command=self.collect_files
         )
         self.collect_button.pack(pady=15)
+
+        # Export button
+        tk.Button(self.tab_import,
+                  text="Export data",
+                  command=self.export_data).pack(pady=20, ipadx=10)
 
         # Log window to display print statements
         self.log_text = tk.Text(self.tab_import, height=15)
@@ -1249,7 +1255,7 @@ class NCollectorApp:
             for result in folder.results:
                 # Process each result file within one folder (belonging to one protocol)
                 # Also assigns conditions to data
-                result.processed_df = process_bret_measurement(result, folder.protocol)
+                result = process_bret_measurement(result, folder.protocol)
 
             # Handle outliers stored in dic
             if result.vehicle_outliers:
@@ -1260,6 +1266,120 @@ class NCollectorApp:
         self.built_master_index()
 
         self.log("\n--- Processing Complete ---")
+
+    def export_data(self):
+        """
+        Exports kinetic mean data as multi-sheet xlsx (for now) in user-selected path.
+        - one sheet per condition + row, with all cell lines
+        - time col is created based on baseline offset
+        """
+        # TODO: improve time col definition -> handle in process_bret_measurement
+        # TODO: improve layout of exporting all data
+        # TODO: add plotting helper tab (loading all data exports)
+
+        if not self.experiment:
+            self.log("No data to export.")
+            return
+
+        export_file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            title="Export Kinetic Means"
+        )
+        if not export_file_path: return
+
+        self.log(f"--- Exporting to {os.path.basename(export_file_path)} ---")
+
+        # Structure: export_tree[SheetName][CellLine] = [Series_N1, Series_N2...]
+        export_tree = {}
+
+        # Setting for baseline measurement count
+        baseline_count = 5
+
+        # Collect data from all experiment folders
+        for folder in self.experiment:
+            for result in folder.results:
+                # Skip is whole file is excluded
+                if result.is_excluded or result.kinetic_mean_df is None:
+                    continue
+
+                # Generate time index
+                n_points = len(result.kinetic_mean_df)
+                time_index = range(-baseline_count, n_points-baseline_count)
+
+                # Iterate through cols created in kinetic_mean_df
+                for col_key in result.kinetic_mean_df.columns:
+                    try:
+                        cond, cell, row = col_key.split('|')
+                    except ValueError:
+                        continue # Skip malformed cols
+
+                    # Create sheet name: Condition + Row
+                    # (Limit to 31 chars for Excel compatibility!!!)
+                    sheet_name = f"{cond}_{row}"
+                    bad_chars = "[]:*?/\\"
+                    for c in bad_chars: sheet_name = sheet_name.replace(c, "_")
+                    sheet_name = sheet_name[:31]
+
+                    # Init storage
+                    if sheet_name not in export_tree:
+                        export_tree[sheet_name] = {}
+                    if cell not in export_tree[sheet_name]:
+                        export_tree[sheet_name][cell] = []
+
+                    # Get data and set time index
+                    series = result.kinetic_mean_df[col_key].copy()
+                    series.index = time_index
+
+                    export_tree[sheet_name][cell].append(series)
+
+        # Write to excel
+        try:
+            with pd.ExcelWriter(export_file_path) as writer:
+                # Iterate through sheets (conditions + row)
+                for sheet_name, cell_data in export_tree.items():
+                    # Sort cell lines alphabetically
+                    sorted_cells = sorted(cell_data.keys())
+
+                    # Create a list of DataFrames to concatenate
+                    dfs_to_concat = []
+                    header_list = ["Time (min)"]
+
+                    # Built dataframe for this sheet
+                    for cell in sorted_cells:
+                        replicates = cell_data[cell]
+
+                        # add to header list
+                        header_list.append(cell)
+                        header_list.extend([""] * (len(replicates) - 1))
+
+                        # 2. Collect Data
+                        df_cell = pd.concat(replicates, axis=1)
+                        dfs_to_concat.append(df_cell)
+
+                    if not dfs_to_concat: continue
+
+                    # Combine all data side-by-side
+                    full_sheet_df = pd.concat(dfs_to_concat, axis=1)
+
+                    # Sort by Index (Time)
+                    full_sheet_df.sort_index(inplace=True)
+
+                    # Reset index so "Time" becomes the first column (col 0)
+                    full_sheet_df.reset_index(inplace=True)
+
+                    # Force the columns to match our manual header list
+                    # (Pandas allows duplicate column names like "" here)
+                    full_sheet_df.columns = header_list
+
+                    # Write to Excel without the default index or header processing
+                    full_sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+            self.log("   [SUCCESS] Export complete.")
+
+        except Exception as e:
+            self.log(f"   [ERROR] Export failed: {e}")
+            print(e)
 
 # TODO: implement showing also errors from tool functions in log window
 
