@@ -761,6 +761,33 @@ class NCollectorApp:
         )
         self.collect_button.pack(pady=15)
 
+        # Display of N summary table
+        summary_frame = tk.Frame(self.tab_import)
+        summary_frame.pack(pady=10, fill="both", expand=True ,padx=20)
+        # Scrollbar for table
+        tree_scroll = tk.Scrollbar(summary_frame)
+        tree_scroll.pack(side="right", fill="y")
+
+        self.summary_tree = ttk.Treeview(summary_frame,
+                                         columns=("Cell", "Cond", "N", "Dates"),
+                                         show="headings",
+                                         yscrollcommand=tree_scroll.set,
+                                         height=6)
+        tree_scroll.config(command=self.summary_tree.yview)
+
+        # Define Columns
+        self.summary_tree.heading("Cell", text="Cell Line")
+        self.summary_tree.heading("Cond", text="Condition")
+        self.summary_tree.heading("N", text="N")
+        self.summary_tree.heading("Dates", text="Dates")
+
+        self.summary_tree.column("Cell", width=100)
+        self.summary_tree.column("Cond", width=250)
+        self.summary_tree.column("N", width=30, anchor="center")
+        self.summary_tree.column("Dates", width=150)
+
+        self.summary_tree.pack(fill="both", expand=True)
+
         # Export button
         tk.Button(self.tab_import,
                   text="Export data",
@@ -778,6 +805,29 @@ class NCollectorApp:
         except tk.TclError:
             # Handle case where user manually closed log window but app is running
             print(message)
+
+    def update_summary_table(self):
+        """Fills the summary table with N counts and dates per condition"""
+        # Clear existing data
+        for i in self.summary_tree.get_children():
+            self.summary_tree.delete(i)
+
+        if self.master_df.empty:
+            return
+
+        # Group by Cell Line and Condition
+        grouped = self.master_df.groupby(['Cell_Line', 'Condition'])
+
+        for (cell, cond), group in grouped:
+            # Count unique filenames for N (experiments)
+            n_count = group['File_Name'].nunique()
+
+            # Get sorted unique dates
+            unique_dates = sorted(group['Date'].unique())
+            date_str = ", ".join(unique_dates)
+
+            # Insert into tree
+            self.summary_tree.insert("", "end", values=(cell, cond, n_count, date_str))
 
     def setup_exclusion_tab(self):
         """Builds GUI for Tab 2 data selection"""
@@ -1145,13 +1195,13 @@ class NCollectorApp:
             summary = self.master_df.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
             print("\n[DEBUG] Data Summary:\n", summary)
             self.refresh_filter_options()
+            self.update_summary_table()
             return self.master_df
         else:
             self.master_df = pd.DataFrame()
+            self.update_summary_table()
             print("No valid data found")
             return self.master_df
-
-
 
     def collect_files(self):
         """
