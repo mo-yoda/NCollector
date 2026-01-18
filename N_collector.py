@@ -766,18 +766,11 @@ class NCollectorApp:
                   text="Export data",
                   command=self.export_data).pack(pady=20, ipadx=10)
 
-        # Log window to display print statements
-        self.log_text = tk.Text(self.tab_import, height=15)
-        self.log_text.pack(pady=10)
-
         # --- TAB 2 CONTENT ---
         self.setup_exclusion_tab()
 
     # Helper function to write to that text box
     def log(self, message):
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        # print(message)  # Keep printing to console just in case
         """Logs to the separate window"""
         try:
             self.log_text.insert(tk.END, message + "\n")
@@ -1027,6 +1020,11 @@ class NCollectorApp:
             # --- RESET STATE: Clear old data when a new folder is selected
             self.subfolder_paths_with_files = []
             self.experiment = []
+
+            # Update GUI immediately
+            self.folder_path.set(f"Selected Path: {directory}\n\nScanning for files...")
+            self.collect_button.config(state="disabled")
+            self.master.update()
 
             # --- Scan new directory for xlsx or xlsm---
             for root, dirs, files in os.walk(directory):
