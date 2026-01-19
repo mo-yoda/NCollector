@@ -550,7 +550,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         result.processed_df = None
         result.kinetic_mean_df = None
         result.auc_df = None
-        return result.processed_df
+        return result
 
     # Reset for re-run
     result.warnings = []
@@ -708,7 +708,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
 
 class NCollectorApp:
     def __init__(self, main_window):
-        self.master = main_window
+        self.main_gi = main_window
         main_window.title("N Collector")
 
         # Separate log window
@@ -726,6 +726,7 @@ class NCollectorApp:
         self.subfolder_paths_with_files = []
         self.experiment: list[MeasurementFolder] = []
         self.master_df = pd.DataFrame()
+        self.rule_history_text = ""
 
         # --- TABS SETUP ---
         self.notebook = ttk.Notebook(main_window)
@@ -754,12 +755,12 @@ class NCollectorApp:
         self.path_label.pack(pady=10, padx=10)
 
         # Load button
-        self.collect_button = tk.Button(self.tab_import,
-                                        text="Load Files",
-                                        state="disabled",
-                                        command=self.collect_files
-        )
-        self.collect_button.pack(pady=15)
+        self.load_files_button = tk.Button(self.tab_import,
+                                           text="Load Files",
+                                           state="disabled",
+                                           command=self.collect_files
+                                           )
+        self.load_files_button.pack(pady=15)
 
         # Display of N summary table
         summary_frame = tk.Frame(self.tab_import)
@@ -788,10 +789,23 @@ class NCollectorApp:
 
         self.summary_tree.pack(fill="both", expand=True)
 
+        # Text of applies exclusion rules
+        rules_frame = tk.LabelFrame(self.tab_import, text="Applied Exclusion Rules")
+        rules_frame.pack(fill="x", padx=20, pady=5)
+
+        self.lbl_rules_summary = tk.Label(rules_frame,
+                                          text="No exclusion rules applied",
+                                          justify="left",
+                                          anchor="w"
+                                          )
+        self.lbl_rules_summary.pack(fill="x", padx=5, pady=5)
+
         # Export button
-        tk.Button(self.tab_import,
-                  text="Export data",
-                  command=self.export_data).pack(pady=20, ipadx=10)
+        self.export_button = tk.Button(self.tab_import,
+                                       text="Export data",
+                                       state="disabled",
+                                       command=self.export_data)
+        self.export_button.pack(pady=20, padx=10)
 
         # --- TAB 2 CONTENT ---
         self.setup_exclusion_tab()
@@ -896,7 +910,7 @@ class NCollectorApp:
         self.lb_exclusions.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Apply Button (Bottom)
-        tk.Button(self.tab_select, text="APPLY EXCLUSIONS & RE-CALCULATE",
+        tk.Button(self.tab_select, text="Apply exclusions and re-calculate",
                   command=self.apply_exclusions).pack(pady=10, ipadx=10)
 
     def update_repl_options(self, event=None):
@@ -1004,10 +1018,38 @@ class NCollectorApp:
             return
 
         self.log(f"\n--- Applying {len(self.pending_exclusions)} Exclusion Rules ---")
+        # --- Save applied rules as text for displaying
+        pending_lines = self.lb_exclusions.get(0, tk.END)
+        new_text_block = "\n".join(pending_lines)
 
-        count = 0
+        if self.rule_history_text:
+            self.rule_history_text += "\n" + new_text_block
+        else:
+            self.rule_history_text = new_text_block
+        self.lbl_rules_summary.config(text=self.rule_history_text) # Update GUI
+
+        # --- Applying the rules
+        count_wells = 0
+        count_files = 0
 
         for rule in self.pending_exclusions:
+            # If entire date is excluded
+            if (rule['Date'] != "All" and
+                    rule['Cell_Line'] == "All" and
+                    rule['Condition'] == "All" and
+                    rule['Replicate'] == "" and
+                    rule['Row'] == ""):
+
+                # Find matching files and exclude them entirely
+                for folder in self.experiment:
+                    # Date formatting match
+                    if folder.measurement_date.strftime('%d.%m.%y') == rule['Date']:
+                        for res in folder.results:
+                            if not res.is_excluded:
+                                res.is_excluded = True
+                                count_files += 1
+                continue
+
             # Start with full dataframe
             df = self.master_df.copy()
 
@@ -1028,6 +1070,8 @@ class NCollectorApp:
                 result_obj = row['Ref_Result']
                 col_idx = row['Column_Index']
 
+                if result_obj.is_excluded: continue
+
                 # --- Logic for replicates (cols)
                 target_cols = []
                 if rule['Replicate'] == "":
@@ -1044,17 +1088,18 @@ class NCollectorApp:
                 target_rows = "ABCDEFGH"
                 if rule['Row'] != "": target_rows = rule['Row']
 
-                # Apply exclusion
+                # Append to excluded_wells list
                 for c in target_cols:
                     if not (1 <= c <= 12): continue
                     for r in target_rows:
                         well_id = f"{r}{c}"
                         if well_id not in result_obj.excluded_wells:
                             result_obj.excluded_wells.append(well_id)
-                            result_obj.is_excluded = True
-                            count += 1
-
-        self.log(f"   [DONE] Excluded {count} wells based on rules.")
+                            count_wells += 1
+        if count_files > 0:
+            self.log(f"   [DONE] Excluded {count_files} entire files.")
+        if count_wells > 0:
+            self.log(f"   [DONE] Excluded {count_wells} specific wells.")
 
         # Clear list after applying
         self.clear_exclusion_list()
@@ -1070,11 +1115,19 @@ class NCollectorApp:
             # --- RESET STATE: Clear old data when a new folder is selected
             self.subfolder_paths_with_files = []
             self.experiment = []
+            self.master_df = pd.DataFrame()
+            # Reset summary table
+            for i in self.summary_tree.get_children():
+                self.summary_tree.delete(i)
+            self.rule_history_text = ""
+            self.lbl_rules_summary.config(text="")
+            self.export_button.config(state="disabled")
+
 
             # Update GUI immediately
             self.folder_path.set(f"Selected Path: {directory}\n\nScanning for files...")
-            self.collect_button.config(state="disabled")
-            self.master.update()
+            self.load_files_button.config(state="disabled")
+            self.main_gi.update()
 
             # --- Scan new directory for xlsx or xlsm---
             for root, dirs, files in os.walk(directory):
@@ -1088,11 +1141,11 @@ class NCollectorApp:
                 folder_names_string = "\n ".join(folder_names)
                 self.folder_path.set(
                     f"Selected Path: {directory}\n\n Found following subfolders with xlsx/xlsm files:\n {folder_names_string}")
-                self.collect_button.config(state="normal")
+                self.load_files_button.config(state="normal")
                 print(f"Found {count} folders: \n {folder_names_string}")
             else:
                 self.folder_path.set(f"Error: No .xlsx or .xlsm files found in {directory} or any subfolder.")
-                self.collect_button.config(state="disabled")
+                self.load_files_button.config(state="disabled")
                 print(f"No .xlsx or .xlsm files found starting from: {directory}")
 
     def handle_main_plasmids_selection(self):
@@ -1119,7 +1172,7 @@ class NCollectorApp:
 
         # --- Multiple Sets Detected: Ask User ---
         # Create a modal dialog window
-        dialog = tk.Toplevel(self.master)
+        dialog = tk.Toplevel(self.main_gi)
         dialog.title("Select Experiment")
 
         tk.Label(dialog, text="Different experiment set ups detected across folders.\nSelect one to process:",
@@ -1143,7 +1196,7 @@ class NCollectorApp:
         def on_confirm():
             dialog.destroy()
         tk.Button(dialog, text="Confirm", command=on_confirm).pack(pady=20)
-        self.master.wait_window(dialog) # Wait until the window is closed
+        self.main_gi.wait_window(dialog) # Wait until the window is closed
 
         # Retrieve selection
         selected_key_str = selected_var.get()
@@ -1165,17 +1218,29 @@ class NCollectorApp:
 
         # collect list of records for each col
         records = []
+        rows_str = ["ABCDEFGH"]
 
         for folder in self.experiment:
             for result in folder.results:
                 # Get col metadata first
-                if not result.column_metadata:
-                    continue
+                if not result.column_metadata: continue
+                # Skip if file is excluded
+                if result.is_excluded: continue
+
                 # Iterate through the mapped cols (1-12)
                 for col_idx, meta in result.column_metadata.items():
                     # Filter out empty cols
-                    if not meta.condition_name or "Empty" in meta.condition_name:
-                        continue
+                    if not meta.condition_name or "Empty" in meta.condition_name: continue
+                    # Check if this column is completely excluded
+                    all_wells_excluded = True
+                    for r in rows_str:
+                        well_id = f"{r}{col_idx}"
+                        if well_id not in result.excluded_wells:
+                            all_wells_excluded = False
+                            break
+                    # If all wells are excluded, do not add to summary table (N count decreases)
+                    if all_wells_excluded: continue
+
                     # Create a record for this col
                     record = {
                         "File_Name": result.file_name,
@@ -1302,6 +1367,9 @@ class NCollectorApp:
 
         # Call processing
         self.run_processing_pipeline()
+
+        # Enable export
+        self.export_button.config(state="normal")
 
     def run_processing_pipeline(self):
         """
