@@ -816,6 +816,9 @@ class NCollectorApp:
         try:
             self.log_text.insert(tk.END, message + "\n")
             self.log_text.see(tk.END)
+
+            # FORCE GUI UPDATE: important for filling log during processing
+            self.main_gi.update_idletasks()
         except tk.TclError:
             # Handle case where user manually closed log window but app is running
             print(message)
