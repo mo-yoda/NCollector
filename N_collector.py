@@ -1229,7 +1229,7 @@ class NCollectorApp:
 
         # collect list of records for each col
         records = []
-        rows_str = ["ABCDEFGH"]
+        rows_str = "ABCDEFGH"
 
         for folder in self.experiment:
             for result in folder.results:
