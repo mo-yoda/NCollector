@@ -1131,6 +1131,7 @@ class NCollectorApp:
                 self.summary_tree.delete(i)
             self.rule_history_text = ""
             self.lbl_rules_summary.config(text="")
+            self.clear_exclusion_list()
             self.export_button.config(state="disabled")
 
 
@@ -1287,6 +1288,11 @@ class NCollectorApp:
         if not self.subfolder_paths_with_files:
             print("No folders to analyze.")
             return
+
+        # Reset exclusion state
+        self.rule_history_text = ""
+        self.lbl_rules_summary.config(text="")
+        self.clear_exclusion_list()
 
         self.log("\n--- Starting Data Collection ---")
 
