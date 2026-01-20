@@ -14,6 +14,13 @@ class PlateColMetadata:
     transfection_id: str  = "N/A"
     condition_name: str = "Empty"
     plasmids: list[str] = field(default_factory=list)
+    ligand_identity: str = "N/A"
+    # Dic mapping row A-H to concentration (float)
+    ligand_conc: dict[str, float] = field(default_factory=dict)
+
+    # Optional second ligand
+    ligand_2_identity: str = "N/A"
+    ligand_2_conc: dict[str, float] = field(default_factory=dict)
 
 @dataclass
 class PrResult:
@@ -57,7 +64,7 @@ class ProtocolData:
     ligand_conc: pd.DataFrame
     # Second ligand is optional; by | None = None
     ligand_2: str | None = None
-    ligand_conc_2: pd.DataFrame | None = None
+    ligand_2_conc: pd.DataFrame | None = None
 
 @dataclass
 class MeasurementFolder:
@@ -278,10 +285,10 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
     check_ligand_2 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1, match_index=1)
     if check_ligand_2 is not None and str(check_ligand_2).strip().lower() not in ["nan", ""]:
         ligand_2 = check_ligand_2
-        ligand_conc_2 = slice_table(protocol_sheet, "final concentration in well (log(M))", match_index=1)
+        ligand_2_conc = slice_table(protocol_sheet, "final concentration in well (log(M))", match_index=1)
     else:
         ligand_2 = None
-        ligand_conc_2 = None
+        ligand_2_conc = None
 
     protocol_info = ProtocolData(file_name=file_name,
                                  exp_date = exp_date,
@@ -294,7 +301,7 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
                                  ligand = ligand_1,
                                  ligand_conc=ligand_1_conc,
                                  ligand_2 = ligand_2,
-                                 ligand_conc_2= ligand_conc_2)
+                                 ligand_2_conc= ligand_2_conc)
     return protocol_info
 
 def extract_metadata(xls_obj):
@@ -451,6 +458,75 @@ def get_cell_line_map(layout_type: str, cell_lines: str):
 
     return mapping
 
+def built_conc_dic(df_conc: pd.DataFrame):
+    """
+    Parses the ligand concentration DataFrame (from ProtocolData) into a dict.
+    Assumes standard 8-row layout corresponding to A-H
+    """
+
+    if df_conc is None or df_conc.empty:
+        return {}
+
+    conc_dic = {}
+    rows = "ABCDEFGH"
+
+    try:
+        # Transform first col in df_conc to list; errors='coerce' turns non-numbers to NaN
+        vals = pd.to_numeric(df_conc.iloc[:, 0], errors='coerce').tolist()
+
+        for i, row_char in enumerate(rows):
+            if i < len(vals):
+                # Store float if valid, else 0.0 (or None if preferred)
+                conc_dic[row_char] = float(vals[i]) if not pd.isna(vals[i]) else 0.0
+            else:
+                conc_dic[row_char] = 0.0 # For vehicle row
+    except Exception as e:
+        print(f"   [WARNING] Error parsing concentration table: {e}")
+
+    return conc_dic
+
+def get_ligand_map(protocol: ProtocolData):
+    """
+    Determines which columns contain Ligand 1 and which contain Ligand 2.
+    Returns dic of col idx and ligands.
+    """
+    ligand_map = {}
+
+    # 1. If no second ligand exists, everything is Ligand 1
+    if not protocol.ligand_2:
+        for c in range(1, 13): ligand_map[c] = 'L1'
+        return ligand_map
+
+    # 2. Determine Ligand Layout Strategy based on Cell Layout
+    cell_layout = str(protocol.line_layout).lower()
+
+    if "one line" in cell_layout:
+        # STRICT RULE: One line layout cannot support 2 ligands in this logic
+        print(f"   [ERROR] Protocol '{protocol.file_name}' lists 2 ligands but uses 'One Line' cell layout.")
+        print(f"           This configuration is not supported. Defaulting all columns to Ligand 1 {protocol.ligand}.")
+        for c in range(1, 13): ligand_map[c] = 'L1'
+        return ligand_map
+
+    elif "half" in cell_layout:
+        # Cell Layout: Half (1-6 / 7-12) -> Ligand Layout: Alternating Blocks
+        # L1: 1-3, 7-9 | L2: 4-6, 10-12
+        l1_cols = list(range(1, 4)) + list(range(7, 10))
+        l2_cols = list(range(4, 7)) + list(range(10, 13))
+        for c in l1_cols: ligand_map[c] = 'L1'
+        for c in l2_cols: ligand_map[c] = 'L2'
+
+    elif "alternating" in cell_layout:
+        # Cell Layout: Alternating Blocks -> Ligand Layout: Half/Half
+        # L1: 1-6 | L2: 7-12
+        for c in range(1, 7): ligand_map[c] = 'L1'
+        for c in range(7, 13): ligand_map[c] = 'L2'
+
+    else:
+        print(f"   [WARNING] Unknown cell layout '{cell_layout}'. Defaulting all to Ligand 1 {protocol.ligand}.")
+        for c in range(1, 13): ligand_map[c] = 'L1'
+
+    return ligand_map
+
 def get_transfection_map(layout_type: str, t_ids: list[str], block_count: int = 4):
     """
     Defines the plate layout for blocks of transfection based on the cell line layout
@@ -545,7 +621,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     Checks vehicle for outliers.
     Calculates AUC.(PENDING)
     """
-    # TODO: handle ligand identitfy and concentrations
     if result.is_excluded:
         result.processed_df = None
         result.kinetic_mean_df = None
@@ -575,6 +650,14 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     mapped_t_ids = get_transfection_map(protocol.line_layout, raw_ids, len(plate_blocks))
     print(f"[DEBUG] Mapped Block Sequence: {mapped_t_ids}")
 
+    # Ligand identity and conc map
+    ligand_col_map = get_ligand_map(protocol)
+    conc_map_1 = built_conc_dic(protocol.ligand_conc)
+    if protocol.ligand_2:
+        conc_map_2 = built_conc_dic(protocol.ligand_2_conc)
+    else:
+        conc_map_2 = {}
+
     # Apply metadata on cols
     for i, block_cols in enumerate(plate_blocks):
         # Get the ID assigned to this block
@@ -594,11 +677,23 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         for col in block_cols:
             c_line = cl_map.get(col, "Unknown")
 
+            # Check the placeholder token ('L1' or 'L2')
+            which_lig = ligand_col_map.get(col, 'L1')
+
+            if which_lig == 'L2' and protocol.ligand_2:
+                current_ligand_name = str(protocol.ligand_2)
+                current_conc_map = conc_map_2
+            else:
+                current_ligand_name = str(protocol.ligand)
+                current_conc_map = conc_map_1
+
             meta = PlateColMetadata(
                 cell_line=c_line,
                 transfection_id=t_id,
                 condition_name=current_cond_name,
-                plasmids=current_plasmids
+                plasmids=current_plasmids,
+                ligand_identity=current_ligand_name,
+                ligand_conc=current_conc_map
             )
             result.column_metadata[col] = meta
 
