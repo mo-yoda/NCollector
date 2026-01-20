@@ -1065,37 +1065,47 @@ class NCollectorApp:
                 self.log(f"   [WARNING] Rule {rule} matched 0 records.")
                 continue
 
-            # Iterate matched records
-            for _, row in df.iterrows():
-                result_obj = row['Ref_Result']
-                col_idx = row['Column_Index']
+            # Logic to handle replicates and wells
+            # Grouping to handle different plates separately
+            grouped_by_file = df.groupby('File_Name')
 
-                if result_obj.is_excluded: continue
+            for file_name, group_df in grouped_by_file:
+                # group_df should contain one row per plate column of specified block
 
-                # --- Logic for replicates (cols)
-                target_cols = []
                 if rule['Replicate'] == "":
-                    # If empty, target all 3 cols in the block
-                    target_cols = [col_idx, col_idx + 1, col_idx + 2]
-                elif rule['Replicate'] == "1":
-                    target_cols = [col_idx]
-                elif rule['Replicate'] == "2":
-                    target_cols = [col_idx + 1]
-                elif rule['Replicate'] == "3":
-                    target_cols = [col_idx + 2]
+                    # If no replicate specified, take all columns of this block
+                    rows_to_process = group_df
+                else:
+                    try:
+                        repl_index = int(rule['Replicate']) - 1  # Convert "1" -> 0
+                        rows_to_process = group_df.iloc[[repl_index]]
+                    except IndexError:
+                        self.log(f"   [SKIP] File {file_name} does not have replicate {rule['Replicate']}")
+                        continue
 
-                # --- Logic for rows
-                target_rows = "ABCDEFGH"
-                if rule['Row'] != "": target_rows = rule['Row']
+                # Iterate through the specific rows to store the well ids in PrResult (result_obj)
+                for index, row_data in rows_to_process.iterrows():
+                    # Assigning to PrResult to store well ids in (PrResult.excluded_wells)
+                    # -> by assigning it to result_obj defined previously it globally changes this obj (python logic!)
+                    result_obj = row_data['Ref_Result']
+                    col_idx = int(row_data['Column_Index'])
 
-                # Append to excluded_wells list
-                for c in target_cols:
-                    if not (1 <= c <= 12): continue
+                    # Determine Rows (A-H)
+                    target_rows = "ABCDEFGH"
+                    # If row in plate is specified (not empty), use the specified row to built ID
+                    if rule['Row'] != "": target_rows = rule['Row']
+
+                    # Generate Well IDs and Append to Object
                     for r in target_rows:
-                        well_id = f"{r}{c}"
+                        well_id = f"{r}{col_idx}"
+
+                        # Modify the object directly (Objects are mutable, so this updates the global state)
                         if well_id not in result_obj.excluded_wells:
                             result_obj.excluded_wells.append(well_id)
                             count_wells += 1
+
+                            print(f"Excluded {well_id} in {result_obj.file_name}")
+
         if count_files > 0:
             self.log(f"   [DONE] Excluded {count_files} entire files.")
         if count_wells > 0:
