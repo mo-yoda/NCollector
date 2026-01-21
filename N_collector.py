@@ -24,27 +24,33 @@ class PlateColMetadata:
 
 @dataclass
 class PrResult:
-    """ Information from a single _analysis file """
-    # Information from analysis xlsx itself
+    """ Raw and processed information from a single _analysis file """
+    # --- Information from analysis xlsx itself ---
     file_name: str
     measurement_date: date
     cell_line: str # ID2
     transfection_id: str # ID3
     raw_bret_ratio_df: pd.DataFrame
 
-    # Connection to protocol file
+    # --- Connection to protocol file ---
     # Key = Column Index (1-12), Value = WellMetadata object
     column_metadata: dict[int, PlateColMetadata] = field(default_factory=dict)
-    # Stores baseline- and vehicle-normalised BRET ratios
-    processed_df: pd.DataFrame | None = None
+
+    # --- Processed BRET data ---
+    # Baseline- and vehicle-normalised kinetic data (technical replicates)
+    kinetic_df: pd.DataFrame | None = None
+    # Mean of baseline- and vehicle-normalised kinetic data
     kinetic_mean_df: pd.DataFrame | None = None
+    # Baseline- and vehicle-normalised AUC data (technical replicates)
+    auc_df: pd.DataFrame | None = None
+    # Mean of baseline- and vehicle-normalised AUC data
     auc_mean_df:pd.DataFrame | None = None
 
-    # User interaction for optional exclusion
+    # --- Optional exclusion by user interaction  ---
     is_excluded: bool = False
     excluded_wells: list[str] = field(default_factory=list)
 
-    # Internal check and warnings for helping outlier identification
+    # --- Internal check and warnings for helping vehicle outlier identification ---
     vehicle_outliers: dict[str, float] = field(default_factory=dict) # well, value
     warnings : list[str] = field(default_factory=list)
 
@@ -573,6 +579,62 @@ def get_block_start_for_col(col_index: int, plate_blocks: list[range]):
             return block[0]  # Return the first column of that block (e.g., 1, 4, 7...)
     return None
 
+def calculate_vehicle_means(bl_corrected_df: pd.DataFrame,
+                            plate_blocks: list[range],
+                            excluded_wells: list[str],
+                            acc_range: float,
+                            outlier_dict: dict,
+                            kinetic_reads_count: int = 1):
+    """
+    Calculates the mean of the vehicle wells (row H) for each block.
+    Works for both Kinetic DataFrames (returns Series mean) and AUC DataFrames (returns Float mean).
+    """
+    vehicle_means = {}
+
+    # Check if this is AUC (1 row) or Kinetic (>1 row)
+    is_kinetic = bl_corrected_df.shape[0] > 1
+
+    for block in plate_blocks:
+        start_col = block[0]
+        # Vehicle as row H
+        wells = [f"H{c}" for c in block]
+
+        # Filter for valid wells present in data and not excluded
+        valid_vehicles = [w for w in wells if w in bl_corrected_df.columns and w not in excluded_wells]
+
+        if valid_vehicles:
+            # Get vehicle values and make sure that data is numeric
+            vehicle_data = bl_corrected_df[valid_vehicles].apply(pd.to_numeric, errors='coerce')
+
+            # --- VEHICLE CHECK ---
+            for well in valid_vehicles:
+                if is_kinetic:
+                    # Kinetic: Mean over time should be close to 1.0
+                    val_to_check = vehicle_data[well].mean()
+                    target_value = 1
+                else:
+                    # AUC: Value should be close to (1.0 * number_of_reads)
+                    # Use .iloc[0] to get the float from the series
+                    val_to_check = vehicle_data[well].iloc[0]
+                    target_value = float(kinetic_reads_count)
+
+                threshold = acc_range * target_value
+                # Check deviation (only if value is not NaN)
+                if pd.notna(val_to_check) and abs(val_to_check - target_value) > threshold:
+                    outlier_dict[well] = float(val_to_check)
+
+            # Calculate mean across the valid wells
+            if is_kinetic:
+                # Row-wise mean for kinetic traces (result: series of length = timepoints)
+                vehicle_means[start_col] = vehicle_data.mean(axis=1)
+            else:
+                # Scalar mean for AUC (result: single float)
+                vehicle_means[start_col] = vehicle_data.mean(axis=1).iloc[0]
+        else:
+            vehicle_means[start_col] = None
+
+    return vehicle_means
+
 def calculate_replicate_means(processed_df: pd.DataFrame,
                               plate_blocks: list[range],
                               col_metadata: dict): # Dic created from PlateColMetadata
@@ -616,25 +678,24 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
 
 def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     """
-    Maps cell line x transfection plate layout using protocol info.
-    Performs Baseline Correction and Vehicle Normalization.
+    Maps cell line x transfection x ligand plate layout using protocol info.
+    Performs baseline correction. Vehicle normalisation with kinetic data and AUC in parallel.
     Checks vehicle for outliers.
-    Calculates AUC.(PENDING)
     """
     if result.is_excluded:
-        result.processed_df = None
+        result.kinetic_df = None
         result.kinetic_mean_df = None
         result.auc_df = None
+        result.auc_mean_df = None
         return result
 
     # Reset for re-run
     result.warnings = []
     result.vehicle_outliers = {}
+    result.column_metadata = {}
 
     print(f"\n[DEBUG] === Processing File: {result.file_name} ===")
     # --- CONFIG LAYOUT ---
-    result.column_metadata = {}
-
     # Define triplicates (4 blocks); opt. edit for adding labeling layout
     plate_blocks = [
         range(1, 4),  # Block 1: Cols 1-3
@@ -653,10 +714,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # Ligand identity and conc map
     ligand_col_map = get_ligand_map(protocol)
     conc_map_1 = built_conc_dic(protocol.ligand_conc)
-    if protocol.ligand_2:
-        conc_map_2 = built_conc_dic(protocol.ligand_2_conc)
-    else:
-        conc_map_2 = {}
+    # Only built if second ligand is defined
+    conc_map_2 = built_conc_dic(protocol.ligand_2_conc) if protocol.ligand_2 else {}
 
     # Apply metadata on cols
     for i, block_cols in enumerate(plate_blocks):
@@ -687,7 +746,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
                 current_ligand_name = str(protocol.ligand)
                 current_conc_map = conc_map_1
 
-            meta = PlateColMetadata(
+            result.column_metadata[col] = PlateColMetadata(
                 cell_line=c_line,
                 transfection_id=t_id,
                 condition_name=current_cond_name,
@@ -695,7 +754,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
                 ligand_identity=current_ligand_name,
                 ligand_conc=current_conc_map
             )
-            result.column_metadata[col] = meta
 
     # --- CONFIG PROCESSING ---
     # Define accepted vehicle range
@@ -735,65 +793,58 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         else:
             bl_corrected_df[col] = None
 
+    # --- AUC CALCULATION ---
+    # Use slicing to sum only the kinetic phase (after baseline)
+    auc_raw_series = bl_corrected_df.iloc[baseline_end_idx:].sum(axis=0, skipna=False)
+    auc_raw_df = pd.DataFrame([auc_raw_series]) # Convert series to df
+
+    # Determine number of reads for dynamic AUC target
+    num_kinetic_points = len(bl_corrected_df.iloc[baseline_end_idx:])
+
     # --- VEHICLE CORRECTION ---
-    # Calculate mean vehicle for each condition
-    vehicle_mean = {}
+    # Kinetics (df -> returns series of means over time)
+    veh_means_kinetic = calculate_vehicle_means(
+        bl_corrected_df, plate_blocks, result.excluded_wells, acc_vehicle_range, result.vehicle_outliers,
+        kinetic_reads_count=1
+    )
+    # For AUC (df with one row -> returns dictionary of scalars)
+    veh_means_auc = calculate_vehicle_means(
+        auc_raw_df, plate_blocks, result.excluded_wells, acc_vehicle_range, result.vehicle_outliers,
+        kinetic_reads_count=num_kinetic_points
+    )
 
-    for block in plate_blocks:
-        start_col = block[0]  # e.g., 1, 4, 7, 10 for triplicates
-
-        wells = [f"H{c}" for c in block]
-        # Filter for wells that actually exist in the dataframe
-        # Logic needed for optionally excluding wells
-        valid_vehicles = [w for w in wells if w in bl_corrected_df.columns and w not in result.excluded_wells]
-
-        if valid_vehicles:
-            # Get vehicle values and make sure that data is numeric
-            vehicle_data = bl_corrected_df[valid_vehicles].apply(pd.to_numeric, errors='coerce')
-
-            # Check bounds of vehicle
-            for well in valid_vehicles:
-                # Check kinetic mean
-                veh_kinetic_mean = vehicle_data[well].mean(axis=0)
-
-                if abs(veh_kinetic_mean - 1) > acc_vehicle_range:
-                    # Store well name and value in dic
-                    result.vehicle_outliers[well] = float(veh_kinetic_mean)
-
-            # Calculate mean across valid vehicle wells per time point
-            vehicle_mean[start_col] = vehicle_data.mean(axis=1)
-        else:
-            vehicle_mean[start_col] = None
-
-    # Normalise to mean(vehicle)
-    vehicle_corr_df = bl_corrected_df.copy()
+    # Apply Normalization (using dictionaries to avoid fragmentation/warnings for pd.Df)
+    kinetic_norm_dict = {}
+    auc_norm_dict = {}
 
     for col in data_df.columns:
-        # Get well number
         col_num = int(col[1:])
-
-        # Find block start dynamically using the list
         block_start = get_block_start_for_col(col_num, plate_blocks)
 
-        if block_start in vehicle_mean and vehicle_mean[block_start] is not None:
-            vehicle_corr_df[col] = bl_corrected_df[col] / vehicle_mean[block_start]
+        # Normalize Kinetic
+        if veh_means_kinetic.get(block_start) is not None:
+            kinetic_norm_dict[col] = bl_corrected_df[col] / veh_means_kinetic[block_start]
         else:
-            vehicle_corr_df[col] = None
+            kinetic_norm_dict[col] = None
 
-    # Store processed df before processing further
-    result.processed_df = vehicle_corr_df
+        # Normalize AUC
+        v_auc = veh_means_auc.get(block_start)
+        if v_auc is not None and v_auc != 0:
+            auc_norm_dict[col] = auc_raw_df[col] / v_auc
+        else:
+            auc_norm_dict[col] = None
+
+    # Create df from dict
+    result.kinetic_df = pd.DataFrame(kinetic_norm_dict)
+    result.auc_df = pd.DataFrame(auc_norm_dict)
 
     # --- MEAN OF REPLICATES (KINETIC) ---
     result.kinetic_mean_df = calculate_replicate_means(
-        processed_df=result.processed_df,
-        plate_blocks=plate_blocks,
-        col_metadata=result.column_metadata
+        result.kinetic_df, plate_blocks, result.column_metadata
     )
-    print("-"*40)
-    print(result.kinetic_mean_df)
-    print("-" * 40)
-
-    # TODO: add AUC calculation + subsequent mean of replicates
+    result.auc_mean_df = calculate_replicate_means(
+        result.auc_df, plate_blocks, result.column_metadata
+    )
     return result
 
 
