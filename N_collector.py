@@ -1027,6 +1027,12 @@ class NCollectorApp:
                                            command=self.collect_files
                                            )
         self.load_files_button.pack(pady=15)
+        # Label to display Main Plasmids
+        self.main_plasmids_label = tk.Label(self.tab_import,
+                                            text="",
+                                            justify="left",
+                                            font=("Arial", 10, "bold"))
+        self.main_plasmids_label.pack(pady=(0, 5))
 
         # Display of N summary table
         summary_frame = tk.Frame(self.tab_import)
@@ -1399,6 +1405,7 @@ class NCollectorApp:
             for i in self.summary_tree.get_children():
                 self.summary_tree.delete(i)
             self.rule_history_text = ""
+            self.main_plasmids_label.config(text="")
             self.lbl_rules_summary.config(text="")
             self.clear_exclusion_list()
             self.export_button.config(state="disabled")
@@ -1665,6 +1672,7 @@ class NCollectorApp:
 
         # Check for plasmids transfected in all conditions (main plasmids) and filter if needed
         selected_exp_name = self.handle_main_plasmids_selection()
+        self.main_plasmids_label.config(text=f"{selected_exp_name}")
 
         # Iterate through data and perform mapping+calculations
         for folder in self.experiment:
