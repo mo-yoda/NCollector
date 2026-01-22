@@ -509,12 +509,12 @@ def get_ligand_map(protocol: ProtocolData):
     """
     ligand_map = {}
 
-    # 1. If no second ligand exists, everything is Ligand 1
+    # If no second ligand exists, everything is Ligand 1
     if not protocol.ligand_2:
         for c in range(1, 13): ligand_map[c] = 'L1'
         return ligand_map
 
-    # 2. Determine Ligand Layout Strategy based on Cell Layout
+    # Determine Ligand Layout Strategy based on Cell Layout
     cell_layout = str(protocol.line_layout).lower()
 
     if "one line" in cell_layout:
@@ -886,7 +886,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
 
     for col in data_df.columns:
         if col in result.excluded_wells:
-            bl_corrected_df[col] = None
+            bl_corrected_df[col] = float('nan')
             continue
         # Mean of baseline rows for this well
         # Force numeric conversion for baseline values to handle potential strings/decimals
@@ -897,7 +897,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
             # Divide ALL values by the baseline mean
             bl_corrected_df[col] = col_vals / base_mean
         else:
-            bl_corrected_df[col] = None
+            bl_corrected_df[col] = float('nan')
 
     # --- AUC CALCULATION ---
     # Use slicing to sum only the kinetic phase (after baseline)
@@ -931,14 +931,14 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         if veh_means_kinetic.get(block_start) is not None:
             kinetic_norm_dict[col] = bl_corrected_df[col] / veh_means_kinetic[block_start]
         else:
-            kinetic_norm_dict[col] = None
+            kinetic_norm_dict[col] = float('nan')
 
         # Normalize AUC
         v_auc = veh_means_auc.get(block_start)
         if v_auc is not None and v_auc != 0:
             auc_norm_dict[col] = auc_raw_df[col] / v_auc
         else:
-            auc_norm_dict[col] = None
+            auc_norm_dict[col] = float('nan')
 
     # Create df from dict
     kinetic_df = pd.DataFrame(kinetic_norm_dict)
