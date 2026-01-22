@@ -1691,56 +1691,102 @@ class NCollectorApp:
         self.log("\n--- Processing Complete ---")
 
     def export_data(self):
+    def compile_master_dataframe(self):
         """
-        Exports kinetic mean data as multi-sheet xlsx (for now) in user-selected path.
-        - one sheet per condition + row, with all cell lines
-        - time col is created based on baseline offset
+        Compiles technical means (Kinetic & AUC) into a tidy Master DataFrame.
+        Structure: Long format (1 row per timepoint).
+        The scalar AUC value is REPEATED for every timepoint of the same condition.
         """
-        # TODO: improve layout of exporting all data
-        # TODO: add plotting helper tab (loading all data exports)
-
         if not self.experiment:
-            self.log("No data to export.")
-            return
+            return None
+        self.log("\n--- Building Master CSV ---")
+        master_rows = []
 
-        export_file_path = filedialog.asksaveasfilename(
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")],
-            title="Export Kinetic Means"
-        )
-        if not export_file_path: return
-
-        self.log(f"--- Exporting to {os.path.basename(export_file_path)} ---")
-
-        # Structure: export_tree[SheetName][CellLine] = [Series_N1, Series_N2...]
-        export_tree = {}
-
-        # Setting for baseline measurement count
-        baseline_count = 5
-
-        # Collect data from all experiment folders
         for folder in self.experiment:
-            for result in folder.results:
-                # Skip is whole file is excluded
-                if result.is_excluded or result.kinetic_mean_df is None:
-                    continue
+            if folder.protocol.main_plasmids:
+                main_plasmids = main_plasmids_str = " + ".join(folder.protocol.main_plasmids)
+            else:
+                main_plasmids = "Unknown"
 
-                # Get time_index
-                time_index = result.time_vector
+            for res in folder.results:
+                if res.is_excluded or res.kinetic_mean_df is None: continue
+                # If time_vector is missing, create a generic index
+                time_points = res.time_vector if res.time_vector else range(len(res.kinetic_mean_df))
 
-                # Iterate through cols created in kinetic_mean_df
-                for col_key in result.kinetic_mean_df.columns:
+                # Get meta information for each col via PlateColMetadata stored in res.column_metadata
+                meta_lookup = {}
+                for meta in res.column_metadata.values():
+                    # Store key as unique combo
+                    key = (meta.condition_name, meta.ligand_identity)
+                    print(key)
+                    if key not in meta_lookup:
+                        meta_lookup[key] = meta
+
+                # Iterate through the KEYS of the mean DataFrame
+                # Key format from 'calculate_replicate_means': "Condition|Cell_Line|Ligand_Name|Row"
+                for col_key in res.kinetic_mean_df.columns:
                     try:
-                        cond, cell, row = col_key.split('|')
+                        parts = col_key.split('|')
+                        if len(parts) != 4:
+                            print(f"[WARNING] Skipping {col_key}: Format expected 4 parts, got {len(parts)}")
+                            continue
+                        transfection, cell_line, lig_name, row_char = parts
                     except ValueError:
-                        continue # Skip malformed cols
+                        continue
 
-                    # Create sheet name: Condition + Row
-                    # (Limit to 31 chars for Excel compatibility!!!)
-                    sheet_name = f"{cond}_{row}"
-                    bad_chars = "[]:*?/\\"
-                    for c in bad_chars: sheet_name = sheet_name.replace(c, "_")
-                    sheet_name = sheet_name[:31]
+                    # --- RETRIEVE DATA ---
+                    # Kinetic Mean Series (Vector)
+                    # This list has length = number of timepoints
+                    kin_mean_values = res.kinetic_mean_df[col_key].tolist()
+
+                    # AUC Mean Value (Scalar)
+                    # Check if this key exists in the AUC Mean DF
+                    if res.auc_mean_df is not None and col_key in res.auc_mean_df.columns:
+                        auc_mean_val = res.auc_mean_df[col_key].iloc[0]
+                    else:
+                        print(f"[WARNING] master df compilation: {col_key} "
+                              f"no respective AUC mean found")
+                        auc_mean_val = float('nan')
+
+                    # Get ligand concentrations
+                    target_meta = meta_lookup.get((transfection, lig_name))
+                    if target_meta:
+                        # Since 'ligand_conc' is already specific to this column (as you confirmed),
+                        # we just grab the value for this row.
+                        conc_val = target_meta.ligand_conc.get(row_char, 0.0)
+
+                    else:
+                        print(f"[WARNING] master df compilation: {col_key} "
+                              f"no respective ligand concentration found")
+                        conc_val = float('nan')
+
+                    # --- BUILD ROWS (TIDY FORMAT) ---
+                    # Zip timepoints with kinetic values
+                    for t_val, kin_val in zip(time_points, kin_mean_values):
+                        row = {
+                            # --- Identifiers ---
+                            "File_Name": res.file_name,
+                            "Date": res.measurement_date,
+                            "Main_Plasmids": main_plasmids,
+                            "Cond_Key": col_key,  # Unique ID for this curve
+                            "Time_(min)": t_val,
+
+                            # --- Metadata ---
+                            "Transfection": transfection,
+                            "Cell_Line": cell_line,
+                            "Plate_Row": row_char,
+                            "Ligand": lig_name,
+                            "Ligand_Conc": conc_val,
+
+                            # --- The Data ---
+                            "Kinetic_Mean": kin_val,
+                            "AUC_Mean": auc_mean_val
+                        }
+                        master_rows.append(row)
+
+        # Create DataFrame
+        df_master = pd.DataFrame(master_rows)
+        return df_master
 
                     # Init storage
                     if sheet_name not in export_tree:
