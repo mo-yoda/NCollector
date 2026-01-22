@@ -745,7 +745,7 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
     Calculates the mean of technical replicates. As in processed_df each col is one well,
     the mean is performed of three cols within one block.
     Rows (A-H) are treated as distinct conditions (ligand concentration).
-    Header format of returned df: "Condition_Name|Cell_Line|Row"
+    Header format of returned df: "Condition_Name|Cell_Line|Ligand_Name|Row"
     """
     mean_data = {}
     row_labels = list("ABCDEFGH")
@@ -758,6 +758,7 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
         # Create a base name for the condition
         cond_name = meta.condition_name if meta else f"Block_{block_idx + 1}"
         cell_line = meta.cell_line if meta else "Unknown"
+        ligand_name = meta.ligand_identity
 
         # Iterate through plate rows (A-H)
         for row in row_labels:
@@ -774,7 +775,7 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
                 mean_series = processed_df[valid_wells].apply(pd.to_numeric, errors='coerce').mean(axis=1)
 
                 # Construct a unique column header
-                header_key = f"{cond_name}|{cell_line}|{row}"
+                header_key = f"{cond_name}|{cell_line}|{ligand_name}|{row}"
                 mean_data[header_key] = mean_series
 
     return pd.DataFrame(mean_data)
