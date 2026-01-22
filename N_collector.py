@@ -18,10 +18,6 @@ class PlateColMetadata:
     # Dic mapping row A-H to concentration (float)
     ligand_conc: dict[str, float] = field(default_factory=dict)
 
-    # Optional second ligand
-    ligand_2_identity: str = "N/A"
-    ligand_2_conc: dict[str, float] = field(default_factory=dict)
-
 @dataclass
 class PrResult:
     """ Raw and processed information from a single _analysis file """
@@ -662,7 +658,8 @@ def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: int):
     if len(kinetic_times) < 2: return None  # Not enough data points
 
     # Take the difference to filter out potential jitter
-    interval = kinetic_times.diff().unique()
+    # -> Rounding is important since otherwise 1.00 and 1.0 are not considered the same
+    interval = kinetic_times.diff().dropna().round(2).unique()[0]
 
     # Generate time vector for baseline and kinetic reading
     n_rows = len(raw_time_col)
