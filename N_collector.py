@@ -1890,14 +1890,15 @@ class NCollectorApp:
 
     def compile_master_dataframe(self):
         """
-        Compiles technical means (Kinetic & AUC) into a tidy Master DataFrame.
-        Structure: Long format (1 row per timepoint).
-        The scalar AUC value is REPEATED for every timepoint of the same condition.
+        Compiles all processing steps into one Master DataFrame.
+        Structure: 1 row per well per timepoint.
+        Means are repeated for respective technical replicates as AUCs for all timepoints.
         """
         if not self.experiment:
             return None
         self.log("\n--- Building Master CSV ---")
-        master_rows = []
+
+        all_files_data = []
 
         for folder in self.experiment:
             if folder.protocol.main_plasmids:
@@ -1906,17 +1907,9 @@ class NCollectorApp:
                 main_plasmids = "Unknown"
 
             for res in folder.results:
-                if res.is_excluded or res.kinetic_mean_df is None: continue
-                # If time_vector is missing, create a generic index
-                time_points = res.time_vector if res.time_vector else range(len(res.kinetic_mean_df))
-
-                # Get meta information for each col via PlateColMetadata stored in res.column_metadata
-                meta_lookup = {}
-                for meta in res.column_metadata.values():
-                    # Store key as unique combo
-                    key = (meta.condition_name, meta.ligand_identity)
-                    if key not in meta_lookup:
-                        meta_lookup[key] = meta
+                if res.is_excluded: continue
+                if res.kinetic_df is None or res.raw_bret_ratio_df is None:
+                    continue # ----------------------add all that is needed!
 
                 # Iterate through the KEYS of the mean DataFrame
                 # Key format from 'calculate_replicate_means': "Condition|Cell_Line|Ligand_Name|Row"
@@ -1929,60 +1922,141 @@ class NCollectorApp:
                         transfection, cell_line, lig_name, row_char = parts
                     except ValueError:
                         continue
+                # --- PREPARE KINETIC DATA ---
+                # Use pandas melt function to prepare each df from wide to long format
+                def melt_df(df, val_name, time_vec):
+                    if df is None or df.empty: return pd.DataFrame()
 
-                    # --- RETRIEVE DATA ---
-                    # Kinetic Mean Series (Vector)
-                    # This list has length = number of timepoints
-                    kin_mean_values = res.kinetic_mean_df[col_key].tolist()
-
-                    # AUC Mean Value (Scalar)
-                    # Check if this key exists in the AUC Mean DF
-                    if res.auc_mean_df is not None and col_key in res.auc_mean_df.columns:
-                        auc_mean_val = res.auc_mean_df[col_key].iloc[0]
+                    df_work = df.copy()
+                    # Check lengths
+                    if len(df_work) != len(time_vec):
+                        print(
+                            f"[WARNING] Length mismatch in {res.file_name}: Data {len(df_work)} vs Time {len(time_vec)}")
+                        # Use generic index
+                        df_work.index.name = "Time_Idx"
+                        id_var = "Time_Idx"
                     else:
-                        print(f"[WARNING] master df compilation: {col_key} "
-                              f"no respective AUC mean found")
-                        auc_mean_val = float('nan')
+                        # Set the Time Vector as the Index
+                        df_work.index = time_vec
+                        df_work.index.name = "Time_(min)"
+                        id_var = "Time_(min)"
 
-                    # Get ligand concentrations
-                    target_meta = meta_lookup.get((transfection, lig_name))
-                    if target_meta:
-                        # Since 'ligand_conc' is already specific to this column (as you confirmed),
-                        # we just grab the value for this row.
-                        conc_val = target_meta.ligand_conc.get(row_char, 0.0)
+                    return df_work.reset_index().melt(
+                        id_vars=id_var,
+                        var_name="Well_ID",
+                        value_name=val_name)
 
-                    else:
-                        print(f"[WARNING] master df compilation: {col_key} "
-                              f"no respective ligand concentration found")
-                        conc_val = float('nan')
+                # Get the Time Vector for this file
+                t_vec = res.time_vector
+                if not t_vec:
+                    # Fallback if time vector calculation failed
+                    t_vec = range(len(res.raw_bret_ratio_df))
 
-                    # --- BUILD ROWS (TIDY FORMAT) ---
-                    # Zip timepoints with kinetic values
-                    for t_val, kin_val in zip(time_points, kin_mean_values):
-                        row = {
-                            # --- Identifiers ---
-                            "File_Name": res.file_name,
-                            "Date": res.measurement_date,
-                            "Main_Plasmids": main_plasmids,
-                            "Cond_Key": col_key,  # Unique ID for this curve
-                            "Time_(min)": t_val,
+                # Ignore time col in raw bret df
+                raw_clean = res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore')
 
-                            # --- Metadata ---
-                            "Transfection": transfection,
-                            "Cell_Line": cell_line,
-                            "Plate_Row": row_char,
-                            "Ligand": lig_name,
-                            "Ligand_Conc": conc_val,
+                df_raw = melt_df(raw_clean, "Raw_BRET", t_vec)
+                df_bl = melt_df(res.bl_corr_kinetic, "Bl_Corrected_BRET", t_vec)
+                df_norm = melt_df(res.kinetic_df, "Veh_Norm_Kinetic", t_vec)
 
-                            # --- The Data ---
-                            "Kinetic_Mean": kin_val,
-                            "AUC_Mean": auc_mean_val
-                        }
-                        master_rows.append(row)
+                # Merge on [Time_(min), Well_ID]
+                merge_on = [df_raw.columns[0], "Well_ID"]
 
-        # Create DataFrame
-        df_master = pd.DataFrame(master_rows)
-        return df_master
+                merged_df = df_raw.merge(df_bl, on=merge_on, how="left") \
+                    .merge(df_norm, on=merge_on, how="left")
+
+                # --- MAP AUC DATA ---
+                # AUC is 1 value per well. We map it to Well_ID.
+                auc_raw_map = res.raw_auc_df.iloc[0].to_dict() if res.raw_auc_df is not None else {}
+                auc_norm_map = res.auc_df.iloc[0].to_dict() if res.auc_df is not None else {}
+
+                merged_df['Bl_AUC'] = merged_df['Well_ID'].map(auc_raw_map)
+                merged_df['Veh_Norm_AUC'] = merged_df['Well_ID'].map(auc_norm_map)
+
+                # --- PREPARE MEAN KINETIC AND AUC MAPPING ---
+                well_to_mean_map = {}
+                well_to_auc_mean_map = {}
+                for col_idx, meta in res.column_metadata.items():
+                    col_str = str(col_idx)
+                    for row_char in "ABCDEFGH":
+                        well_id = f"{row_char}{col_idx}"
+
+                        # Construct Key: "Condition|Cell|Ligand|Row"
+                        mean_key = f"{meta.condition_name}|{meta.cell_line}|{meta.ligand_identity}|{row_char}"
+
+                        # Grab Kinetic Mean Series
+                        if res.kinetic_mean_df is not None and mean_key in res.kinetic_mean_df.columns:
+                            well_to_mean_map[well_id] = res.kinetic_mean_df[mean_key].tolist()
+
+                        # Grab AUC Mean Value
+                        if res.auc_mean_df is not None and mean_key in res.auc_mean_df.columns:
+                            well_to_auc_mean_map[well_id] = res.auc_mean_df[mean_key].iloc[0]
+
+                merged_df['AUC_Mean'] = merged_df['Well_ID'].map(well_to_auc_mean_map)
+
+                # --- MAP KINETIC MEANS ---
+                # Create  specialized DF to merge accurately by Time
+                mean_rows = []
+                # Use the same t_vec defined above
+                for well_id, mean_series in well_to_mean_map.items():
+                    # Ensure mean series matches time vector length
+                    if len(mean_series) == len(t_vec):
+                        for t, val in zip(t_vec, mean_series):
+                            mean_rows.append({
+                                'Well_ID': well_id,
+                                'Time_(min)': t,  # Using actual time for merge key
+                                'Kinetic_Mean': val
+                            })
+                if mean_rows:
+                    df_means = pd.DataFrame(mean_rows)
+                    # Merge on Time and Well
+                    merge_keys = ['Well_ID', 'Time_(min)']
+                    merged_df = merged_df.merge(df_means, on=merge_keys, how='left')
+                else:
+                    merged_df['Kinetic_Mean'] = float('nan')
+
+                all_files_data.append(merged_df)
+
+                # --- ADD METADATA ---
+                merged_df["File_Name"] = res.file_name
+                merged_df["Date"] = res.measurement_date
+                merged_df["Main_Plasmids"] = main_plasmids
+                # Meta Lookups (Optimization: Build dicts once per file)
+                meta_lookups = {'Transfection': {}, 'Cell_Line': {}, 'Ligand': {}, 'Ligand_Conc': {}, 'Plate_Row': {}}
+
+                for well_id in merged_df['Well_ID'].unique():
+                    try:
+                        c_idx = int(well_id[1:])
+                        r_char = well_id[0]
+                        meta = res.column_metadata.get(c_idx)
+                        if meta:
+                            meta_lookups['Transfection'][well_id] = meta.condition_name
+                            meta_lookups['Cell_Line'][well_id] = meta.cell_line
+                            meta_lookups['Ligand'][well_id] = meta.ligand_identity
+                            meta_lookups['Ligand_Conc'][well_id] = meta.ligand_conc.get(r_char, 0.0)
+                            meta_lookups['Plate_Row'][well_id] = r_char
+                    except: pass
+
+                merged_df['Transfection'] = merged_df['Well_ID'].map(meta_lookups['Transfection'])
+                merged_df['Cell_Line'] = merged_df['Well_ID'].map(meta_lookups['Cell_Line'])
+                merged_df['Ligand'] = merged_df['Well_ID'].map(meta_lookups['Ligand'])
+                merged_df['Ligand_Conc'] = merged_df['Well_ID'].map(meta_lookups['Ligand_Conc'])
+                merged_df['Plate_Row'] = merged_df['Well_ID'].map(meta_lookups['Plate_Row'])
+
+        if not all_files_data:
+            return pd.DataFrame()
+
+        # Combine all files
+        master_df = pd.concat(all_files_data, ignore_index=True)
+        # Cleanup columns
+        cols_order = [
+            "File_Name", "Date", "Main_Plasmids", "Transfection", "Cell_Line",
+            "Ligand", "Ligand_Conc", "Plate_Row", "Well_ID", "Time_(min)",
+            "Raw_BRET", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
+            "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
+        ]
+        final_cols = [c for c in cols_order if c in master_df.columns]
+        return master_df[final_cols]
 
     def export_master_csv(self):
         """Saves compiled master df to csv"""
@@ -2099,7 +2173,6 @@ class NCollectorApp:
 
                 # --- 3. AUC DATA ---
                 a_mode = config.get('auc_mode', 'None')
-                print("___AUC HERE_____")
 
                 if a_mode == 'Conc Response':
                     # Drop duplicates for Scalar AUC
