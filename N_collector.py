@@ -970,6 +970,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
 
 class NCollectorApp:
     def __init__(self, main_window):
+        # TODO: clean up app, init everything here
         self.main_gi = main_window
         main_window.title("N Collector")
 
@@ -991,6 +992,18 @@ class NCollectorApp:
         self.rule_history_text = ""
         self.master_df = pd.DataFrame # Used for master csv file storage (by generation or import)
 
+        # --- Data Type Mapping (Display Name -> Internal Column) ---
+        self.data_type_map = {
+            "kinetic: raw BRET ratio (kinetic)": "Raw_BRET",
+            "kinetic: baseline-corrected BRET ratio": "Bl_Corrected_BRET",
+            "kinetic: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
+            "kinetic: vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean",
+
+            "AUC: baseline-corrected BRET ratio": "Bl_AUC",
+            "AUC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
+            "AUC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
+        }
+
         # --- TABS SETUP ---
         self.notebook = ttk.Notebook(main_window)
         self.notebook.pack(expand=True, fill='both')
@@ -1001,7 +1014,7 @@ class NCollectorApp:
 
         # Tab 2: Data Selection
         self.tab_select = tk.Frame(self.notebook)
-        self.notebook.add(self.tab_select, text="Optional Selection")
+        self.notebook.add(self.tab_select, text="Exclude Data")
 
         # Tab 3: Plot Helper
         self.tab_plot_helper = tk.Frame(self.notebook)
@@ -1452,28 +1465,31 @@ class NCollectorApp:
             row=2, column=2)
 
         sel_frame.columnconfigure(0, weight=1)
-        sel_frame.columnconfigure(1, weight=2)
+        sel_frame.columnconfigure(1, weight=1)
         sel_frame.columnconfigure(2, weight=3)
 
-        # --- Export Data Options ---
-        opt_frame = tk.LabelFrame(self.tab_plot_helper, text="Export Data Options")
-        opt_frame.pack(fill="x", padx=10, pady=5)
+        # --- Data Type Selection (Single Choice) ---
+        type_frame = tk.LabelFrame(self.tab_plot_helper, text="Export Settings")
+        type_frame.pack(fill="x", padx=10, pady=5)
 
-        # Kinetic Options
-        tk.Label(opt_frame, text="Kinetic Data:").grid(row=0, column=0, sticky="w", padx=10)
+        # Data Type Dropdown
+        tk.Label(type_frame, text="Data Type:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        default_key = list(self.data_type_map.keys())[6]
+        self.var_data_type = tk.StringVar(value=default_key)
+        combo_type = ttk.Combobox(type_frame, textvariable=self.var_data_type, state="readonly", width=45)
+        combo_type['values'] = list(self.data_type_map.keys())
+        combo_type.grid(row=0, column=1, padx=5, pady=5)
+
+        # Kinetic Layout (Only applies if a Kinetic type is chosen)
+        tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
         self.var_exp_kin = tk.StringVar(value="Row A (Max)")
-        combo_kin = ttk.Combobox(opt_frame, textvariable=self.var_exp_kin, state="readonly")
-        combo_kin['values'] = ["None", "Row A (Max)", "All Rows"]
-        combo_kin.grid(row=0, column=1, padx=5, pady=5)
+        combo_kin = ttk.Combobox(type_frame, textvariable=self.var_exp_kin, state="readonly", width=15)
+        combo_kin['values'] = ["Row A (Max)", "Row H (Vehicle)", "All Rows"]
+        combo_kin.grid(row=0, column=3, padx=5, pady=5)
 
-        # AUC Options
-        tk.Label(opt_frame, text="AUC Data:").grid(row=1, column=0, sticky="w", padx=10)
-        self.var_exp_auc = tk.StringVar(value="Conc Response")
-        combo_auc = ttk.Combobox(opt_frame, textvariable=self.var_exp_auc, state="readonly")
-        combo_auc['values'] = ["None", "Conc Response"]
-        combo_auc.grid(row=1, column=1, padx=5, pady=5)
+        tk.Label(type_frame, text="(Applies to any selected Kinetic data type)")
 
-        # --- 3. Action Button ---
+        # --- Action Button ---
         btn_frame = tk.Frame(self.tab_plot_helper)
         btn_frame.pack(fill="x", padx=10, pady=20)
 
@@ -1532,12 +1548,22 @@ class NCollectorApp:
         transfections = [self.lb_exp_trans.get(i) for i in self.lb_exp_trans.curselection()]
         ligands = [self.lb_ligands.get(i) for i in self.lb_ligands.curselection()]
 
+        display_name = self.var_data_type.get()
+        if not display_name: return
+
+        # TRANSLATE: Display Name -> Internal Column Name
+        internal_name = self.data_type_map.get(display_name)
+
+        if not internal_name:
+            print(f"[ERROR] Unknown data type selected: {display_name}")
+            return
+
         config = {
             'cells': cells,
             'transfections': transfections,
             'ligands': ligands,
-            'kinetic_mode': self.var_exp_kin.get(),
-            'auc_mode': self.var_exp_auc.get()
+            'data_types': [internal_name], # As list for engine compatibility with default export
+            'kinetic_mode': self.var_exp_kin.get()
         }
 
         file_path = filedialog.asksaveasfilename(
@@ -1882,11 +1908,15 @@ class NCollectorApp:
         # Built master indexing table (needed for flexible data exclusion)
         self.built_master_index()
 
-        self.log("--- Compiling Master Dataframe... ---")
+        self.log("\n--- Compiling Master Dataframe... ---")
         self.master_df = self.compile_master_dataframe()
         self.refresh_plot_helper_options()
 
         self.log("\n--- Processing Complete & Plot Helper Ready ---")
+
+        # Enable Exports
+        self.btn_export_master.config(state="normal")
+        self.btn_export_excel.config(state="normal")
 
     def compile_master_dataframe(self):
         """
@@ -2078,16 +2108,9 @@ class NCollectorApp:
     def write_excel_export(self, file_path, master_df, config):
         """
         Writes the Excel file based on the config dictionary provided by either tab 1 (default )or tab 3 (user).
-
-        Config Keys:
-          - 'cells': list of cell lines to include (or 'All')
-          - 'transfections': list of transfections to include (or 'All')
-          - 'kinetic_mode': 'None', 'Row A (Max)', or 'All Rows'
-          - 'auc_mode': 'None' or 'Conc Response'
         TODO: reformat AUC
-        TODO: add which processing step to include -> as mean of techn. replicates then
-        TODO: these processing steps would then also have to be included in master csv!
         TODO: add arranging config (group by x) -> keeping in mind opt second ligand
+        TODO: create helper functions for cleaner code (e.g. generating header)
         """
         try:
             df_subset = master_df.copy()
@@ -2105,6 +2128,10 @@ class NCollectorApp:
                 print("[ERROR] Export failed: Filter resulted in no data.")
                 return
 
+            # Definition which is kinetic and what is AUC
+            KINETIC_TYPES = ["Raw_BRET", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean"]
+            AUC_TYPES = ["Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"]
+
             with pd.ExcelWriter(file_path) as writer:
 
                 # --- 1. METADATA SHEET ---
@@ -2120,27 +2147,44 @@ class NCollectorApp:
                     "Main Plasmids": [mp_str],
                     "Source Files Count": [len(file_names)],
                     "Source Files List": [", ".join(file_names)],
+                    "Data Type": [", ".join(config.get('data_types', []))],
+                    "Kinetic Layout": [config.get('kinetic_mode')],
                     "Filter: Ligands": [", ".join(config.get('ligands'))],
                     "Filter: Cells": [", ".join(config.get('cells'))],
                     "Filter: Conditions": [", ".join(config.get('transfections'))]
                 }
                 pd.DataFrame(meta_dict).transpose().to_excel(writer, sheet_name="Metadata", header=False)
+                sheets_written = True
 
-                # --- 2. KINETIC DATA ---
-                k_mode = config.get('kinetic_mode', 'None')
-                if k_mode != 'None':
-                    # Filter Rows based on mode
-                    if k_mode == 'Row A (Max)':
-                        df_kin = df_subset[df_subset["Plate_Row"] == "A"].copy()
-                        sheet_prefix = "Kinetic_Max"
-                    else:
-                        df_kin = df_subset.copy()
-                        sheet_prefix = "Kinetic_All"
+                # --- Loop through selected data types
+                # This handles both Single Selection (Plot Helper) and Default Report (List of 2)
+                selected_types = config.get('data_types', [])
 
-                    if not df_kin.empty:
-                        # Create Header Key
-                        df_kin["Header_Key"] = df_kin["Transfection"] + " | " + df_kin["Cell_Line"] + " | " + df_kin[
-                            "Ligand"]
+                # --- KINETIC DATA ---
+                for dtype in selected_types:
+                    if dtype in KINETIC_TYPES:
+                        k_mode = config.get('kinetic_mode', 'Row A (Max)') # Default to Row A
+
+                        # Determine Filter (Max Row A vs All)
+                        if k_mode == 'Row A (Max)':
+                            df_kin = df_subset[df_subset["Plate_Row"] == "A"].copy()
+                            sheet_suffix = "Max"
+                        elif k_mode == 'Row H (Vehicle)':
+                            df_kin = df_subset[df_subset["Plate_Row"] == "H"].copy()
+                            sheet_suffix = "Veh"
+                        else:
+                            df_kin = df_subset.copy()
+                            sheet_suffix = "All"
+                        if df_kin.empty: continue
+
+                        # Header Grouping Logic
+                        if "Mean" in dtype:
+                            df_kin["Header_Key"] = df_kin["Transfection"] + " | " + df_kin["Cell_Line"] + " | " + \
+                                                   df_kin["Ligand"]
+                        else:
+                            df_kin["Header_Key"] = df_kin["Transfection"] + " | " + df_kin["Cell_Line"] + " | " + \
+                                                   df_kin["Well_ID"]
+
                         if k_mode == 'All Rows':
                             df_kin["Header_Key"] += " | " + df_kin["Plate_Row"]
 
@@ -2148,7 +2192,7 @@ class NCollectorApp:
                         kin_pivot = df_kin.pivot_table(
                             index="Time_(min)",
                             columns=["Header_Key", "File_Name"],
-                            values="Kinetic_Mean"
+                            values=dtype
                         )
 
                         # Format Headers creating the empty headers
@@ -2165,24 +2209,30 @@ class NCollectorApp:
                         kin_pivot.reset_index(inplace=True)
                         kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
 
+                        # Sheet Name (Max 31 chars)
+                        sheet_name = f"Kin_{dtype}_{sheet_suffix}"[:31]
+
                         # Save
-                        kin_pivot.to_excel(writer, sheet_name=sheet_prefix, index=False)
+                        kin_pivot.to_excel(writer, sheet_name=sheet_name, index=False)
+                        sheets_written = True
 
-                # --- 3. AUC DATA ---
-                a_mode = config.get('auc_mode', 'None')
+                # --- AUC DATA ---
+                    elif dtype in AUC_TYPES:
+                        df_auc = df_subset.drop_duplicates(
+                            subset=["File_Name", "Transfection", "Cell_Line", "Well_ID"]).copy()
+                        if df_auc.empty: continue
 
-                if a_mode == 'Conc Response':
-                    # Drop duplicates for Scalar AUC
-                    df_auc = df_subset.drop_duplicates(subset=["File_Name", "Transfection", "Cell_Line"]).copy()
-
-                    if not df_auc.empty:
-                        df_auc["Header_Key"] = df_auc["Transfection"] + " | " + df_auc["Cell_Line"] + " | " + df_auc[
-                            "Ligand"]
+                        if "Mean" in dtype:
+                            df_auc["Header_Key"] = df_auc["Transfection"] + " | " + df_auc["Cell_Line"] + " | " + \
+                                                   df_auc["Ligand"]
+                        else:
+                            df_auc["Header_Key"] = df_auc["Transfection"] + " | " + df_auc["Cell_Line"] + " | " + \
+                                                   df_auc["Well_ID"]
 
                         auc_pivot = df_auc.pivot_table(
                             index="Ligand_Conc",
                             columns=["Header_Key", "File_Name"],
-                            values="AUC_Mean"
+                            values=dtype
                         )
 
                         # Format Headers
@@ -2196,11 +2246,16 @@ class NCollectorApp:
                                 new_headers.append("")
 
                         auc_pivot.columns = new_headers
-                        # auc_pivot.sort_index(inplace=True)
-                        # auc_pivot.reset_index(inplace=True)
+
+                        auc_pivot.reset_index(inplace=True)
                         auc_pivot.rename(columns={"Ligand_Conc": "Concentration (logM)"}, inplace=True)
 
-                        auc_pivot.to_excel(writer, sheet_name="AUC_Conc_Response", index=False)
+                        # Example: "AUC_AUC_Mean" or "AUC_Bl_AUC"
+                        sheet_name = f"{dtype}"[:31]
+                        auc_pivot.to_excel(writer, sheet_name=sheet_name, index=False)
+                        sheets_written = True
+            if not sheets_written:
+                pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name="Empty")
 
             self.log(f"   [SUCCESS] Exported: {os.path.basename(file_path)}")
 
@@ -2229,8 +2284,8 @@ class NCollectorApp:
             'cells': 'All',
             'transfections': 'All',
             'ligands': 'All',
-            'kinetic_mode': 'Row A (Max)',
-            'auc_mode': 'Conc Response'
+            'data_types': ['Kinetic_Mean', 'AUC_Mean'],
+            'kinetic_mode': 'Row A (Max)'
         }
 
         self.write_excel_export(file_path, self.master_df, default_config)
