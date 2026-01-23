@@ -1911,17 +1911,6 @@ class NCollectorApp:
                 if res.kinetic_df is None or res.raw_bret_ratio_df is None:
                     continue # ----------------------add all that is needed!
 
-                # Iterate through the KEYS of the mean DataFrame
-                # Key format from 'calculate_replicate_means': "Condition|Cell_Line|Ligand_Name|Row"
-                for col_key in res.kinetic_mean_df.columns:
-                    try:
-                        parts = col_key.split('|')
-                        if len(parts) != 4:
-                            print(f"[WARNING] Skipping {col_key}: Format expected 4 parts, got {len(parts)}")
-                            continue
-                        transfection, cell_line, lig_name, row_char = parts
-                    except ValueError:
-                        continue
                 # --- PREPARE KINETIC DATA ---
                 # Use pandas melt function to prepare each df from wide to long format
                 def melt_df(df, val_name, time_vec):
@@ -2021,6 +2010,13 @@ class NCollectorApp:
                 merged_df["File_Name"] = res.file_name
                 merged_df["Date"] = res.measurement_date
                 merged_df["Main_Plasmids"] = main_plasmids
+
+                # Get the exclusion text (handle empty case)
+                exclusion_text = self.rule_history_text if self.rule_history_text else "None"
+                # Clean newlines for CSV compatibility
+                exclusion_text_clean = exclusion_text.replace("\n", " | ")
+                merged_df["Applied_Exclusions"] = exclusion_text_clean
+
                 # Meta Lookups (Optimization: Build dicts once per file)
                 meta_lookups = {'Transfection': {}, 'Cell_Line': {}, 'Ligand': {}, 'Ligand_Conc': {}, 'Plate_Row': {}}
 
@@ -2050,8 +2046,9 @@ class NCollectorApp:
         master_df = pd.concat(all_files_data, ignore_index=True)
         # Cleanup columns
         cols_order = [
-            "File_Name", "Date", "Main_Plasmids", "Transfection", "Cell_Line",
-            "Ligand", "Ligand_Conc", "Plate_Row", "Well_ID", "Time_(min)",
+            "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
+            "Transfection", "Cell_Line", "Ligand",
+            "Ligand_Conc", "Plate_Row", "Well_ID", "Time_(min)",
             "Raw_BRET", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
             "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
         ]
