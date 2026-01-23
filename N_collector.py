@@ -984,12 +984,12 @@ class NCollectorApp:
         self.log_text = tk.Text(self.log_window)
         self.log_text.pack(expand=True, fill='both')
 
-        # --- GUI State ---
+        # --- INTERNAL STORAGE ---
         # Path to folder variable
         self.folder_path = tk.StringVar(value="No folder selected.")
         self.subfolder_paths_with_files = []
         self.experiment: list[MeasurementFolder] = []
-        self.master_df = pd.DataFrame()
+        self.master_index = pd.DataFrame() # Index for populating tab 2
         self.rule_history_text = ""
 
         # --- TABS SETUP ---
@@ -1108,11 +1108,11 @@ class NCollectorApp:
         for i in self.summary_tree.get_children():
             self.summary_tree.delete(i)
 
-        if self.master_df.empty:
+        if self.master_index.empty:
             return
 
         # Group by Cell Line and Condition
-        grouped = self.master_df.groupby(['Cell_Line', 'Condition'])
+        grouped = self.master_index.groupby(['Cell_Line', 'Condition'])
 
         for (cell, cond), group in grouped:
             # Count unique filenames for N (experiments)
@@ -1210,10 +1210,10 @@ class NCollectorApp:
 
     def refresh_filter_options(self):
         """Called during built master index. Updates dropdown options of date, cell line and condition."""
-        if self.master_df.empty: return
+        if self.master_index.empty: return
 
         # Get unique dates and add "All"
-        dates = sorted(self.master_df['Date'].unique().tolist())
+        dates = sorted(self.master_index['Date'].unique().tolist())
         self.cb_date['values'] = ["All"] + dates
         self.var_date.set("All")
 
@@ -1224,14 +1224,14 @@ class NCollectorApp:
         """Updates Cell Line options based on selected Date."""
         selected_date = self.var_date.get()
 
-        if self.master_df.empty: return
+        if self.master_index.empty: return
 
         if selected_date == "All":
             # Show all cell lines available in the whole dataset
-            cells = sorted(self.master_df['Cell_Line'].unique().tolist())
+            cells = sorted(self.master_index['Cell_Line'].unique().tolist())
         else:
             # Filter DF by date
-            subset = self.master_df[self.master_df['Date'] == selected_date]
+            subset = self.master_index[self.master_index['Date'] == selected_date]
             cells = sorted(subset['Cell_Line'].unique().tolist())
 
         self.cb_cell['values'] = ["All"] + cells
@@ -1243,10 +1243,10 @@ class NCollectorApp:
         selected_date = self.var_date.get()
         selected_cell = self.var_cell.get()
 
-        if self.master_df.empty: return
+        if self.master_index.empty: return
 
         # Start with full DF
-        subset = self.master_df.copy()
+        subset = self.master_index.copy()
 
         # Apply Date Filter
         if selected_date != "All":
@@ -1333,7 +1333,7 @@ class NCollectorApp:
                 continue
 
             # Start with full dataframe
-            df = self.master_df.copy()
+            df = self.master_index.copy()
 
             # Apply high level filters
             if rule['Date'] != "All":
@@ -1407,7 +1407,7 @@ class NCollectorApp:
             # --- RESET STATE: Clear old data when a new folder is selected
             self.subfolder_paths_with_files = []
             self.experiment = []
-            self.master_df = pd.DataFrame()
+            self.master_index = pd.DataFrame()
             # Reset summary table
             for i in self.summary_tree.get_children():
                 self.summary_tree.delete(i)
@@ -1549,19 +1549,20 @@ class NCollectorApp:
                     records.append(record)
         # Built df from records
         if records:
-            self.master_df = pd.DataFrame(records)
+            self.master_index = pd.DataFrame(records)
 
             # --- Summary for verification ---
-            summary = self.master_df.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
+            summary = self.master_index.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
             print("\n[DEBUG] Data Summary:\n", summary)
             self.refresh_filter_options()
             self.update_summary_table()
             return self.master_df
+            return self.master_index
         else:
-            self.master_df = pd.DataFrame()
+            self.master_index = pd.DataFrame()
             self.update_summary_table()
             print("No valid data found")
-            return self.master_df
+            return self.master_index
 
     def collect_files(self):
         """
