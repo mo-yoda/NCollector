@@ -991,6 +991,7 @@ class NCollectorApp:
         self.experiment: list[MeasurementFolder] = []
         self.master_index = pd.DataFrame() # Index for populating tab 2
         self.rule_history_text = ""
+        self.master_df = pd.DataFrame # Used for master csv file storage (by generation or import)
 
         # --- TABS SETUP ---
         self.notebook = ttk.Notebook(main_window)
@@ -1003,6 +1004,13 @@ class NCollectorApp:
         # Tab 2: Data Selection
         self.tab_select = tk.Frame(self.notebook)
         self.notebook.add(self.tab_select, text="Optional Selection")
+
+        # Tab 3: Plot Helper
+        self.tab_plot_helper = tk.Frame(self.notebook)
+        self.notebook.add(self.tab_plot_helper, text="Plot Helper")
+        # --- TAB 3 CONTENT ---
+        # Setup immediately for optional import of master csv
+        self.setup_plot_helper_tab()
 
         # --- TAB 1 CONTENT ---
         # Select Folder button
@@ -1070,21 +1078,22 @@ class NCollectorApp:
                                           )
         self.lbl_rules_summary.pack(fill="x", padx=5, pady=5)
 
-        # Export button
-        self.export_button = tk.Button(self.tab_import,
-                                       text="Export data",
-                                       state="disabled",
-                                       command=self.export_data)
-        self.export_button.pack(pady=20, padx=10)
         # --- EXPORT SECTION ---
         export_frame = tk.LabelFrame(self.tab_import, text="Export Options")
         export_frame.pack(fill="x", padx=20, pady=10)
         # Master CSV button
         self.btn_export_master = tk.Button(export_frame,
-                                           text="Export Master CSV (Tidy Data)",
+                                           text="Export Master CSV",
                                            state="disabled",
                                            command=self.export_master_csv)
         self.btn_export_master.pack(side="left", fill="x", expand=True, padx=5, pady=10)
+
+        # Preview xlsx button
+        self.btn_export_excel = tk.Button(export_frame,
+                                          text="Export Excel Report (Default)",
+                                          state="disabled",
+                                          command=self.export_excel_report)
+        self.btn_export_excel.pack(side="left", fill="x", expand=True, padx=5, pady=10)
 
         # --- TAB 2 CONTENT ---
         self.setup_exclusion_tab()
@@ -1399,6 +1408,182 @@ class NCollectorApp:
         # Rerun processing to update graphs/stats
         self.run_processing_pipeline()
 
+    def setup_plot_helper_tab(self):
+        """Builds the GUI for tab 3 plot helper"""
+
+        # --- Import Master CSV ---
+        src_frame = tk.Frame(self.tab_plot_helper)
+        src_frame.pack(fill="x", padx=10, pady=10)
+        tk.Label(src_frame, text="Data Source:", font=("Arial", 9, "bold")).pack(side="left")
+
+        self.lbl_data_source = tk.Label(src_frame, text="No Data Loaded")
+        self.lbl_data_source.pack(side="left", padx=10)
+
+        tk.Button(src_frame, text="Import Master CSV",
+                  command=self.import_master_csv).pack(side="right")
+
+        # --- Filter Selection ---
+        sel_frame = tk.LabelFrame(self.tab_plot_helper, text="Select Data to Include")
+        sel_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Ligand Listbox
+        tk.Label(sel_frame, text="Ligands:").grid(row=0, column=0, padx=5, sticky="w")
+        self.lb_ligands = tk.Listbox(sel_frame, selectmode="multiple", height=6, exportselection=False)
+        self.lb_ligands.grid(row=1, column=0, padx=3, pady=5, sticky="nsew")
+
+        # Cell Lines Listbox
+        tk.Label(sel_frame, text="Cell Lines:").grid(row=0, column=1, padx=5, sticky="w")
+        self.lb_exp_cells = tk.Listbox(sel_frame, selectmode="multiple", height=6, exportselection=False)
+        self.lb_exp_cells.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
+
+        # Transfections Listbox
+        tk.Label(sel_frame, text="Conditions (Transfections):").grid(row=0, column=2, padx=5, sticky="w")
+        self.lb_exp_trans = tk.Listbox(sel_frame, selectmode="multiple", height=6, exportselection=False)
+        self.lb_exp_trans.grid(row=1, column=2, padx=5, pady=5, sticky="nsew")
+        # Add scrollbar
+        trans_scroll = tk.Scrollbar(sel_frame, orient="vertical", command=self.lb_exp_trans.yview)
+        trans_scroll.grid(row=1, column=3, sticky="ns", pady=5)
+        self.lb_exp_trans.config(yscrollcommand=trans_scroll.set) # Update scrollbar
+
+        # Select All Buttons
+        tk.Button(sel_frame, text="Select All Ligands", command=lambda: self.select_all_listbox(self.lb_ligands)).grid(
+            row=2, column=0)
+        tk.Button(sel_frame, text="Select All Cells", command=lambda: self.select_all_listbox(self.lb_exp_cells)).grid(
+            row=2, column=1)
+        tk.Button(sel_frame, text="Select All Transf.", command=lambda: self.select_all_listbox(self.lb_exp_trans)).grid(
+            row=2, column=2)
+
+        sel_frame.columnconfigure(0, weight=1)
+        sel_frame.columnconfigure(1, weight=2)
+        sel_frame.columnconfigure(2, weight=3)
+
+        # --- Export Data Options ---
+        opt_frame = tk.LabelFrame(self.tab_plot_helper, text="Export Data Options")
+        opt_frame.pack(fill="x", padx=10, pady=5)
+
+        # Kinetic Options
+        tk.Label(opt_frame, text="Kinetic Data:").grid(row=0, column=0, sticky="w", padx=10)
+        self.var_exp_kin = tk.StringVar(value="Row A (Max)")
+        combo_kin = ttk.Combobox(opt_frame, textvariable=self.var_exp_kin, state="readonly")
+        combo_kin['values'] = ["None", "Row A (Max)", "All Rows"]
+        combo_kin.grid(row=0, column=1, padx=5, pady=5)
+
+        # AUC Options
+        tk.Label(opt_frame, text="AUC Data:").grid(row=1, column=0, sticky="w", padx=10)
+        self.var_exp_auc = tk.StringVar(value="Conc Response")
+        combo_auc = ttk.Combobox(opt_frame, textvariable=self.var_exp_auc, state="readonly")
+        combo_auc['values'] = ["None", "Conc Response"]
+        combo_auc.grid(row=1, column=1, padx=5, pady=5)
+
+        # --- 3. Action Button ---
+        btn_frame = tk.Frame(self.tab_plot_helper)
+        btn_frame.pack(fill="x", padx=10, pady=20)
+
+        self.btn_run_plot_helper = tk.Button(btn_frame, text="Generate Custom Export",
+                                            state="disabled", command=self.run_plot_helper)
+        self.btn_run_plot_helper.pack(fill="x", ipady=5)
+
+    def select_all_listbox(self, lb):
+        lb.select_set(0, tk.END)
+
+    def refresh_plot_helper_options(self):
+        """Populates the list boxes in the plot helper from master df (opt. imported csv file)."""
+        if self.master_df is None or self.master_df.empty:
+            self.btn_run_plot_helper.config(state="disabled")
+            self.lbl_data_source.config(text="No Data")
+            return
+
+        if not self.experiment:
+            # CSV mode -> status already set
+            pass
+        else:
+            #  Fresh Analysis mode
+            experiment = self.master_df['Main_Plasmids'].unique()[0]
+            self.lbl_data_source.config(text=f"Internal: {experiment}")
+
+        self.btn_run_plot_helper.config(state="normal")
+
+        # Clear
+        self.lb_ligands.delete(0, tk.END)
+        self.lb_exp_cells.delete(0, tk.END)
+        self.lb_exp_trans.delete(0, tk.END)
+
+        df = self.master_df
+
+        # Populate Ligand
+        ligands = sorted(set(df['Ligand'].astype(str)))
+        for l in ligands: self.lb_ligands.insert(tk.END, l)
+        self.select_all_listbox(self.lb_ligands) # Default to all
+
+        # Populate Cells
+        cells = sorted(set(df['Cell_Line'].astype(str)))
+        for c in cells: self.lb_exp_cells.insert(tk.END, c)
+        self.select_all_listbox(self.lb_exp_cells)  # Default to all
+
+        # Populate Transfections
+        trans = sorted(set(df['Transfection'].astype(str)))
+        for t in trans: self.lb_exp_trans.insert(tk.END, t)
+        self.select_all_listbox(self.lb_exp_trans)  # Default to all
+
+    def run_plot_helper(self):
+        """Collects GUI selections and calls the core export engine."""
+        if self.master_df is None or self.master_df.empty: return
+
+        # Get Selections
+        cells = [self.lb_exp_cells.get(i) for i in self.lb_exp_cells.curselection()]
+        transfections = [self.lb_exp_trans.get(i) for i in self.lb_exp_trans.curselection()]
+        ligands = [self.lb_ligands.get(i) for i in self.lb_ligands.curselection()]
+
+        config = {
+            'cells': cells,
+            'transfections': transfections,
+            'ligands': ligands,
+            'kinetic_mode': self.var_exp_kin.get(),
+            'auc_mode': self.var_exp_auc.get()
+        }
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            title="Save Custom Export"
+        )
+        if not file_path: return
+
+        # Call the core engine with the unified DF
+        self.write_excel_export(file_path, self.master_df, config)
+
+    def import_master_csv(self):
+        """Loads a master csv file directly into the memory for the plot helper."""
+        file_path = filedialog.askopenfilename(
+            title="Select Master CSV File",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+        )
+        if not file_path: return
+
+        try:
+            df = pd.read_csv(file_path)
+
+            # Validation
+            required = ["Transfection", "Cell_Line", "Ligand", "Kinetic_Mean"]
+            if not all(col in df.columns for col in required):
+                self.log("[ERROR] Invalid CSV format. Columns missing.")
+                return
+
+            # Store in the unified variable
+            self.master_df = df
+
+            # Reset raw data references so we know we are in "CSV Mode"
+            self.experiment = []
+            self.master_index = pd.DataFrame()  # Clear exclusion index
+
+            # Update GUI
+            self.lbl_data_source.config(text=f"CSV: {os.path.basename(file_path)}")
+            self.refresh_plot_helper_options()
+            self.log(f"Loaded Master CSV: {os.path.basename(file_path)}")
+
+        except Exception as e:
+            self.log(f"[ERROR] CSV Load Failed: {e}")
+
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
             directory = filedialog.askdirectory(title="Select a folder...")
@@ -1415,8 +1600,8 @@ class NCollectorApp:
             self.main_plasmids_label.config(text="")
             self.lbl_rules_summary.config(text="")
             self.clear_exclusion_list()
-            self.export_button.config(state="disabled")
             self.btn_export_master.config(state="disabled")
+            self.btn_export_excel.config(state="disabled")
 
 
             # Update GUI immediately
@@ -1509,9 +1694,7 @@ class NCollectorApp:
         Enables flexible filtering needed for exclusion of data.
         """
 
-        print("----- building master index ------")
-
-        # collect list of records for each col
+        # Collect list of records for each col
         records = []
         rows_str = "ABCDEFGH"
 
@@ -1556,7 +1739,7 @@ class NCollectorApp:
             print("\n[DEBUG] Data Summary:\n", summary)
             self.refresh_filter_options()
             self.update_summary_table()
-            return self.master_df
+            self.refresh_plot_helper_options()
             return self.master_index
         else:
             self.master_index = pd.DataFrame()
@@ -1670,8 +1853,9 @@ class NCollectorApp:
         self.run_processing_pipeline()
 
         # Enable export
-        self.export_button.config(state="normal")
         self.btn_export_master.config(state="normal")
+        self.btn_export_excel.config(state="normal")
+        self.btn_run_plot_helper.config(state="normal")
 
     def run_processing_pipeline(self):
         """
@@ -1700,9 +1884,12 @@ class NCollectorApp:
         # Built master indexing table (needed for flexible data exclusion)
         self.built_master_index()
 
-        self.log("\n--- Processing Complete ---")
+        self.log("--- Compiling Master Dataframe... ---")
+        self.master_df = self.compile_master_dataframe()
+        self.refresh_plot_helper_options()
 
-    def export_data(self):
+        self.log("\n--- Processing Complete & Plot Helper Ready ---")
+
     def compile_master_dataframe(self):
         """
         Compiles technical means (Kinetic & AUC) into a tidy Master DataFrame.
@@ -1730,7 +1917,6 @@ class NCollectorApp:
                 for meta in res.column_metadata.values():
                     # Store key as unique combo
                     key = (meta.condition_name, meta.ligand_identity)
-                    print(key)
                     if key not in meta_lookup:
                         meta_lookup[key] = meta
 
@@ -1801,9 +1987,8 @@ class NCollectorApp:
         return df_master
 
     def export_master_csv(self):
-        """Compiles and saves the master CSV """
-        df_master = self.compile_master_dataframe()
-        if df_master is None or df_master.empty:
+        """Saves compiled master df to csv"""
+        if self.master_df is None or self.master_df.empty:
             self.log("No data to export.")
             return
 
@@ -1816,15 +2001,171 @@ class NCollectorApp:
         if not file_path: return
 
         try:
-            df_master.to_csv(file_path, index=False)
+            self.master_df.to_csv(file_path, index=False)
             self.log(f"   [SUCCESS] Saved Master CSV: {os.path.basename(file_path)}")
+        except Exception as e:
+            self.log(f"   [ERROR] Failed to save CSV: {e}")
+
+    def write_excel_export(self, file_path, master_df, config):
+        """
+        Writes the Excel file based on the config dictionary provided by either tab 1 (default )or tab 3 (user).
+
+        Config Keys:
+          - 'cells': list of cell lines to include (or 'All')
+          - 'transfections': list of transfections to include (or 'All')
+          - 'kinetic_mode': 'None', 'Row A (Max)', or 'All Rows'
+          - 'auc_mode': 'None' or 'Conc Response'
+        TODO: reformat AUC
+        TODO: add which processing step to include -> as mean of techn. replicates then
+        TODO: these processing steps would then also have to be included in master csv!
+        TODO: add arranging config (group by x) -> keeping in mind opt second ligand
+        """
+        try:
+            df_subset = master_df.copy()
+
+            if config.get('ligands') != 'All':
+                df_subset = df_subset[df_subset['Ligand'].isin(config['ligands'])]
+
+            if config.get('cells') != 'All':
+                df_subset = df_subset[df_subset['Cell_Line'].isin(config['cells'])]
+
+            if config.get('transfections') != 'All':
+                df_subset = df_subset[df_subset['Transfection'].isin(config['transfections'])]
+
+            if df_subset.empty:
+                print("[ERROR] Export failed: Filter resulted in no data.")
+                return
+
+            with pd.ExcelWriter(file_path) as writer:
+
+                # --- 1. METADATA SHEET ---
+                # Include always
+                file_names = df_subset["File_Name"].unique().tolist()
+                mp_str = "Unknown"
+                if 'Main_Plasmids' in df_subset.columns:
+                    mp_vals = df_subset['Main_Plasmids'].unique()
+                    if len(mp_vals) > 0: mp_str = mp_vals[0]
+
+                meta_dict = {
+                    "Export Date": [datetime.now().strftime("%d.%m.%Y - %H:%M:%S")],
+                    "Main Plasmids": [mp_str],
+                    "Source Files Count": [len(file_names)],
+                    "Source Files List": [", ".join(file_names)],
+                    "Filter: Ligands": [", ".join(config.get('ligands'))],
+                    "Filter: Cells": [", ".join(config.get('cells'))],
+                    "Filter: Conditions": [", ".join(config.get('transfections'))]
+                }
+                pd.DataFrame(meta_dict).transpose().to_excel(writer, sheet_name="Metadata", header=False)
+
+                # --- 2. KINETIC DATA ---
+                k_mode = config.get('kinetic_mode', 'None')
+                if k_mode != 'None':
+                    # Filter Rows based on mode
+                    if k_mode == 'Row A (Max)':
+                        df_kin = df_subset[df_subset["Plate_Row"] == "A"].copy()
+                        sheet_prefix = "Kinetic_Max"
+                    else:
+                        df_kin = df_subset.copy()
+                        sheet_prefix = "Kinetic_All"
+
+                    if not df_kin.empty:
+                        # Create Header Key
+                        df_kin["Header_Key"] = df_kin["Transfection"] + " | " + df_kin["Cell_Line"] + " | " + df_kin[
+                            "Ligand"]
+                        if k_mode == 'All Rows':
+                            df_kin["Header_Key"] += " | " + df_kin["Plate_Row"]
+
+                        # Merge cells of equal header
+                        kin_pivot = df_kin.pivot_table(
+                            index="Time_(min)",
+                            columns=["Header_Key", "File_Name"],
+                            values="Kinetic_Mean"
+                        )
+
+                        # Format Headers creating the empty headers
+                        new_headers = []
+                        last_key = None
+                        for key, file_name in kin_pivot.columns:
+                            if key != last_key:
+                                new_headers.append(key)
+                                last_key = key
+                            else:
+                                new_headers.append("")
+
+                        kin_pivot.columns = new_headers
+                        kin_pivot.reset_index(inplace=True)
+                        kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
+
+                        # Save
+                        kin_pivot.to_excel(writer, sheet_name=sheet_prefix, index=False)
+
+                # --- 3. AUC DATA ---
+                a_mode = config.get('auc_mode', 'None')
+                print("___AUC HERE_____")
+
+                if a_mode == 'Conc Response':
+                    # Drop duplicates for Scalar AUC
+                    df_auc = df_subset.drop_duplicates(subset=["File_Name", "Transfection", "Cell_Line"]).copy()
+
+                    if not df_auc.empty:
+                        df_auc["Header_Key"] = df_auc["Transfection"] + " | " + df_auc["Cell_Line"] + " | " + df_auc[
+                            "Ligand"]
+
+                        auc_pivot = df_auc.pivot_table(
+                            index="Ligand_Conc",
+                            columns=["Header_Key", "File_Name"],
+                            values="AUC_Mean"
+                        )
+
+                        # Format Headers
+                        new_headers = []
+                        last_key = None
+                        for key, file_name in auc_pivot.columns:
+                            if key != last_key:
+                                new_headers.append(key)
+                                last_key = key
+                            else:
+                                new_headers.append("")
+
+                        auc_pivot.columns = new_headers
+                        # auc_pivot.sort_index(inplace=True)
+                        # auc_pivot.reset_index(inplace=True)
+                        auc_pivot.rename(columns={"Ligand_Conc": "Concentration (logM)"}, inplace=True)
+
+                        auc_pivot.to_excel(writer, sheet_name="AUC_Conc_Response", index=False)
+
+            self.log(f"   [SUCCESS] Exported: {os.path.basename(file_path)}")
+
         except Exception as e:
             self.log(f"   [ERROR] Export failed: {e}")
             print(e)
-            self.log(f"   [ERROR] Failed to save CSV: {e}")
 
-            # self.log(f"   [ERROR] Export failed: {e}")
-            # print(e)
+    def export_excel_report(self):
+        """
+        Default Export: All Data, Highest stim kinetics and AUC crc.
+        TODO: Grouped for transfection as default
+        """
+        if self.master_df is None or self.master_df.empty:
+            self.log("No data found to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel File", "*.xlsx")],
+            title="Save Standard Report"
+        )
+        if not file_path: return
+
+        # Define Standard Config
+        default_config = {
+            'cells': 'All',
+            'transfections': 'All',
+            'ligands': 'All',
+            'kinetic_mode': 'Row A (Max)',
+            'auc_mode': 'Conc Response'
+        }
+
+        self.write_excel_export(file_path, self.master_df, default_config)
 
 # TODO: implement showing also errors from tool functions in log window
 
