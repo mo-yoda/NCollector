@@ -1076,6 +1076,15 @@ class NCollectorApp:
                                        state="disabled",
                                        command=self.export_data)
         self.export_button.pack(pady=20, padx=10)
+        # --- EXPORT SECTION ---
+        export_frame = tk.LabelFrame(self.tab_import, text="Export Options")
+        export_frame.pack(fill="x", padx=20, pady=10)
+        # Master CSV button
+        self.btn_export_master = tk.Button(export_frame,
+                                           text="Export Master CSV (Tidy Data)",
+                                           state="disabled",
+                                           command=self.export_master_csv)
+        self.btn_export_master.pack(side="left", fill="x", expand=True, padx=5, pady=10)
 
         # --- TAB 2 CONTENT ---
         self.setup_exclusion_tab()
@@ -1407,6 +1416,7 @@ class NCollectorApp:
             self.lbl_rules_summary.config(text="")
             self.clear_exclusion_list()
             self.export_button.config(state="disabled")
+            self.btn_export_master.config(state="disabled")
 
 
             # Update GUI immediately
@@ -1660,6 +1670,7 @@ class NCollectorApp:
 
         # Enable export
         self.export_button.config(state="normal")
+        self.btn_export_master.config(state="normal")
 
     def run_processing_pipeline(self):
         """
@@ -1788,65 +1799,31 @@ class NCollectorApp:
         df_master = pd.DataFrame(master_rows)
         return df_master
 
-                    # Init storage
-                    if sheet_name not in export_tree:
-                        export_tree[sheet_name] = {}
-                    if cell not in export_tree[sheet_name]:
-                        export_tree[sheet_name][cell] = []
+    def export_master_csv(self):
+        """Compiles and saves the master CSV """
+        df_master = self.compile_master_dataframe()
+        if df_master is None or df_master.empty:
+            self.log("No data to export.")
+            return
 
-                    # Get data and set time index
-                    series = result.kinetic_mean_df[col_key].copy()
-                    series.index = time_index
+        # Native Dialog handles overwrite warning automatically
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV File", "*.csv")],
+            title="Save Master CSV"
+        )
+        if not file_path: return
 
-                    export_tree[sheet_name][cell].append(series)
-
-        # Write to excel
         try:
-            with pd.ExcelWriter(export_file_path) as writer:
-                # Iterate through sheets (conditions + row)
-                for sheet_name, cell_data in export_tree.items():
-                    # Sort cell lines alphabetically
-                    sorted_cells = sorted(cell_data.keys())
-
-                    # Create a list of DataFrames to concatenate
-                    dfs_to_concat = []
-                    header_list = ["Time (min)"]
-
-                    # Built dataframe for this sheet
-                    for cell in sorted_cells:
-                        replicates = cell_data[cell]
-
-                        # add to header list
-                        header_list.append(cell)
-                        header_list.extend([""] * (len(replicates) - 1))
-
-                        # 2. Collect Data
-                        df_cell = pd.concat(replicates, axis=1)
-                        dfs_to_concat.append(df_cell)
-
-                    if not dfs_to_concat: continue
-
-                    # Combine all data side-by-side
-                    full_sheet_df = pd.concat(dfs_to_concat, axis=1)
-
-                    # Sort by Index (Time)
-                    full_sheet_df.sort_index(inplace=True)
-
-                    # Reset index so "Time" becomes the first column (col 0)
-                    full_sheet_df.reset_index(inplace=True)
-
-                    # Force the columns to match our manual header list
-                    # (Pandas allows duplicate column names like "" here)
-                    full_sheet_df.columns = header_list
-
-                    # Write to Excel without the default index or header processing
-                    full_sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
-
-            self.log("   [SUCCESS] Export complete.")
-
+            df_master.to_csv(file_path, index=False)
+            self.log(f"   [SUCCESS] Saved Master CSV: {os.path.basename(file_path)}")
         except Exception as e:
             self.log(f"   [ERROR] Export failed: {e}")
             print(e)
+            self.log(f"   [ERROR] Failed to save CSV: {e}")
+
+            # self.log(f"   [ERROR] Export failed: {e}")
+            # print(e)
 
 # TODO: implement showing also errors from tool functions in log window
 
