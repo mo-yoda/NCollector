@@ -970,29 +970,54 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
 
 class NCollectorApp:
     def __init__(self, main_window):
-        # TODO: clean up app, init everything here
         self.main_gi = main_window
         main_window.title("N Collector")
 
-        # Separate log window
-        self.log_window = tk.Toplevel(main_window)
-        self.log_window.title("Processing Log")
-        self.log_window.geometry("700x500")
-
-        # Log window to display print statements
-        self.log_text = tk.Text(self.log_window)
-        self.log_text.pack(expand=True, fill='both')
-
-        # --- INTERNAL STORAGE ---
-        # Path to folder variable
-        self.folder_path = tk.StringVar(value="No folder selected.")
+        # --- Data Storage ---
         self.subfolder_paths_with_files = []
         self.experiment: list[MeasurementFolder] = []
-        self.master_index = pd.DataFrame() # Index for populating tab 2
+        self.master_index = pd.DataFrame()  # Index for populating tab 2
         self.rule_history_text = ""
-        self.master_df = pd.DataFrame # Used for master csv file storage (by generation or import)
+        self.pending_exclusions = []
+        self.master_df = pd.DataFrame  # Used for master csv file storage (by generation or import)
 
-        # --- Data Type Mapping (Display Name -> Internal Column) ---
+        # --- GUI Variables ---
+        self.folder_path = tk.StringVar(value="No folder selected.")
+        self.var_date = tk.StringVar(value="All")
+        self.var_cell = tk.StringVar(value="All")
+        self.var_cond = tk.StringVar(value="All")
+        self.var_repl = tk.StringVar(value="")
+        self.var_row = tk.StringVar(value="")
+        self.var_data_type = tk.StringVar(value="")
+        self.var_exp_kin = tk.StringVar(value="Row A (Max)")
+        self.var_exp_auc = tk.StringVar(value="Conc Response") # ----> NEEEDED?
+
+        # --- GUI Widgets (Initialised to None) ---
+        self.log_window = None
+        self.log_text = None
+        # Tab 1
+        self.path_label = None
+        self.load_files_button = None
+        self.main_plasmids_label = None
+        self.summary_tree = None
+        self.lbl_rules_summary = None
+        self.btn_export_master = None
+        self.btn_export_excel = None
+        # Tab 2
+        self.cb_date = None
+        self.cb_cell = None
+        self.cb_cond = None
+        self.cb_rep = None
+        self.cb_row = None
+        self.lb_exclusions = None
+        # Tab 3
+        self.lbl_data_source = None
+        self.lb_ligands = None
+        self.lb_exp_cells = None
+        self.lb_exp_trans = None
+        self.btn_run_plot_helper = None
+
+        # --- Constants ---
         self.data_type_map = {
             "kinetic: raw BRET ratio (kinetic)": "Raw_BRET",
             "kinetic: baseline-corrected BRET ratio": "Bl_Corrected_BRET",
@@ -1004,123 +1029,89 @@ class NCollectorApp:
             "AUC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
         }
 
-        # --- TABS SETUP ---
-        self.notebook = ttk.Notebook(main_window)
+        # --- Setup GUI ---
+        self.setup_logging()
+        self.setup_tabs()
+
+    def setup_logging(self):
+        """Setup of log window"""
+        self.log_window = tk.Toplevel(self.main_gi)
+        self.log_window.title("Processing Log")
+        self.log_window.geometry("700x500")
+        self.log_text = tk.Text(self.log_window)
+        self.log_text.pack(expand=True, fill='both')
+
+    def setup_tabs(self):
+        """Setup tabs"""
+        self.notebook = ttk.Notebook(self.main_gi)
         self.notebook.pack(expand=True, fill='both')
 
-        # Tab 1: Import Data
         self.tab_import = tk.Frame(self.notebook)
         self.notebook.add(self.tab_import, text="Import & Export Data")
 
-        # Tab 2: Data Selection
         self.tab_select = tk.Frame(self.notebook)
         self.notebook.add(self.tab_select, text="Exclude Data")
 
-        # Tab 3: Plot Helper
         self.tab_plot_helper = tk.Frame(self.notebook)
         self.notebook.add(self.tab_plot_helper, text="Plot Helper")
-        # --- TAB 3 CONTENT ---
-        # Setup immediately for optional import of master csv
+
+        self.setup_import_tab()
+        self.setup_exclusion_tab()
         self.setup_plot_helper_tab()
 
-        # --- TAB 1 CONTENT ---
+    def setup_import_tab(self):
         # Select Folder button
-        # No self. needed as this does not have to be stored for later changes
         tk.Button(self.tab_import, text="Select folder containing results of experiment",
                   command=self.select_folder).pack(pady=10, padx=10)
 
         # Display label for path
-        self.path_label = tk.Label(self.tab_import,
-                                   textvariable=self.folder_path,
-                                   wraplength=1000,
-                                   justify="left",
+        self.path_label = tk.Label(self.tab_import, textvariable=self.folder_path, wraplength=1000, justify="left",
                                    font=('Arial', 10))
         self.path_label.pack(pady=10, padx=10)
 
         # Load button
-        self.load_files_button = tk.Button(self.tab_import,
-                                           text="Load Files",
-                                           state="disabled",
-                                           command=self.collect_files
-                                           )
+        self.load_files_button = tk.Button(self.tab_import, text="Load Files", state="disabled",
+                                           command=self.collect_files)
         self.load_files_button.pack(pady=15)
+
         # Label to display Main Plasmids
-        self.main_plasmids_label = tk.Label(self.tab_import,
-                                            text="",
-                                            justify="left",
-                                            font=("Arial", 10, "bold"))
+        self.main_plasmids_label = tk.Label(self.tab_import, text="", justify="left", font=("Arial", 10, "bold"))
         self.main_plasmids_label.pack(pady=(0, 5))
 
         # Display of N summary table
         summary_frame = tk.Frame(self.tab_import)
-        summary_frame.pack(pady=10, fill="both", expand=True ,padx=20)
-        # Scrollbar for table
-        tree_scroll = tk.Scrollbar(summary_frame)
+        summary_frame.pack(pady=10, fill="both", expand=True, padx=20)
+        tree_scroll = tk.Scrollbar(summary_frame) # Scrollbar for table
         tree_scroll.pack(side="right", fill="y")
-
-        self.summary_tree = ttk.Treeview(summary_frame,
-                                         columns=("Cell", "Cond", "N", "Dates"),
-                                         show="headings",
-                                         yscrollcommand=tree_scroll.set,
-                                         height=6)
+        self.summary_tree = ttk.Treeview(summary_frame, columns=("Cell", "Cond", "N", "Dates"), show="headings",
+                                         yscrollcommand=tree_scroll.set, height=6)
         tree_scroll.config(command=self.summary_tree.yview)
-
         # Define Columns
         self.summary_tree.heading("Cell", text="Cell Line")
         self.summary_tree.heading("Cond", text="Condition")
         self.summary_tree.heading("N", text="N")
         self.summary_tree.heading("Dates", text="Dates")
-
         self.summary_tree.column("Cell", width=100)
         self.summary_tree.column("Cond", width=250)
         self.summary_tree.column("N", width=30, anchor="center")
         self.summary_tree.column("Dates", width=150)
-
         self.summary_tree.pack(fill="both", expand=True)
 
         # Text of applies exclusion rules
         rules_frame = tk.LabelFrame(self.tab_import, text="Applied Exclusion Rules")
         rules_frame.pack(fill="x", padx=20, pady=5)
-
-        self.lbl_rules_summary = tk.Label(rules_frame,
-                                          text="No exclusion rules applied",
-                                          justify="left",
-                                          anchor="w"
-                                          )
+        self.lbl_rules_summary = tk.Label(rules_frame, text="No exclusion rules applied", justify="left", anchor="w")
         self.lbl_rules_summary.pack(fill="x", padx=5, pady=5)
 
         # --- EXPORT SECTION ---
         export_frame = tk.LabelFrame(self.tab_import, text="Export Options")
         export_frame.pack(fill="x", padx=20, pady=10)
-        # Master CSV button
-        self.btn_export_master = tk.Button(export_frame,
-                                           text="Export Master CSV",
-                                           state="disabled",
+        self.btn_export_master = tk.Button(export_frame, text="Export Master CSV", state="disabled",
                                            command=self.export_master_csv)
         self.btn_export_master.pack(side="left", fill="x", expand=True, padx=5, pady=10)
-
-        # Preview xlsx button
-        self.btn_export_excel = tk.Button(export_frame,
-                                          text="Export Excel Report (Default)",
-                                          state="disabled",
+        self.btn_export_excel = tk.Button(export_frame, text="Export Excel Report (Default)", state="disabled",
                                           command=self.export_excel_report)
         self.btn_export_excel.pack(side="left", fill="x", expand=True, padx=5, pady=10)
-
-        # --- TAB 2 CONTENT ---
-        self.setup_exclusion_tab()
-
-    # Helper function to write to that text box
-    def log(self, message):
-        """Logs to the separate window"""
-        try:
-            self.log_text.insert(tk.END, message + "\n")
-            self.log_text.see(tk.END)
-
-            # FORCE GUI UPDATE: important for filling log during processing
-            self.main_gi.update_idletasks()
-        except tk.TclError:
-            # Handle case where user manually closed log window but app is running
-            print(message)
 
     def update_summary_table(self):
         """Fills the summary table with N counts and dates per condition"""
@@ -1214,6 +1205,15 @@ class NCollectorApp:
         # Apply Button (Bottom)
         tk.Button(self.tab_select, text="Apply exclusions and re-calculate",
                   command=self.apply_exclusions).pack(pady=10, ipadx=10)
+
+    def log(self, message):
+        """Logs to the separate window"""
+        try:
+            self.log_text.insert(tk.END, message + "\n")
+            self.log_text.see(tk.END)
+            self.main_gi.update_idletasks()
+        except tk.TclError:
+            print(message)
 
     def update_repl_options(self, event=None):
         """Reset replicate when conditions changes"""
@@ -1425,7 +1425,7 @@ class NCollectorApp:
         # --- Import Master CSV ---
         src_frame = tk.Frame(self.tab_plot_helper)
         src_frame.pack(fill="x", padx=10, pady=10)
-        tk.Label(src_frame, text="Data Source:", font=("Arial", 9, "bold")).pack(side="left")
+        tk.Label(src_frame, text="Data Source", font=("Arial", 9, "bold")).pack(side="top")
 
         self.lbl_data_source = tk.Label(src_frame, text="No Data Loaded")
         self.lbl_data_source.pack(side="left", padx=10)
