@@ -938,11 +938,11 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         else:
             auc_norm_dict[col] = float('nan')
 
-    # Create df from dict
-    kinetic_df = pd.DataFrame(kinetic_norm_dict)
-    auc_df = pd.DataFrame(auc_norm_dict)
+    # Create df from dict; index setting is required to handle excluded (nan) data
+    kinetic_df = pd.DataFrame(kinetic_norm_dict, index=data_df.index)
+    auc_df = pd.DataFrame(auc_norm_dict, index=[0])
 
-    # --- MEAN OF REPLICATES (KINETIC) ---
+    # --- MEAN OF REPLICATES ---
     kinetic_mean_df = calculate_replicate_means(
         kinetic_df, plate_blocks, result.column_metadata
     )
@@ -954,19 +954,17 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # --- Kinetic data
     result.time_vector = time_vec
     result.bl_corr_kinetic = bl_corrected_df
-    result.kinetic_df = pd.DataFrame(kinetic_norm_dict)
+    result.kinetic_df = kinetic_df
     result.kinetic_mean_df = kinetic_mean_df
     # --- AUC data
     result.raw_auc_df = auc_raw_df
     result.raw_auc_tidy_df = convert_to_plate_layout(auc_raw_df)
-    result.auc_df = pd.DataFrame(auc_norm_dict)
+    result.auc_df = auc_df
     result.auc_tidy_df = convert_to_plate_layout(result.auc_df)
     result.auc_mean_df = auc_mean_df
     result.auc_mean_tidy_df = convert_to_plate_layout(result.auc_mean_df)
 
     return result
-
-# TODO: add function to rearrange cols of processed bret df (flexible for user interaction)
 
 # --- Main Application --- #
 
