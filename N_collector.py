@@ -966,6 +966,76 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
 
     return result
 
+def apply_export_filters(df, config):
+    """Filters the dataframe based on config dictionary."""
+    df_subset = df.copy()
+
+    # Mapping config keys to DataFrame columns
+    filters = {
+        'ligands': 'Ligand',
+        'cells': 'Cell_Line',
+        'transfections': 'Transfection'
+    }
+
+    for cfg_key, df_col in filters.items():
+        if config.get(cfg_key) and config.get(cfg_key) != 'All':
+            # Ensure target is a list
+            targets = config[cfg_key] if isinstance(config[cfg_key], list) else [config[cfg_key]]
+            df_subset = df_subset[df_subset[df_col].isin(targets)]
+    return df_subset
+
+def generate_header_key(df, is_mean_data, group_by=None):
+    """Creates the 'Header_Key' column for exporting data."""
+    mapping = {"Cell Line": "Cell_Line", "Transfection": "Transfection"}
+    exclude_col = mapping.get(group_by)
+
+    # List of Series to combine
+    parts = []
+    if exclude_col != "Transfection": parts.append(df["Transfection"])
+    if exclude_col != "Cell_Line": parts.append(df["Cell_Line"])
+    # Only add ligand, if there is more than one
+    if df['Ligand'].nunique() > 1: parts.append(df["Ligand"])
+    if not is_mean_data: parts.append(df["Well_ID"])
+
+    if parts:
+        # Start with the first column
+        df["Header_Key"] = parts[0]
+        # Append subsequent columns
+        for p in parts[1:]:
+            df["Header_Key"] = df["Header_Key"] + " | " + p
+    else:
+        # Fallback
+        df["Header_Key"] = "Data"
+    return df
+
+def create_clean_pivot(df, index_col, value_col):
+    """Pivots the table and cleans up repetitive headers."""
+    # Assign a generic replicate number (1, 2, 3...) per Header_Key
+    print(index_col)
+    df = df.copy()
+    df['Rep_Num'] = df.groupby('Header_Key')['File_Name'].rank(method='dense').astype(int)
+
+    # 2. Pivot using the generic Rep_Num
+    pivot = df.pivot_table(
+        index=index_col,
+        columns=["Header_Key", "Rep_Num"],
+        values=value_col
+    )
+
+    # Find max replicates and create full grid
+    max_reps = df['Rep_Num'].max()
+    replicate_range = range(1, max_reps + 1)
+    headers = sorted(df["Header_Key"].unique())
+
+    full_columns = pd.MultiIndex.from_product([headers, replicate_range], names=["Header", "Rep"])
+
+    # Reindex adds NaN columns for missing replicates
+    pivot = pivot.reindex(columns=full_columns)
+
+    # Flatten Header (Drop the Replicate Number)
+    pivot.columns = pivot.columns.droplevel(1)
+    return pivot
+
 # --- Main Application --- #
 
 class NCollectorApp:
@@ -989,13 +1059,15 @@ class NCollectorApp:
         self.var_repl = tk.StringVar(value="")
         self.var_row = tk.StringVar(value="")
         self.var_data_type = tk.StringVar(value="")
+        self.var_group_by = tk.StringVar(value="Transfection")
         self.var_exp_kin = tk.StringVar(value="Row A (Max)")
-        self.var_exp_auc = tk.StringVar(value="Conc Response") # ----> NEEEDED?
 
         # --- GUI Widgets (Initialised to None) ---
         self.log_window = None
         self.log_text = None
+        self.notebook = None
         # Tab 1
+        self.tab_import = None
         self.path_label = None
         self.load_files_button = None
         self.main_plasmids_label = None
@@ -1004,6 +1076,7 @@ class NCollectorApp:
         self.btn_export_master = None
         self.btn_export_excel = None
         # Tab 2
+        self.tab_select = None
         self.cb_date = None
         self.cb_cell = None
         self.cb_cond = None
@@ -1011,6 +1084,7 @@ class NCollectorApp:
         self.cb_row = None
         self.lb_exclusions = None
         # Tab 3
+        self.tab_plot_helper = None
         self.lbl_data_source = None
         self.lb_ligands = None
         self.lb_exp_cells = None
@@ -1480,6 +1554,14 @@ class NCollectorApp:
         combo_type['values'] = list(self.data_type_map.keys())
         combo_type.grid(row=0, column=1, padx=5, pady=5)
 
+        # --- Layout Selection ---
+        # Groupy py
+        tk.Label(type_frame, text="Group By:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.var_group_by = tk.StringVar(value="None")
+        combo_group = ttk.Combobox(type_frame, textvariable=self.var_group_by, state="readonly", width=15)
+        combo_group['values'] = ["None", "Cell Line", "Transfection"]
+        combo_group.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
         # Kinetic Layout (Only applies if a Kinetic type is chosen)
         tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
         self.var_exp_kin = tk.StringVar(value="Row A (Max)")
@@ -1563,6 +1645,7 @@ class NCollectorApp:
             'transfections': transfections,
             'ligands': ligands,
             'data_types': [internal_name], # As list for engine compatibility with default export
+            'group_by': self.var_group_by.get(),
             'kinetic_mode': self.var_exp_kin.get()
         }
 
@@ -1571,10 +1654,9 @@ class NCollectorApp:
             filetypes=[("Excel", "*.xlsx")],
             title="Save Custom Export"
         )
-        if not file_path: return
-
-        # Call the core engine with the unified DF
-        self.write_excel_export(file_path, self.master_df, config)
+        if file_path:
+            # Call the core engine with the unified DF
+            self.write_excel_export(file_path, self.master_df, config)
 
     def import_master_csv(self):
         """Loads a master csv file directly into the memory for the plot helper."""
@@ -2107,153 +2189,117 @@ class NCollectorApp:
 
     def write_excel_export(self, file_path, master_df, config):
         """
-        Writes the Excel file based on the config dictionary provided by either tab 1 (default )or tab 3 (user).
-        TODO: reformat AUC
-        TODO: add arranging config (group by x) -> keeping in mind opt second ligand
-        TODO: create helper functions for cleaner code (e.g. generating header)
+        Writes the Excel file based on the config dictionary provided by either tab 1 (default) or tab 3 (user).
         """
         try:
-            df_subset = master_df.copy()
-
-            if config.get('ligands') != 'All':
-                df_subset = df_subset[df_subset['Ligand'].isin(config['ligands'])]
-
-            if config.get('cells') != 'All':
-                df_subset = df_subset[df_subset['Cell_Line'].isin(config['cells'])]
-
-            if config.get('transfections') != 'All':
-                df_subset = df_subset[df_subset['Transfection'].isin(config['transfections'])]
+            df_subset = apply_export_filters(self.master_df, config)
 
             if df_subset.empty:
                 print("[ERROR] Export failed: Filter resulted in no data.")
                 return
 
+            # Define groups
+            group_by = config.get('group_by', 'None')
+            data_groups = []  # List of tuples: (Group_Name, DataFrame)
+
+            if group_by == 'Cell Line':
+                for name, group in df_subset.groupby('Cell_Line'):
+                    data_groups.append((str(name), group))
+            elif group_by == 'Transfection':
+                for name, group in df_subset.groupby('Transfection'):
+                    data_groups.append((str(name), group))
+            else:
+                data_groups.append(("", df_subset))  # No grouping
+
             # Definition which is kinetic and what is AUC
-            KINETIC_TYPES = ["Raw_BRET", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean"]
-            AUC_TYPES = ["Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"]
+            kinetic_types = ["Raw_BRET", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean"]
+            auc_types = ["Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"]
 
             with pd.ExcelWriter(file_path) as writer:
+                sheets_written = False
 
                 # --- 1. METADATA SHEET ---
-                # Include always
                 file_names = df_subset["File_Name"].unique().tolist()
                 mp_str = "Unknown"
                 if 'Main_Plasmids' in df_subset.columns:
                     mp_vals = df_subset['Main_Plasmids'].unique()
                     if len(mp_vals) > 0: mp_str = mp_vals[0]
+                if 'Ligand' in df_subset.columns:
+                    ligand = df_subset['Ligand'].unique()
+                print(ligand)
 
                 meta_dict = {
                     "Export Date": [datetime.now().strftime("%d.%m.%Y - %H:%M:%S")],
                     "Main Plasmids": [mp_str],
+                    "Ligand": [", ".join(ligand)],
                     "Source Files Count": [len(file_names)],
                     "Source Files List": [", ".join(file_names)],
                     "Data Type": [", ".join(config.get('data_types', []))],
                     "Kinetic Layout": [config.get('kinetic_mode')],
                     "Filter: Ligands": [", ".join(config.get('ligands'))],
                     "Filter: Cells": [", ".join(config.get('cells'))],
-                    "Filter: Conditions": [", ".join(config.get('transfections'))]
+                    "Filter: Conditions": [", ".join(config.get('transfections'))],
+                    "Group By": [group_by]
                 }
                 pd.DataFrame(meta_dict).transpose().to_excel(writer, sheet_name="Metadata", header=False)
                 sheets_written = True
 
-                # --- Loop through selected data types
-                # This handles both Single Selection (Plot Helper) and Default Report (List of 2)
-                selected_types = config.get('data_types', [])
+                # Iterate Groups + data types
+                for group_name, df_group in data_groups:
 
-                # --- KINETIC DATA ---
-                for dtype in selected_types:
-                    if dtype in KINETIC_TYPES:
-                        k_mode = config.get('kinetic_mode', 'Row A (Max)') # Default to Row A
+                    # --- Loop through selected data types
+                    # This handles both Single Selection (Plot Helper) and Default Report (List of 2)
+                    selected_types = config.get('data_types', [])
 
-                        # Determine Filter (Max Row A vs All)
-                        if k_mode == 'Row A (Max)':
-                            df_kin = df_subset[df_subset["Plate_Row"] == "A"].copy()
-                            sheet_suffix = "Max"
-                        elif k_mode == 'Row H (Vehicle)':
-                            df_kin = df_subset[df_subset["Plate_Row"] == "H"].copy()
-                            sheet_suffix = "Veh"
-                        else:
-                            df_kin = df_subset.copy()
-                            sheet_suffix = "All"
-                        if df_kin.empty: continue
+                    # --- KINETIC DATA ---
+                    for dtype in selected_types:
+                        if dtype in kinetic_types:
+                            k_mode = config.get('kinetic_mode', 'Row A (Max)') # Default to Row A
 
-                        # Header Grouping Logic
-                        if "Mean" in dtype:
-                            df_kin["Header_Key"] = df_kin["Transfection"] + " | " + df_kin["Cell_Line"] + " | " + \
-                                                   df_kin["Ligand"]
-                        else:
-                            df_kin["Header_Key"] = df_kin["Transfection"] + " | " + df_kin["Cell_Line"] + " | " + \
-                                                   df_kin["Well_ID"]
-
-                        if k_mode == 'All Rows':
-                            df_kin["Header_Key"] += " | " + df_kin["Plate_Row"]
-
-                        # Merge cells of equal header
-                        kin_pivot = df_kin.pivot_table(
-                            index="Time_(min)",
-                            columns=["Header_Key", "File_Name"],
-                            values=dtype
-                        )
-
-                        # Format Headers creating the empty headers
-                        new_headers = []
-                        last_key = None
-                        for key, file_name in kin_pivot.columns:
-                            if key != last_key:
-                                new_headers.append(key)
-                                last_key = key
+                            # Determine Filter (Max Row A vs All)
+                            if k_mode == 'Row A (Max)':
+                                df_kin = df_group[df_group["Plate_Row"] == "A"].copy()
+                                suffix = "Max"
+                            elif k_mode == 'Row H (Vehicle)':
+                                df_kin = df_group[df_group["Plate_Row"] == "H"].copy()
+                                suffix = "Veh"
                             else:
-                                new_headers.append("")
+                                df_kin = df_group.copy()
+                                suffix = "All"
+                                "HERE----"
+                            if df_kin.empty: continue
 
-                        kin_pivot.columns = new_headers
-                        kin_pivot.reset_index(inplace=True)
-                        kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
+                            df_kin = generate_header_key(df_kin, "Mean" in dtype, group_by)
+                            kin_pivot = create_clean_pivot(df_kin, "Time_(min)", dtype)
+                            kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
 
-                        # Sheet Name (Max 31 chars)
-                        sheet_name = f"Kin_{dtype}_{sheet_suffix}"[:31]
+                            # Sheet Name with group_prefix (Max 31 chars)
+                            base = f"{group_name}_{suffix}" if group_name else f"{dtype}_{suffix}"
+                            sheet_name = base[:31]
+                            # Save
+                            kin_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
+                            sheets_written = True
 
-                        # Save
-                        kin_pivot.to_excel(writer, sheet_name=sheet_name, index=False)
-                        sheets_written = True
+                    # --- AUC DATA ---
+                        elif dtype in auc_types:
+                            df_auc = df_group.drop_duplicates(
+                                subset=["File_Name", "Transfection", "Cell_Line", "Well_ID"]).copy()
+                            if df_auc.empty: continue
 
-                # --- AUC DATA ---
-                    elif dtype in AUC_TYPES:
-                        df_auc = df_subset.drop_duplicates(
-                            subset=["File_Name", "Transfection", "Cell_Line", "Well_ID"]).copy()
-                        if df_auc.empty: continue
-
-                        if "Mean" in dtype:
-                            df_auc["Header_Key"] = df_auc["Transfection"] + " | " + df_auc["Cell_Line"] + " | " + \
-                                                   df_auc["Ligand"]
-                        else:
-                            df_auc["Header_Key"] = df_auc["Transfection"] + " | " + df_auc["Cell_Line"] + " | " + \
-                                                   df_auc["Well_ID"]
-
-                        auc_pivot = df_auc.pivot_table(
-                            index="Ligand_Conc",
-                            columns=["Header_Key", "File_Name"],
-                            values=dtype
-                        )
-
-                        # Format Headers
-                        new_headers = []
-                        last_key = None
-                        for key, file_name in auc_pivot.columns:
-                            if key != last_key:
-                                new_headers.append(key)
-                                last_key = key
+                            df_auc = generate_header_key(df_auc, "Mean" in dtype, group_by)
+                            # Handle ligand_conc column for more than one ligand
+                            if len(config.get('ligands')) > 1:
+                                auc_pivot = create_clean_pivot(df_auc, "Plate_Row", dtype)
                             else:
-                                new_headers.append("")
+                                auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype)
 
-                        auc_pivot.columns = new_headers
+                            # auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype)
+                            auc_pivot.rename(columns={"Ligand_Conc": "Concentration (logM)"}, inplace=True)
 
-                        auc_pivot.reset_index(inplace=True)
-                        auc_pivot.rename(columns={"Ligand_Conc": "Concentration (logM)"}, inplace=True)
-
-                        # Example: "AUC_AUC_Mean" or "AUC_Bl_AUC"
-                        sheet_name = f"{dtype}"[:31]
-                        auc_pivot.to_excel(writer, sheet_name=sheet_name, index=False)
-                        sheets_written = True
+                            base = f"{group_name}_AUC" if group_name else f"AUC_{dtype}"
+                            sheet_name = base[:31]
+                            auc_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
+                            sheets_written = True
             if not sheets_written:
                 pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name="Empty")
 
@@ -2261,12 +2307,10 @@ class NCollectorApp:
 
         except Exception as e:
             self.log(f"   [ERROR] Export failed: {e}")
-            print(e)
 
     def export_excel_report(self):
         """
         Default Export: All Data, Highest stim kinetics and AUC crc.
-        TODO: Grouped for transfection as default
         """
         if self.master_df is None or self.master_df.empty:
             self.log("No data found to export.")
@@ -2285,9 +2329,9 @@ class NCollectorApp:
             'transfections': 'All',
             'ligands': 'All',
             'data_types': ['Kinetic_Mean', 'AUC_Mean'],
+            'group_by': 'Transfection',
             'kinetic_mode': 'Row A (Max)'
         }
-
         self.write_excel_export(file_path, self.master_df, default_config)
 
 # TODO: implement showing also errors from tool functions in log window
