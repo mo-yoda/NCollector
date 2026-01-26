@@ -435,8 +435,6 @@ def get_cell_line_map(layout_type: str, cell_lines: str):
     print(f"[DEBUG] Layout Type: '{layout_type}' | Raw ID2: '{cell_lines}'")
     # Split ID2 string to get potentially multiple cell lines
     lines = [x.strip() for x in cell_lines.split(',')]
-    print(f"[DEBUG] Parsed Cell Lines: {lines}")
-
     mapping = {}
 
     # Handle selection made in dropdown for line layout
@@ -1125,6 +1123,11 @@ class NCollectorApp:
         self.log_window.geometry("700x500")
         self.log_text = tk.Text(self.log_window)
         self.log_text.pack(expand=True, fill='both')
+        # Opt. save of log file
+        btn_frame = tk.Frame(self.log_window)
+        btn_frame.pack(fill="x", padx=5, pady=5)
+        tk.Button(btn_frame, text="Save Log to File", command=self.save_log_to_file).pack(side="right")
+        tk.Button(btn_frame, text="Clear Log", command=lambda: self.log_text.delete('1.0', tk.END)).pack(side="left")
 
     def setup_tabs(self):
         """Setup tabs"""
@@ -1960,25 +1963,6 @@ class NCollectorApp:
 
         self.log(f"--- Loading Complete. Loaded {len(self.experiment)} folders. ---")
 
-        # Verification of readings
-        print("\n" + "=" * 30)
-        print("COLLECTION SUMMARY")
-        print("=" * 30)
-
-        for rep in self.experiment:
-            print(f"\nFolder: {rep.folder_name}")
-            if rep.protocol:
-                print(f"  [✓] Protocol: {rep.protocol.file_name}")
-            else:
-                print(f"  [ ] Protocol: MISSING")
-
-            res_count = len(rep.results)
-            print(f"  [i] Results: {res_count} file(s) loaded")
-            if rep.skipped_files:
-                print(f"   [SKIPPED]: {rep.skipped_files}")
-
-        print("\n" + "=" * 30)
-
         # Call processing
         self.run_processing_pipeline()
 
@@ -2357,7 +2341,28 @@ class NCollectorApp:
         }
         self.write_excel_export(file_path, self.master_df, default_config)
 
-# TODO: implement showing also errors from tool functions in log window
+    def save_log_to_file(self):
+        """Exports the current log to a text file."""
+        # Get content from line 1, char 0 to End
+        log_content = self.log_text.get("1.0", tk.END)
+
+        if not log_content.strip():
+            print("Log is empty, nothing to save.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text File", "*.txt"), ("All Files", "*.*")],
+            title="Save Log File"
+        )
+
+        if file_path:
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(log_content)
+                print(f"Log saved to: {file_path}")
+            except Exception as e:
+                print(f"Error saving log: {e}")
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
