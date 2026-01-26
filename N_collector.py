@@ -1081,6 +1081,7 @@ class NCollectorApp:
         self.cb_cell = None
         self.cb_cond = None
         self.cb_rep = None
+        self.lbl_row = None
         self.cb_row = None
         self.lb_exclusions = None
         # Tab 3
@@ -1089,6 +1090,7 @@ class NCollectorApp:
         self.lb_ligands = None
         self.lb_exp_cells = None
         self.lb_exp_trans = None
+        self.combo_kin = None
         self.btn_run_plot_helper = None
 
         # --- Constants ---
@@ -1509,7 +1511,7 @@ class NCollectorApp:
 
         # --- Filter Selection ---
         sel_frame = tk.LabelFrame(self.tab_plot_helper, text="Select Data to Include")
-        sel_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        sel_frame.pack(fill="x", expand=True, padx=10, pady=5)
 
         # Ligand Listbox
         tk.Label(sel_frame, text="Ligands:").grid(row=0, column=0, padx=5, sticky="w")
@@ -1531,12 +1533,12 @@ class NCollectorApp:
         self.lb_exp_trans.config(yscrollcommand=trans_scroll.set) # Update scrollbar
 
         # Select All Buttons
-        tk.Button(sel_frame, text="Select All Ligands", command=lambda: self.select_all_listbox(self.lb_ligands)).grid(
-            row=2, column=0)
-        tk.Button(sel_frame, text="Select All Cells", command=lambda: self.select_all_listbox(self.lb_exp_cells)).grid(
-            row=2, column=1)
-        tk.Button(sel_frame, text="Select All Transf.", command=lambda: self.select_all_listbox(self.lb_exp_trans)).grid(
-            row=2, column=2)
+        tk.Button(sel_frame, text="Select All Ligands", command=lambda: self.lb_ligands.select_set(0, tk.END)).grid(
+            row=2, column=0, pady=8)
+        tk.Button(sel_frame, text="Select All Cells", command=lambda: self.lb_exp_cells.select_set(0, tk.END)).grid(
+            row=2, column=1, pady=8)
+        tk.Button(sel_frame, text="Select All Transf.", command=lambda: self.lb_exp_trans.select_set(0, tk.END)).grid(
+            row=2, column=2, pady=8)
 
         sel_frame.columnconfigure(0, weight=1)
         sel_frame.columnconfigure(1, weight=1)
@@ -1544,13 +1546,15 @@ class NCollectorApp:
 
         # --- Data Type Selection (Single Choice) ---
         type_frame = tk.LabelFrame(self.tab_plot_helper, text="Export Settings")
-        type_frame.pack(fill="x", padx=10, pady=5)
+        type_frame.pack(fill="both", padx=10, pady=5)
 
         # Data Type Dropdown
         tk.Label(type_frame, text="Data Type:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         default_key = list(self.data_type_map.keys())[6]
         self.var_data_type = tk.StringVar(value=default_key)
-        combo_type = ttk.Combobox(type_frame, textvariable=self.var_data_type, state="readonly", width=45)
+        self.var_data_type.trace_add("write", self.toggle_kinetic_options) # Trace kinetic selection
+
+        combo_type = ttk.Combobox(type_frame, textvariable=self.var_data_type, state="readonly", width=57)
         combo_type['values'] = list(self.data_type_map.keys())
         combo_type.grid(row=0, column=1, padx=5, pady=5)
 
@@ -1565,11 +1569,15 @@ class NCollectorApp:
         # Kinetic Layout (Only applies if a Kinetic type is chosen)
         tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
         self.var_exp_kin = tk.StringVar(value="Row A (Max)")
-        combo_kin = ttk.Combobox(type_frame, textvariable=self.var_exp_kin, state="readonly", width=15)
-        combo_kin['values'] = ["Row A (Max)", "Row H (Vehicle)", "All Rows"]
-        combo_kin.grid(row=0, column=3, padx=5, pady=5)
+        # Store kinetic selection to show depending on data type selection
+        self.combo_kin = ttk.Combobox(type_frame, textvariable=self.var_exp_kin, state="readonly", width=15)
+        self.combo_kin['values'] = ["Row A (Max)", "Row H (Vehicle)", "All Rows"]
+        self.combo_kin.grid(row=0, column=3, padx=5, pady=5)
 
         tk.Label(type_frame, text="(Applies to any selected Kinetic data type)")
+
+        # Initialize state based on default value
+        self.toggle_kinetic_options()
 
         # --- Action Button ---
         btn_frame = tk.Frame(self.tab_plot_helper)
@@ -1579,8 +1587,15 @@ class NCollectorApp:
                                             state="disabled", command=self.run_plot_helper)
         self.btn_run_plot_helper.pack(fill="x", ipady=5)
 
-    def select_all_listbox(self, lb):
-        lb.select_set(0, tk.END)
+    def toggle_kinetic_options(self, *args):
+        """Enables/Disables Kinetic Layout dropdown based on Data Type selection."""
+        selection = self.var_data_type.get()
+
+        # Check if "kinetic" is in the selected string
+        if "kinetic" in selection.lower():
+            self.combo_kin.config(state="readonly")
+        else:
+            self.combo_kin.config(state="disabled")
 
     def refresh_plot_helper_options(self):
         """Populates the list boxes in the plot helper from master df (opt. imported csv file)."""
@@ -1609,17 +1624,17 @@ class NCollectorApp:
         # Populate Ligand
         ligands = sorted(set(df['Ligand'].astype(str)))
         for l in ligands: self.lb_ligands.insert(tk.END, l)
-        self.select_all_listbox(self.lb_ligands) # Default to all
+        self.lb_ligands.select_set(0, tk.END) # Default to all
 
         # Populate Cells
         cells = sorted(set(df['Cell_Line'].astype(str)))
         for c in cells: self.lb_exp_cells.insert(tk.END, c)
-        self.select_all_listbox(self.lb_exp_cells)  # Default to all
+        self.lb_exp_cells.select_set(0, tk.END)  # Default to all
 
         # Populate Transfections
         trans = sorted(set(df['Transfection'].astype(str)))
         for t in trans: self.lb_exp_trans.insert(tk.END, t)
-        self.select_all_listbox(self.lb_exp_trans)  # Default to all
+        self.lb_exp_trans.select_set(0, tk.END)  # Default to all
 
     def run_plot_helper(self):
         """Collects GUI selections and calls the core export engine."""
