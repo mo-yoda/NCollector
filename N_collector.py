@@ -984,7 +984,7 @@ def apply_export_filters(df, config):
             df_subset = df_subset[df_subset[df_col].isin(targets)]
     return df_subset
 
-def generate_header_key(df, is_mean_data, group_by=None):
+def generate_header_key(df, exclude_well_id, group_by=None):
     """Creates the 'Header_Key' column for exporting data."""
     mapping = {"Cell Line": "Cell_Line", "Transfection": "Transfection"}
     exclude_col = mapping.get(group_by)
@@ -995,7 +995,7 @@ def generate_header_key(df, is_mean_data, group_by=None):
     if exclude_col != "Cell_Line": parts.append(df["Cell_Line"])
     # Only add ligand, if there is more than one
     if df['Ligand'].nunique() > 1: parts.append(df["Ligand"])
-    if not is_mean_data: parts.append(df["Well_ID"])
+    if not exclude_well_id: parts.append(df["Well_ID"])
 
     if parts:
         # Start with the first column
@@ -1008,14 +1008,22 @@ def generate_header_key(df, is_mean_data, group_by=None):
         df["Header_Key"] = "Data"
     return df
 
-def create_clean_pivot(df, index_col, value_col):
-    """Pivots the table and cleans up repetitive headers."""
-    # Assign a generic replicate number (1, 2, 3...) per Header_Key
-    print(index_col)
+def create_clean_pivot(df, index_col, value_col, disregard_well_id):
+    """
+    Pivots the table. If Mean Data: One column per File.
+    If Raw Data: One column per Well (Technical Replicates side-by-side)
+    """
+    # Assign a replicate number (1, 2, 3...) per Header_Key
     df = df.copy()
-    df['Rep_Num'] = df.groupby('Header_Key')['File_Name'].rank(method='dense').astype(int)
+    if disregard_well_id:
+        df['Rep_Num'] = df.groupby('Header_Key')['File_Name'].rank(method='dense').astype(int)
+    else:
+        # Consider File_Name and Well ID for technical replicates
+        df['sort_key'] = df['File_Name'].astype(str) + "_" + df['Well_ID'].astype(str)
+        df['Rep_Num'] = df.groupby('Header_Key')['sort_key'].rank(method='dense').astype(int)
 
-    # 2. Pivot using the generic Rep_Num
+
+    # Pivot
     pivot = df.pivot_table(
         index=index_col,
         columns=["Header_Key", "Rep_Num"],
@@ -1034,6 +1042,7 @@ def create_clean_pivot(df, index_col, value_col):
 
     # Flatten Header (Drop the Replicate Number)
     pivot.columns = pivot.columns.droplevel(1)
+    pivot.reset_index(inplace=True)
     return pivot
 
 # --- Main Application --- #
@@ -2281,11 +2290,10 @@ class NCollectorApp:
                             else:
                                 df_kin = df_group.copy()
                                 suffix = "All"
-                                "HERE----"
                             if df_kin.empty: continue
 
                             df_kin = generate_header_key(df_kin, "Mean" in dtype, group_by)
-                            kin_pivot = create_clean_pivot(df_kin, "Time_(min)", dtype)
+                            kin_pivot = create_clean_pivot(df_kin, "Time_(min)", dtype, "Mean" in dtype)
                             kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
 
                             # Sheet Name with group_prefix (Max 31 chars)
@@ -2301,12 +2309,12 @@ class NCollectorApp:
                                 subset=["File_Name", "Transfection", "Cell_Line", "Well_ID"]).copy()
                             if df_auc.empty: continue
 
-                            df_auc = generate_header_key(df_auc, "Mean" in dtype, group_by)
+                            df_auc = generate_header_key(df_auc, True, group_by)
                             # Handle ligand_conc column for more than one ligand
                             if len(config.get('ligands')) > 1:
-                                auc_pivot = create_clean_pivot(df_auc, "Plate_Row", dtype)
+                                auc_pivot = create_clean_pivot(df_auc, "Plate_Row", dtype, True)
                             else:
-                                auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype)
+                                auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype, True)
 
                             # auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype)
                             auc_pivot.rename(columns={"Ligand_Conc": "Concentration (logM)"}, inplace=True)
