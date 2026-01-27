@@ -2022,7 +2022,7 @@ class NCollectorApp:
 
         for folder in self.experiment:
             if folder.protocol.main_plasmids:
-                main_plasmids = main_plasmids_str = " + ".join(folder.protocol.main_plasmids)
+                main_plasmids = " + ".join(folder.protocol.main_plasmids)
             else:
                 main_plasmids = "Unknown"
 
