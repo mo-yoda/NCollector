@@ -2019,10 +2019,10 @@ class NCollectorApp:
                 # Also assigns conditions to data
                 result = process_bret_measurement(result, folder.protocol)
 
-            # Handle outliers stored in dic
-            if result.vehicle_outliers:
-                vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
-                self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
+                # Handle outliers stored in dic
+                if result.vehicle_outliers:
+                    vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
+                    self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
 
         # Built master indexing table (needed for flexible data exclusion)
         self.built_master_index()
