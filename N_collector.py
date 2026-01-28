@@ -330,120 +330,107 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
                                  ligand_2_conc= ligand_2_conc)
     return protocol_info
 
-def extract_metadata(xls_obj):
+def extract_metadata(pr_export_df):
     """
-    Uses already opened pd.ExcelFiles (faster and more flexible than reading from path).
-    Reads the 'Table All Cycles' sheet from an analysis file and extracts metadata from the first column
+    Uses df from the 'Table All Cycles' sheet of the PR export and extracts metadata from the first column
     (measurement date, ID2: cell line, ID3: transfections #). Returns dictionary of extracted metadata.
     """
-    metadata_worksheet = "Table All Cycles"
+    col = pr_export_df.iloc[:, 0].astype(str)  # Get first col and transform everything to str
 
-    try:
-        # Read the first column of this sheet
-        df_meta = pd.read_excel(xls_obj,
-                                sheet_name=metadata_worksheet,
-                                header=None,
-                                usecols=[0],
-                                nrows=30  # Limit rows to read
-                                )
-        col = df_meta[0].astype(str)  # Transform everything to str
+    # Mapping: { "Excel Label": "Desired Key" }
+    meta_keys = {"Date:": "measurement_date", "ID2:": "cell_line", "ID3:": "transfections"}
+    metadata = {}
+    for label, key in meta_keys.items():
+        # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
+        matches = col[col.str.contains(label, na=False)].str.split(":", n=1).str[-1].str.strip().tolist()
+        if matches:
+            metadata[key] = matches[0]
 
-        # Mapping: { "Excel Label": "Desired Key" }
-        meta_keys = {"Date:": "measurement_date", "ID2:": "cell_line", "ID3:": "transfections"}
-        metadata = {}
-        for label, key in meta_keys.items():
-            # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
-            matches = col[col.str.contains(label, na=False)].str.split(":", n=1).str[-1].str.strip().tolist()
-            if matches:
-                metadata[key] = matches[0]
+    # Handling of different spellings of cell lines
+    if 'cell_line' in metadata:
+        raw_cell_line = metadata['cell_line']
+        # Split by comma to handle potentially multiple lines
+        lines = [p.strip() for p in raw_cell_line.split(',')]
+        standardised_lines = []
 
-        # Handling of different spellings of cell lines
-        if 'cell_line' in metadata:
-            raw_cell_line = metadata['cell_line']
-            # Split by comma to handle potentially multiple lines
-            lines = [p.strip() for p in raw_cell_line.split(',')]
-            standardised_lines = []
+        for cl in lines:
+            p_lower = cl.lower()
+            if "dq" in p_lower:
+                standardised_lines.append("dQ")
+            elif "ar" in p_lower:  # Covers "bArrKO"
+                standardised_lines.append("bArrKO")
+            elif "con" in p_lower:  # Covers "Control", "Con", "con"
+                standardised_lines.append("Control")
+            else:
+                standardised_lines.append(cl)  # Keep original if no rule matches
 
-            for cl in lines:
-                p_lower = cl.lower()
-                if "dq" in p_lower:
-                    standardised_lines.append("dQ")
-                elif "ar" in p_lower:  # Covers "bArrKO"
-                    standardised_lines.append("bArrKO")
-                elif "con" in p_lower:  # Covers "Control", "Con", "con"
-                    standardised_lines.append("Control")
-                else:
-                    standardised_lines.append(cl)  # Keep original if no rule matches
+        # Re-join unique parts (e.g. "Control, dQ"); set() removed duplicates
+        metadata['cell_line'] = ", ".join(list(set(standardised_lines)))
 
-            # Re-join unique parts (e.g. "Control, dQ"); set() removed duplicates
-            metadata['cell_line'] = ", ".join(list(set(standardised_lines)))
+    # Transform date str to actual date
+    if 'measurement_date' in metadata:
+        date_str = metadata["measurement_date"]
+        try:
+            metadata["measurement_date"] = datetime.strptime(date_str.strip(), '%d/%m/%Y').date()
+        except ValueError:
+            print(f"   [WARNING] Analysis date '{date_str}' not in DD/MM/YYYY format.")
+            return None  # Fail extraction if date is invalid
 
-        # Transform date str to actual date
-        if 'measurement_date' in metadata:
-            date_str = metadata["measurement_date"]
-            try:
-                metadata["measurement_date"] = datetime.strptime(date_str.strip(), '%d/%m/%Y').date()
-            except ValueError:
-                print(f"   [WARNING] Analysis date '{date_str}' not in DD/MM/YYYY format.")
-                return None  # Fail extraction if date is invalid
-
-        # Ensure all required metadata fields were found
-        if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
-            print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
-            return None
-
-        return metadata
-
-    except ValueError:
-        # Error if sheet is missing
-        print(f"[ERROR] Worksheet '{metadata_worksheet}' not found in analysis file.")
+    # Ensure all required metadata fields were found
+    if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
+        print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
         return None
 
-def extract_bret_data(xls_obj):
-    print("[DEBUG] --- Getting raw BRET ratio ---")
-    worksheet = "Table All Cycles"
+    return metadata
 
-    try:
-        bret_sheet = pd.read_excel(xls_obj,
-                                sheet_name=worksheet,
-                                header=None
-                                )
-        df_bret = slice_table(bret_sheet, "Well", row_end_threshold=2)
-        print("[DEBUG] Reformating bret ratio table")
 
-        # --- Reformat table ---
-        # Drop cols starting with "Raw" and the col "Content"
-        cols_to_drop = [c for c in df_bret.columns if str(c).strip().startswith("Raw")]
-        cols_to_drop.append("Content")
-        df_bret = df_bret.drop(columns=cols_to_drop)
+def extract_bret_data(pr_export_df):
+    """
+    Uses df from the 'Table All Cycles' sheet of the PR export and extracts raw bret ratio table.
+    Reformats df to header Time, wells.
+    """
+    df_bret = slice_table(pr_export_df, "Well", row_end_threshold=2)
 
-        # Assign the Time row
-        df_bret.iat[0, 0] = "Time (min)"
+    # --- Reformat table ---
+    # Drop cols starting with "Raw" and the col "Content"
+    cols_to_drop = [c for c in df_bret.columns if str(c).strip().startswith("Raw")]
+    cols_to_drop.append("Content")
+    df_bret = df_bret.drop(columns=cols_to_drop)
 
-        # Clean up well names from "A01" to "A1"
-        # "([A-Za-z])0(\d)" matching what to replace, () groups parts -> r"\1\2" replace with group1 and 2
-        df_bret.iloc[:, 0] = df_bret.iloc[:, 0].str.replace(r"([A-Za-z])0(\d)", r"\1\2", regex=True)
+    # Assign the Time row
+    df_bret.iat[0, 0] = "Time (min)"
 
-        # Transpose
-        df_bret = df_bret.set_index(df_bret.columns[0]).T
-        df_bret = df_bret.reset_index(drop=True) # Make sure index is clean
-        print("[DEBUG] Reformating successful")
-        return df_bret
+    # Clean up well names from "A01" to "A1"
+    # "([A-Za-z])0(\d)" matching what to replace, () groups parts -> r"\1\2" replace with group1 and 2
+    df_bret.iloc[:, 0] = df_bret.iloc[:, 0].str.replace(r"([A-Za-z])0(\d)", r"\1\2", regex=True)
 
-    except ValueError:
-        # Error if sheet is missing
-        print(f"[ERROR] Worksheet '{worksheet}' not found in analysis file.")
-        return None
+    # Transpose
+    df_bret = df_bret.set_index(df_bret.columns[0]).T
+    df_bret = df_bret.reset_index(drop=True)  # Make sure index is clean
+    return df_bret
+
 
 def extract_measurement_data(xls_obj):
     """
-    Gets metadata and BRET ratio from analysis files.
+    Gets metadata and BRET ratio from PR export.
     Stores and returns PrResult class with all data.
     """
-
     file_name = os.path.basename(xls_obj.io)
-    metadata_dic = extract_metadata(xls_obj)
-    bret_ratio_df = extract_bret_data(xls_obj)
+
+    worksheet = "Table All Cycles"
+    try:
+        # Read the first column of this sheet
+        pr_export_df = pd.read_excel(xls_obj,
+                                     sheet_name=worksheet,
+                                     header=None
+                                     )
+    except ValueError:
+        # Error if sheet is missing
+        print(f"[ERROR] Worksheet '{worksheet}' not found in file.")
+        return None
+
+    metadata_dic = extract_metadata(pr_export_df)
+    bret_ratio_df = extract_bret_data(pr_export_df)
 
     result_obj = PrResult(
         file_name=file_name,
@@ -1968,9 +1955,9 @@ class NCollectorApp:
                         elif protocol_info:
                             self.log(f"   [MISMATCH] Protocol {protocol_info.exp_date} != Folder {folder_date_obj}")
 
-                    # Identify Analysis File
-                    # TODO: Adjust logic to use PR export files directly
-                    elif "Analysis" in sheet_names:
+                    # Identify PR export
+                    # Must have "Table All Cycles", and the only allowed other sheet is "Protocol Information"
+                    elif "Table All Cycles" in sheet_names and set(sheet_names).issubset({"Table All Cycles", "Protocol Information"}):
                         meas_data = extract_measurement_data(xls)
 
                         if meas_data and meas_data.measurement_date == folder_date_obj:
