@@ -171,7 +171,7 @@ def slice_table(
 
     # Find the first index where the cell is 'nan' or empty; width of table is defined by header content
     col_width = next((i for i, val in enumerate(header_row_content)
-                       if val.lower() == "nan" or not val.strip()), len(header_row_content))
+                       if str(val).lower() == "nan" or not str(val).strip()), len(header_row_content))
 
     # Calculate the absolute end column
     col_end_idx = col_start_idx + col_width
@@ -256,7 +256,7 @@ def process_transfection_scheme(df: pd.DataFrame):
     # print(f"identified conditions {variable_dic}")
     return main_plasmids, variable_dic
 
-def extract_protocol_info(xls_obj: pd.ExcelFile):
+def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
     """
     Uses already opened pd.ExcelFiles (faster and more flexible than reading from path).
     Reads the 'Protocol' sheet of the protocol file and extracts all needed information.
@@ -272,8 +272,6 @@ def extract_protocol_info(xls_obj: pd.ExcelFile):
         # Error if sheet is missing
         print(f"[ERROR] Worksheet '{protocol_worksheet}' not found in file.")
         return None
-
-    file_name = os.path.basename(xls_obj.io)
 
     exp_date = None
     date_str = extract_value(protocol_sheet, "date of measurement")
@@ -410,13 +408,11 @@ def extract_bret_data(pr_export_df):
     return df_bret
 
 
-def extract_measurement_data(xls_obj):
+def extract_measurement_data(xls_obj, file_name: str):
     """
     Gets metadata and BRET ratio from PR export.
     Stores and returns PrResult class with all data.
     """
-    file_name = os.path.basename(xls_obj.io)
-
     worksheet = "Table All Cycles"
     try:
         # Read the first column of this sheet
@@ -1946,7 +1942,7 @@ class NCollectorApp:
 
                     # Identify Protocol File
                     if "Protocol" in sheet_names:
-                        protocol_info = extract_protocol_info(xls)
+                        protocol_info = extract_protocol_info(xls, file_name)
 
                         if protocol_info and protocol_info.exp_date == folder_date_obj:
                             folder_data.protocol = protocol_info
@@ -1958,7 +1954,7 @@ class NCollectorApp:
                     # Identify PR export
                     # Must have "Table All Cycles", and the only allowed other sheet is "Protocol Information"
                     elif "Table All Cycles" in sheet_names and set(sheet_names).issubset({"Table All Cycles", "Protocol Information"}):
-                        meas_data = extract_measurement_data(xls)
+                        meas_data = extract_measurement_data(xls, file_name)
 
                         if meas_data and meas_data.measurement_date == folder_date_obj:
                             folder_data.results.append(meas_data)
