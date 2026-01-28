@@ -152,7 +152,8 @@ def extract_value(
 def slice_table(
         df: pd.DataFrame,
         row_marker: str,
-        match_index: int = 0
+        match_index: int = 0,
+        row_end_threshold: int = 1 # Needed for extracting bret data
 ):
     """
     Extracts a table starting at the location of row_marker. Returns pandas dataframe with header.
@@ -179,18 +180,30 @@ def slice_table(
     df_extract = df.iloc[header_row_idx + 1:, col_start_idx:col_end_idx].reset_index(drop=True)
     df_extract.columns = df.iloc[header_row_idx, col_start_idx:col_end_idx].values  # Set header
 
-    # Define row end of transfection scheme (first row with NA in first col)
+    # Check for NaNs in the first column
     is_col1_na = df_extract.iloc[:,0].isna()
 
-    if is_col1_na.any():
-        # Find the positional index of the first NA value
-        first_na_position = is_col1_na.values.argmax()
-        # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
-        df_extract = df_extract.iloc[:first_na_position]
+    if row_end_threshold > 1:
+        # Looks for consecutive rows with NA
+        # shift(-1) looks at the next row. fill_value=False ensures end of df doesn't trigger false positives.
+
+        stop_mask = is_col1_na.copy()
+
+        for i in range(1, row_end_threshold):
+            stop_mask = stop_mask & is_col1_na.shift(-i, fill_value=False)
+
+        if stop_mask.any():
+            # The first True in stop_mask is the start of the gap
+            stop_index = stop_mask.values.argmax()
+            # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
+            df_extract = df_extract.iloc[:stop_index]
+
     else:
-        # If no NA is found
-        print("   [WARNING] Expected table row end delimiter (NaN in first column) not found; using full table.")
-        return None
+        if is_col1_na.any():
+            # Find the positional index of the first NA value
+            first_na_position = is_col1_na.values.argmax()
+            # Slice the DataFrame using .iloc up to the row immediately before the NA row (exclusive)
+            df_extract = df_extract.iloc[:first_na_position]
 
     return df_extract
 
@@ -387,24 +400,39 @@ def extract_metadata(xls_obj):
         return None
 
 def extract_bret_data(xls_obj):
-    analysis_worksheet = "Analysis"
+    print("[DEBUG] --- Getting raw BRET ratio ---")
+    worksheet = "Table All Cycles"
 
     try:
         bret_sheet = pd.read_excel(xls_obj,
-                                sheet_name=analysis_worksheet,
+                                sheet_name=worksheet,
                                 header=None
                                 )
-        df_bret = slice_table(bret_sheet, "Time (min)")
+        df_bret = slice_table(bret_sheet, "Well", row_end_threshold=2)
+        print("[DEBUG] Reformating bret ratio table")
 
-        exclude_rows = ["Baseline", "late averg"]
-        df_bret = df_bret[~df_bret["Time (min)"].astype(str).isin(exclude_rows)]
+        # --- Reformat table ---
+        # Drop cols starting with "Raw" and the col "Content"
+        cols_to_drop = [c for c in df_bret.columns if str(c).strip().startswith("Raw")]
+        cols_to_drop.append("Content")
+        df_bret = df_bret.drop(columns=cols_to_drop)
+
+        # Assign the Time row
+        df_bret.iat[0, 0] = "Time (min)"
+
+        # Clean up well names from "A01" to "A1"
+        # "([A-Za-z])0(\d)" matching what to replace, () groups parts -> r"\1\2" replace with group1 and 2
+        df_bret.iloc[:, 0] = df_bret.iloc[:, 0].str.replace(r"([A-Za-z])0(\d)", r"\1\2", regex=True)
+
+        # Transpose
+        df_bret = df_bret.set_index(df_bret.columns[0]).T
         df_bret = df_bret.reset_index(drop=True) # Make sure index is clean
-
+        print("[DEBUG] Reformating successful")
         return df_bret
 
     except ValueError:
         # Error if sheet is missing
-        print(f"[ERROR] Worksheet '{analysis_worksheet}' not found in analysis file.")
+        print(f"[ERROR] Worksheet '{worksheet}' not found in analysis file.")
         return None
 
 def extract_measurement_data(xls_obj):
@@ -1941,6 +1969,7 @@ class NCollectorApp:
                             self.log(f"   [MISMATCH] Protocol {protocol_info.exp_date} != Folder {folder_date_obj}")
 
                     # Identify Analysis File
+                    # TODO: Adjust logic to use PR export files directly
                     elif "Analysis" in sheet_names:
                         meas_data = extract_measurement_data(xls)
 
