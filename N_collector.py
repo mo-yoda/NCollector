@@ -995,7 +995,7 @@ def apply_export_filters(df, config):
             df_subset = df_subset[df_subset[df_col].isin(targets)]
     return df_subset
 
-def generate_header_key(df, exclude_well_id, group_by=None):
+def generate_header_key(df, group_by=None):
     """Creates the 'Header_Key' column for exporting data."""
     mapping = {"Cell Line": "Cell_Line", "Transfection": "Transfection"}
     exclude_col = mapping.get(group_by)
@@ -1006,7 +1006,11 @@ def generate_header_key(df, exclude_well_id, group_by=None):
     if exclude_col != "Cell_Line": parts.append(df["Cell_Line"])
     # Only add ligand, if there is more than one
     if df['Ligand'].nunique() > 1: parts.append(df["Ligand"])
-    if not exclude_well_id: parts.append(df["Well_ID"])
+
+    # Check whether this is AUC data
+    is_kinetic = len(df["Time_(min)"].unique()) > 1
+    if is_kinetic:
+        parts.append(df["Ligand_Conc"].astype(str))
 
     if parts:
         # Start with the first column
@@ -1033,7 +1037,6 @@ def create_clean_pivot(df, index_col, value_col, disregard_well_id):
         df['sort_key'] = df['File_Name'].astype(str) + "_" + df['Well_ID'].astype(str)
         df['Rep_Num'] = df.groupby('Header_Key')['sort_key'].rank(method='dense').astype(int)
 
-
     # Pivot
     pivot = df.pivot_table(
         index=index_col,
@@ -1053,7 +1056,7 @@ def create_clean_pivot(df, index_col, value_col, disregard_well_id):
 
     # Flatten Header (Drop the Replicate Number)
     pivot.columns = pivot.columns.droplevel(1)
-    pivot.reset_index(inplace=True)
+    pivot.reset_index(drop=True)
     return pivot
 
 # --- Main Application --- #
@@ -2294,26 +2297,42 @@ class NCollectorApp:
                     # --- KINETIC DATA ---
                     for dtype in selected_types:
                         if dtype in kinetic_types:
-                            k_mode = config.get('kinetic_mode', 'Row A (Max)') # Default to Row A
+                            k_layout = config.get('kinetic_mode', [])
+                            if not k_layout:
+                                continue
 
-                            # Determine Filter (Max Row A vs All)
-                            if k_mode == 'Row A (Max)':
-                                df_kin = df_group[df_group["Plate_Row"] == "A"].copy()
-                                suffix = "Max"
-                            elif k_mode == 'Row H (Vehicle)':
-                                df_kin = df_group[df_group["Plate_Row"] == "H"].copy()
-                                suffix = "Veh"
+                            # Check ligand numer to built suffix
+                            include_ligand = df_group['Ligand'].nunique() > 1
+
+                            filtered_rows = []
+                            for row_info in k_layout:
+                                row_letter = row_info.split(":")[0].replace("Row ", "").strip()
+                                ligand_conc = row_info.split(":")[1].split("log(M)")[0].strip()
+                                ligand_name = row_info.split("log(M)")[1].strip()
+
+                                # Filter row
+                                row_df = df_group[
+                                    (df_group["Plate_Row"] == row_letter) &
+                                    (df_group["Ligand_Conc"].astype(str) == ligand_conc) &
+                                    (df_group["Ligand"] == ligand_name)
+                                    ].copy()
+
+                                filtered_rows.append(row_df)
+
+                            if filtered_rows:
+                                df_kin = pd.concat(filtered_rows).drop_duplicates()
                             else:
-                                df_kin = df_group.copy()
-                                suffix = "All"
-                            if df_kin.empty: continue
+                                continue
 
-                            df_kin = generate_header_key(df_kin, "Mean" in dtype, group_by)
+                            if df_kin.empty:
+                                continue
+
+                            df_kin = generate_header_key(df_kin, group_by)
                             kin_pivot = create_clean_pivot(df_kin, "Time_(min)", dtype, "Mean" in dtype)
                             kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
 
                             # Sheet Name with group_prefix (Max 31 chars)
-                            base = f"{group_name}_{suffix}" if group_name else f"{dtype}_{suffix}"
+                            base = f"{group_name}_{dtype}" if group_name else f"{dtype}"
                             sheet_name = base[:31]
                             # Save
                             kin_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
@@ -2322,10 +2341,11 @@ class NCollectorApp:
                     # --- AUC DATA ---
                         elif dtype in auc_types:
                             df_auc = df_group.drop_duplicates(
-                                subset=["File_Name", "Transfection", "Cell_Line", "Well_ID"]).copy()
+                                subset=["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]).copy()
                             if df_auc.empty: continue
 
-                            df_auc = generate_header_key(df_auc, True, group_by)
+                            df_auc = generate_header_key(df_auc, group_by)
+
                             # Handle ligand_conc column for more than one ligand
                             if len(config.get('ligands')) > 1:
                                 auc_pivot = create_clean_pivot(df_auc, "Plate_Row", dtype, True)
@@ -2369,7 +2389,7 @@ class NCollectorApp:
             'ligands': 'All',
             'data_types': ['Kinetic_Mean', 'AUC_Mean'],
             'group_by': 'Transfection',
-            'kinetic_mode': 'Row A (Max)'
+            'kinetic_mode': 'Row A' # TODO: handle ligands - all ligands with Row A
         }
         self.write_excel_export(file_path, self.master_df, default_config)
 
