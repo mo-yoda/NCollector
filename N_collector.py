@@ -1078,7 +1078,6 @@ class NCollectorApp:
         self.var_row = tk.StringVar(value="")
         self.var_data_type = tk.StringVar(value="")
         self.var_group_by = tk.StringVar(value="Transfection")
-        self.var_exp_kin = tk.StringVar(value="Row A (Max)")
 
         # --- GUI Widgets (Initialised to None) ---
         self.log_window = None
@@ -1108,7 +1107,7 @@ class NCollectorApp:
         self.lb_ligands = None
         self.lb_exp_cells = None
         self.lb_exp_trans = None
-        self.combo_kin = None
+        self.lb_kin_layout = None
         self.btn_run_plot_helper = None
 
         # --- Constants ---
@@ -1534,7 +1533,7 @@ class NCollectorApp:
 
         # --- Filter Selection ---
         sel_frame = tk.LabelFrame(self.tab_plot_helper, text="Select Data to Include")
-        sel_frame.pack(fill="x", expand=True, padx=10, pady=5)
+        sel_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
         # Ligand Listbox
         tk.Label(sel_frame, text="Ligands:").grid(row=0, column=0, padx=5, sticky="w")
@@ -1555,6 +1554,9 @@ class NCollectorApp:
         trans_scroll.grid(row=1, column=3, sticky="ns", pady=5)
         self.lb_exp_trans.config(yscrollcommand=trans_scroll.set) # Update scrollbar
 
+        # All list boxes expand vertically
+        sel_frame.rowconfigure(1, weight=1)
+
         # Select All Buttons
         tk.Button(sel_frame, text="Select All Ligands", command=lambda: self.lb_ligands.select_set(0, tk.END)).grid(
             row=2, column=0, pady=8)
@@ -1569,7 +1571,7 @@ class NCollectorApp:
 
         # --- Data Type Selection (Single Choice) ---
         type_frame = tk.LabelFrame(self.tab_plot_helper, text="Export Settings")
-        type_frame.pack(fill="both", padx=10, pady=5)
+        type_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
         # Data Type Dropdown
         tk.Label(type_frame, text="Data Type:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
@@ -1590,14 +1592,13 @@ class NCollectorApp:
         combo_group.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         # Kinetic Layout (Only applies if a Kinetic type is chosen)
-        tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
-        self.var_exp_kin = tk.StringVar(value="Row A (Max)")
-        # Store kinetic selection to show depending on data type selection
-        self.combo_kin = ttk.Combobox(type_frame, textvariable=self.var_exp_kin, state="readonly", width=15)
-        self.combo_kin['values'] = ["Row A (Max)", "Row H (Vehicle)", "All Rows"]
-        self.combo_kin.grid(row=0, column=3, padx=5, pady=5)
+        tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
+        self.lb_kin_layout = tk.Listbox(type_frame, selectmode="multiple", height=6, exportselection=False)
+        self.lb_kin_layout.grid(row=0, column=3, rowspan = 2, padx=3, pady=5, sticky="nsew")
 
-        tk.Label(type_frame, text="(Applies to any selected Kinetic data type)")
+        type_frame.columnconfigure(1, weight=1)
+        type_frame.columnconfigure(3, weight=3)
+        type_frame.rowconfigure(0, weight=1)
 
         # Initialize state based on default value
         self.toggle_kinetic_options()
@@ -1616,9 +1617,11 @@ class NCollectorApp:
 
         # Check if "kinetic" is in the selected string
         if "kinetic" in selection.lower():
-            self.combo_kin.config(state="readonly")
+            self.lb_kin_layout.config(state="normal")
+            # Refresh to populate listbox
+            self.refresh_plot_helper_options()
         else:
-            self.combo_kin.config(state="disabled")
+            self.lb_kin_layout.config(state="disabled")
 
     def refresh_plot_helper_options(self):
         """Populates the list boxes in the plot helper from master df (opt. imported csv file)."""
@@ -1641,6 +1644,7 @@ class NCollectorApp:
         self.lb_ligands.delete(0, tk.END)
         self.lb_exp_cells.delete(0, tk.END)
         self.lb_exp_trans.delete(0, tk.END)
+        self.lb_kin_layout.delete(0, tk.END)
 
         df = self.master_df
 
@@ -1659,6 +1663,15 @@ class NCollectorApp:
         for t in trans: self.lb_exp_trans.insert(tk.END, t)
         self.lb_exp_trans.select_set(0, tk.END)  # Default to all
 
+        # Populate Kinetic Layout
+        row_infos = ("Row " +
+                     df['Plate_Row'].astype(str) + ": " +
+                     df['Ligand_Conc'].astype(str) + " log(M) " +
+                     df['Ligand'])
+        rows = sorted(set(row_infos))
+        for r in rows: self.lb_kin_layout.insert(tk.END, r)
+        self.lb_kin_layout.select_set(0, tk.END)  # Default to all
+
     def run_plot_helper(self):
         """Collects GUI selections and calls the core export engine."""
         if self.master_df is None or self.master_df.empty: return
@@ -1667,6 +1680,7 @@ class NCollectorApp:
         cells = [self.lb_exp_cells.get(i) for i in self.lb_exp_cells.curselection()]
         transfections = [self.lb_exp_trans.get(i) for i in self.lb_exp_trans.curselection()]
         ligands = [self.lb_ligands.get(i) for i in self.lb_ligands.curselection()]
+        rows = [self.lb_kin_layout.get(i) for i in self.lb_kin_layout.curselection()]
 
         display_name = self.var_data_type.get()
         if not display_name: return
@@ -1684,7 +1698,7 @@ class NCollectorApp:
             'ligands': ligands,
             'data_types': [internal_name], # As list for engine compatibility with default export
             'group_by': self.var_group_by.get(),
-            'kinetic_mode': self.var_exp_kin.get()
+            'kinetic_mode': rows
         }
 
         file_path = filedialog.asksaveasfilename(
