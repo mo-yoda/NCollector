@@ -1595,6 +1595,8 @@ class NCollectorApp:
         tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
         self.lb_kin_layout = tk.Listbox(type_frame, selectmode="multiple", height=6, exportselection=False)
         self.lb_kin_layout.grid(row=0, column=3, rowspan = 2, padx=3, pady=5, sticky="nsew")
+        tk.Button(type_frame, text="Select All Rows", command=lambda: self.lb_kin_layout.select_set(0, tk.END)).grid(
+            row=1, column=2, pady=5, sticky="nsew")
 
         type_frame.columnconfigure(1, weight=1)
         type_frame.columnconfigure(3, weight=3)
@@ -1618,8 +1620,6 @@ class NCollectorApp:
         # Check if "kinetic" is in the selected string
         if "kinetic" in selection.lower():
             self.lb_kin_layout.config(state="normal")
-            # Refresh to populate listbox
-            self.refresh_plot_helper_options()
         else:
             self.lb_kin_layout.config(state="disabled")
 
@@ -1639,6 +1639,8 @@ class NCollectorApp:
             self.lbl_data_source.config(text=f"Internal: {experiment}")
 
         self.btn_run_plot_helper.config(state="normal")
+        # Enable kinetic layout to populate list box, afterwards disable
+        self.lb_kin_layout.config(state="normal")
 
         # Clear
         self.lb_ligands.delete(0, tk.END)
@@ -1671,6 +1673,8 @@ class NCollectorApp:
         rows = sorted(set(row_infos))
         for r in rows: self.lb_kin_layout.insert(tk.END, r)
         self.lb_kin_layout.select_set(0, tk.END)  # Default to all
+        # Disable listbox if not kinetic is selected
+        self.toggle_kinetic_options()
 
     def run_plot_helper(self):
         """Collects GUI selections and calls the core export engine."""
