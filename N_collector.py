@@ -336,7 +336,9 @@ def extract_metadata(pr_export_df):
     col = pr_export_df.iloc[:, 0].astype(str)  # Get first col and transform everything to str
 
     # Mapping: { "Excel Label": "Desired Key" }
-    meta_keys = {"Date:": "measurement_date", "ID2:": "cell_line", "ID3:": "transfections"}
+    meta_keys = {r"Date\s*:": "measurement_date",
+                 r"ID2\s*:": "cell_line",
+                 r"ID3\s*:": "transfections"}
     metadata = {}
     for label, key in meta_keys.items():
         # n=1 split at first ":"; str[-1] select last arg; str-strip() remove spaces; .tolist() convert from pd series
