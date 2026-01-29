@@ -995,6 +995,23 @@ def apply_export_filters(df, config):
             df_subset = df_subset[df_subset[df_col].isin(targets)]
     return df_subset
 
+def build_row_info_str(df):
+    """
+    Creates the standardized list of row info strings:  'Row A: -9.0 log(M) Ligand'
+    Used for both GUI population and default export logic.
+    """
+    if df is None or df.empty:
+        return []
+
+    row_series = (
+            "Row " + df['Plate_Row'].astype(str) + ": " +
+            df['Ligand_Conc'].astype(str) + " log(M) " +
+            df['Ligand'].astype(str)
+    )
+
+    # Return unique, sorted values
+    return sorted(row_series.unique().tolist())
+
 def generate_header_key(df, group_by=None):
     """Creates the 'Header_Key' column for exporting data."""
     mapping = {"Cell Line": "Cell_Line", "Transfection": "Transfection"}
@@ -1008,7 +1025,7 @@ def generate_header_key(df, group_by=None):
     if df['Ligand'].nunique() > 1: parts.append(df["Ligand"])
 
     # Check whether this is AUC data
-    is_kinetic = len(df["Time_(min)"].unique()) > 1
+    is_kinetic = df["Time_(min)"].nunique() > 1
     if is_kinetic:
         parts.append(df["Ligand_Conc"].astype(str))
 
@@ -1671,11 +1688,7 @@ class NCollectorApp:
         self.lb_exp_trans.select_set(0, tk.END)  # Default to all
 
         # Populate Kinetic Layout
-        row_infos = ("Row " +
-                     df['Plate_Row'].astype(str) + ": " +
-                     df['Ligand_Conc'].astype(str) + " log(M) " +
-                     df['Ligand'])
-        rows = sorted(set(row_infos))
+        rows = build_row_info_str(df)
         for r in rows: self.lb_kin_layout.insert(tk.END, r)
         self.lb_kin_layout.select_set(0, tk.END)  # Default to all
         # Disable listbox if not kinetic is selected
@@ -2301,9 +2314,6 @@ class NCollectorApp:
                             if not k_layout:
                                 continue
 
-                            # Check ligand numer to built suffix
-                            include_ligand = df_group['Ligand'].nunique() > 1
-
                             filtered_rows = []
                             for row_info in k_layout:
                                 row_letter = row_info.split(":")[0].replace("Row ", "").strip()
@@ -2347,7 +2357,7 @@ class NCollectorApp:
                             df_auc = generate_header_key(df_auc, group_by)
 
                             # Handle ligand_conc column for more than one ligand
-                            if len(config.get('ligands')) > 1:
+                            if df_auc['Ligand'].nunique() > 1:
                                 auc_pivot = create_clean_pivot(df_auc, "Plate_Row", dtype, True)
                             else:
                                 auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype, True)
@@ -2382,6 +2392,10 @@ class NCollectorApp:
         )
         if not file_path: return
 
+        # Built kinetic_mode selection
+        df_row_a = self.master_df[self.master_df['Plate_Row'] == 'A']
+        kinetic_rows = build_row_info_str(df_row_a)
+
         # Define Standard Config
         default_config = {
             'cells': 'All',
@@ -2389,7 +2403,7 @@ class NCollectorApp:
             'ligands': 'All',
             'data_types': ['Kinetic_Mean', 'AUC_Mean'],
             'group_by': 'Transfection',
-            'kinetic_mode': 'Row A' # TODO: handle ligands - all ligands with Row A
+            'kinetic_mode': kinetic_rows
         }
         self.write_excel_export(file_path, self.master_df, default_config)
 
