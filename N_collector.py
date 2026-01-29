@@ -41,15 +41,18 @@ class PrResult:
     kinetic_df: pd.DataFrame | None = None
     # Mean of baseline- and vehicle-normalised kinetic data
     kinetic_mean_df: pd.DataFrame | None = None
+    # Raw BRET from last 3x datapoints
+    raw_bret_points_df: pd.DataFrame | None = None
     # Pre-vehicle norm AUC
-    raw_auc_df: pd.DataFrame | None = None
+    bl_corr_auc_df: pd.DataFrame | None = None
     # Baseline- and vehicle-normalised AUC data (technical replicates)
     auc_df: pd.DataFrame | None = None
     # Mean of baseline- and vehicle-normalised AUC data
     auc_mean_df:pd.DataFrame | None = None
 
     # --- Export tidy CRC data ---
-    raw_auc_tidy_df: pd.DataFrame | None = None
+    raw_bret_points_tidy_df: pd.DataFrame | None = None
+    bl_corr_auc_tidy_df: pd.DataFrame | None = None
     auc_tidy_df: pd.DataFrame | None = None
     auc_mean_tidy_df: pd.DataFrame | None = None
 
@@ -875,6 +878,14 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
 
     # Get raw BRET ratio table
     raw_df = result.raw_bret_ratio_df.copy()
+
+    # Assign excluded wells
+    if result.excluded_wells:
+        # Set entire columns to NaN
+        for well in result.excluded_wells:
+            if well in raw_df.columns:
+                raw_df[well] = float('nan')
+
     time_col = "Time (min)"
     if len(raw_df) < baseline_end_idx:
         print(f"   [WARNING] Data has less than {baseline_end_idx} rows.")
@@ -888,30 +899,19 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # Prepare the full dataframe for normalization (removing the time col)
     data_df = raw_df.drop(columns=[time_col]).copy()
 
+    # --- RAW BRET LAST MEASUREMENT POINTS ---
+    lp_raw_bret_df = raw_df.iloc[-3:].mean().to_frame().T
+
     # --- BASELINE CORRECTION ---
-    # Isolate baseline rows for calculation
-    df_baseline_calc = raw_df.iloc[0:baseline_end_idx].copy()
-    bl_corrected_df = pd.DataFrame()
+    baseline_means = data_df.iloc[0:baseline_end_idx].mean()
+    bl_corrected_df = data_df / baseline_means
 
-    for col in data_df.columns:
-        if col in result.excluded_wells:
-            bl_corrected_df[col] = float('nan')
-            continue
-        # Mean of baseline rows for this well
-        # Force numeric conversion for baseline values to handle potential strings/decimals
-        base_mean = pd.to_numeric(df_baseline_calc[col], errors='coerce').mean()
-
-        if base_mean != 0:
-            col_vals = pd.to_numeric(data_df[col], errors='coerce')
-            # Divide ALL values by the baseline mean
-            bl_corrected_df[col] = col_vals / base_mean
-        else:
-            bl_corrected_df[col] = float('nan')
+    # Handle columns where baseline_mean was 0 (to avoid infinity)
+    bl_corrected_df = bl_corrected_df.replace([float('inf'), -float('inf')], float('nan'))
 
     # --- AUC CALCULATION ---
     # Use slicing to sum only the kinetic phase (after baseline)
-    auc_raw_series = bl_corrected_df.iloc[baseline_end_idx:].sum(axis=0, skipna=False)
-    auc_raw_df = pd.DataFrame([auc_raw_series]) # Convert series to df
+    bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum().to_frame().T
 
     # Determine number of reads for dynamic AUC target
     num_kinetic_points = len(bl_corrected_df.iloc[baseline_end_idx:])
@@ -924,7 +924,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     )
     # For AUC (df with one row -> returns dictionary of scalars)
     veh_means_auc = calculate_vehicle_means(
-        auc_raw_df, plate_blocks, result.excluded_wells, acc_vehicle_range, result.vehicle_outliers,
+        bl_corr_auc_df, plate_blocks, result.excluded_wells, acc_vehicle_range, result.vehicle_outliers,
         kinetic_reads_count=num_kinetic_points
     )
 
@@ -945,7 +945,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         # Normalize AUC
         v_auc = veh_means_auc.get(block_start)
         if v_auc is not None and v_auc != 0:
-            auc_norm_dict[col] = auc_raw_df[col] / v_auc
+            auc_norm_dict[col] = bl_corr_auc_df[col] / v_auc
         else:
             auc_norm_dict[col] = float('nan')
 
@@ -962,14 +962,18 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     )
 
     # --- SAVE RESULTS ---
+    result.raw_bret_points_df = lp_raw_bret_df
+    result.raw_bret_points_tidy_df = convert_to_plate_layout(lp_raw_bret_df)
+
     # --- Kinetic data
     result.time_vector = time_vec
     result.bl_corr_kinetic = bl_corrected_df
     result.kinetic_df = kinetic_df
     result.kinetic_mean_df = kinetic_mean_df
-    # --- AUC data
-    result.raw_auc_df = auc_raw_df
-    result.raw_auc_tidy_df = convert_to_plate_layout(auc_raw_df)
+
+    # --- AUC data (tidy for CRC)
+    result.bl_corr_auc_df = bl_corr_auc_df
+    result.bl_corr_auc_tidy_df = convert_to_plate_layout(bl_corr_auc_df)
     result.auc_df = auc_df
     result.auc_tidy_df = convert_to_plate_layout(result.auc_df)
     result.auc_mean_df = auc_mean_df
@@ -1045,13 +1049,19 @@ def create_clean_pivot(df, index_col, value_col, disregard_well_id):
     Pivots the table. If Mean Data: One column per File.
     If Raw Data: One column per Well (Technical Replicates side-by-side)
     """
+    is_kinetic = df["Time_(min)"].nunique() > 1
+
     # Assign a replicate number (1, 2, 3...) per Header_Key
     df = df.copy()
     if disregard_well_id:
         df['Rep_Num'] = df.groupby('Header_Key')['File_Name'].rank(method='dense').astype(int)
     else:
-        # Consider File_Name and Well ID for technical replicates
-        df['sort_key'] = df['File_Name'].astype(str) + "_" + df['Well_ID'].astype(str)
+        # Consider File_Name and Well ID or Plate Col for technical replicates
+        if is_kinetic:
+            df['sort_key'] = df['File_Name'].astype(str) + "_" + df['Well_ID'].astype(str)
+        else:
+            # Only get Col number instead of complete well id
+            df['sort_key'] = df['File_Name'].astype(str) + "_" + df['Well_ID'].astype(str).str[1:].str.zfill(2)
         df['Rep_Num'] = df.groupby('Header_Key')['sort_key'].rank(method='dense').astype(int)
 
     # Pivot
@@ -1134,14 +1144,15 @@ class NCollectorApp:
 
         # --- Constants ---
         self.data_type_map = {
-            "kinetic: raw BRET ratio (kinetic)": "Raw_BRET",
+            "kinetic: raw BRET ratio (kinetic)": "Raw_BRET_kinetic",
             "kinetic: baseline-corrected BRET ratio": "Bl_Corrected_BRET",
             "kinetic: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
             "kinetic: vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean",
 
-            "AUC: baseline-corrected BRET ratio": "Bl_AUC",
-            "AUC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
-            "AUC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
+            "CRC: raw BRET counts (from last 3x time points)": "Raw_BRET_Counts",
+            "CRC: baseline-corrected BRET ratio": "Bl_AUC",
+            "CRC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
+            "CRC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
         }
 
         # --- Setup GUI ---
@@ -2112,7 +2123,7 @@ class NCollectorApp:
                 # Ignore time col in raw bret df
                 raw_clean = res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore')
 
-                df_raw = melt_df(raw_clean, "Raw_BRET", t_vec)
+                df_raw = melt_df(raw_clean, "Raw_BRET_kinetic", t_vec)
                 df_bl = melt_df(res.bl_corr_kinetic, "Bl_Corrected_BRET", t_vec)
                 df_norm = melt_df(res.kinetic_df, "Veh_Norm_Kinetic", t_vec)
 
@@ -2122,12 +2133,14 @@ class NCollectorApp:
                 merged_df = df_raw.merge(df_bl, on=merge_on, how="left") \
                     .merge(df_norm, on=merge_on, how="left")
 
-                # --- MAP AUC DATA ---
+                # --- MAP AUC DATA and RAW BRET POINTS---
                 # AUC is 1 value per well. We map it to Well_ID.
-                auc_raw_map = res.raw_auc_df.iloc[0].to_dict() if res.raw_auc_df is not None else {}
+                raw_bret_map = res.raw_bret_points_df.iloc[0].to_dict() if res.raw_bret_points_df is not None else {}
+                auc_bl_map = res.bl_corr_auc_df.iloc[0].to_dict() if res.bl_corr_auc_df is not None else {}
                 auc_norm_map = res.auc_df.iloc[0].to_dict() if res.auc_df is not None else {}
 
-                merged_df['Bl_AUC'] = merged_df['Well_ID'].map(auc_raw_map)
+                merged_df['Raw_BRET_Counts'] = merged_df['Well_ID'].map(raw_bret_map)
+                merged_df['Bl_AUC'] = merged_df['Well_ID'].map(auc_bl_map)
                 merged_df['Veh_Norm_AUC'] = merged_df['Well_ID'].map(auc_norm_map)
 
                 # --- PREPARE MEAN KINETIC AND AUC MAPPING ---
@@ -2217,8 +2230,8 @@ class NCollectorApp:
             "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
             "Transfection", "Cell_Line", "Ligand",
             "Ligand_Conc", "Plate_Row", "Well_ID", "Time_(min)",
-            "Raw_BRET", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
-            "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
+            "Raw_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
+            "Raw_BRET_Counts", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
         ]
         final_cols = [c for c in cols_order if c in master_df.columns]
         return master_df[final_cols]
@@ -2267,9 +2280,9 @@ class NCollectorApp:
             else:
                 data_groups.append(("", df_subset))  # No grouping
 
-            # Definition which is kinetic and what is AUC
-            kinetic_types = ["Raw_BRET", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean"]
-            auc_types = ["Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"]
+            # Definition which is kinetic and what is CRC
+            kinetic_types = [val for key, val in self.data_type_map.items() if "kinetic:" in key]
+            crc = [val for key, val in self.data_type_map.items() if "CRC:" in key]
 
             with pd.ExcelWriter(file_path) as writer:
                 sheets_written = False
@@ -2348,26 +2361,30 @@ class NCollectorApp:
                             kin_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
                             sheets_written = True
 
-                    # --- AUC DATA ---
-                        elif dtype in auc_types:
-                            df_auc = df_group.drop_duplicates(
+                    # --- CRC DATA ---
+                        elif dtype in crc:
+                            df_crc = df_group.drop_duplicates(
                                 subset=["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]).copy()
-                            if df_auc.empty: continue
+                            if df_crc.empty: continue
+                            df_crc = generate_header_key(df_crc, group_by)
 
-                            df_auc = generate_header_key(df_auc, group_by)
+                            if dtype not in df_crc.columns: continue
 
-                            # Handle ligand_conc column for more than one ligand
-                            if df_auc['Ligand'].nunique() > 1:
-                                auc_pivot = create_clean_pivot(df_auc, "Plate_Row", dtype, True)
+                            # Always pivot on plate row
+                            crc_pivot = create_clean_pivot(df_crc, "Plate_Row", dtype, "Mean" in dtype)
+
+                            # Display ligand conc instead of plate row if there is one ligand
+                            if df_crc['Ligand'].nunique() == 1:
+                                row_map = df_crc.drop_duplicates("Plate_Row").set_index("Plate_Row")["Ligand_Conc"]
+                                crc_pivot.index = crc_pivot.index.map(row_map)
+                                crc_pivot.rename(columns={"Plate_Row": "Concentration (logM)"}, inplace=True)
+
                             else:
-                                auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype, True)
-
-                            # auc_pivot = create_clean_pivot(df_auc, "Ligand_Conc", dtype)
-                            auc_pivot.rename(columns={"Ligand_Conc": "Concentration (logM)"}, inplace=True)
+                                crc_pivot.index.name = "Plate Row"
 
                             base = f"{group_name}_AUC" if group_name else f"AUC_{dtype}"
                             sheet_name = base[:31]
-                            auc_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
+                            crc_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
                             sheets_written = True
             if not sheets_written:
                 pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name="Empty")
