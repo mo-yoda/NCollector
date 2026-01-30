@@ -63,8 +63,9 @@ class PrResult:
 
     # --- Internal check and warnings for outlier identification ---
     vehicle_outliers: dict[str, float] = field(default_factory=dict) # well, value
-    warnings : list[str] = field(default_factory=list)
     vehicle_warnings: list[str] = field(default_factory=list)
+    low_lum_cond: dict[str, float] = field(default_factory=dict)
+    low_lum_warnings: list[str] = field(default_factory=list)
 
 @dataclass
 class ProtocolData:
@@ -93,6 +94,13 @@ class MeasurementFolder:
     protocol: ProtocolData | None = None # MeasurementFolder is initiated before protocol data is loaded
     results: list[PrResult] = field(default_factory=list) # The default_factory=list initiates this with an empty list
     skipped_files: list[str] = field(default_factory=list)
+
+@dataclass
+class ProcessingConfig:
+    """All user-defined processing settings"""
+    lum_threshold: int=100
+    vehicle_warning_threshold: float = 0.2
+    baseline_end_index: int=5
 
 # --- Tool Functions --- #
 
@@ -798,7 +806,7 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
 
     return pd.DataFrame(mean_data)
 
-def process_bret_measurement(result: PrResult, protocol: ProtocolData):
+def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: ProcessingConfig):
     """
     Maps cell line x transfection x ligand plate layout using protocol info.
     Performs baseline correction. Vehicle normalisation with kinetic data and AUC in parallel.
@@ -814,7 +822,14 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # Reset for re-run
     result.vehicle_warnings = []
     result.vehicle_outliers = {}
+    result.low_lum_warnings = []
+    result.low_lum_cond = {}
     result.column_metadata = {}
+
+    # --- CONFIG PROCESSING ---
+    acc_vehicle_range = config.vehicle_warning_threshold
+    baseline_end_idx = config.baseline_end_index
+    lum_threshold = config.lum_threshold
 
     print(f"\n[DEBUG] === Processing File: {result.file_name} ===")
     # --- CONFIG LAYOUT ---
@@ -877,11 +892,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
                 ligand_conc=current_conc_map
             )
 
-    # --- CONFIG PROCESSING ---
-    # Define accepted vehicle range
-    acc_vehicle_range = 0.2
-    # Define Baseline: First 5 rows (Index 0-4)
-    baseline_end_idx = 5
 
     # Get raw BRET ratio table and lum table
     raw_df = result.raw_bret_ratio_df.copy()
@@ -1111,6 +1121,7 @@ class NCollectorApp:
 
         # --- GUI Variables ---
         self.folder_path = tk.StringVar(value="No folder selected.")
+        self.var_lum_threshold = tk.IntVar(value=100)
         self.var_date = tk.StringVar(value="All")
         self.var_cell = tk.StringVar(value="All")
         self.var_cond = tk.StringVar(value="All")
@@ -1208,10 +1219,20 @@ class NCollectorApp:
                                    font=('Arial', 10))
         self.path_label.pack(pady=10, padx=10)
 
+        # Load frame
+        load_frame = tk.Frame(self.tab_import)
+        load_frame.pack(pady=15, fill="x", padx=20)
+
         # Load button
-        self.load_files_button = tk.Button(self.tab_import, text="Load Files", state="disabled",
+        self.load_files_button = tk.Button(load_frame, text="Load Files", state="disabled",
                                            command=self.collect_files)
-        self.load_files_button.pack(pady=15)
+        self.load_files_button.pack(padx=10)
+
+        # Threshold Input
+        lum_thresh_entry = tk.Entry(load_frame, textvariable=self.var_lum_threshold, width=10)
+        lum_thresh_entry.pack(side="right")
+        tk.Label(load_frame, text="Lum. Threshold:").pack(side="right", padx=(10, 5))
+
 
         # Label to display Main Plasmids
         self.main_plasmids_label = tk.Label(self.tab_import, text="", justify="left", font=("Arial", 10, "bold"))
@@ -2045,6 +2066,16 @@ class NCollectorApp:
         """
         self.log("\n--- Starting Processing Pipeline ---")
 
+        # Get config from GUI state
+        try:
+            lum_threshold = self.var_lum_threshold.get()
+        except tk.TclError:
+            lum_threshold = 100
+
+        current_config = ProcessingConfig(
+            lum_threshold=lum_threshold
+        )
+
         # Check for plasmids transfected in all conditions (main plasmids) and filter if needed
         selected_exp_name = self.handle_main_plasmids_selection()
         self.main_plasmids_label.config(text=f"{selected_exp_name}")
@@ -2055,7 +2086,7 @@ class NCollectorApp:
             for result in folder.results:
                 # Process each result file within one folder (belonging to one protocol)
                 # Also assigns conditions to data
-                result = process_bret_measurement(result, folder.protocol)
+                result = process_bret_measurement(result, folder.protocol, current_config)
 
                 # Handle outliers stored in dic
                 if result.vehicle_outliers:
