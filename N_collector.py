@@ -27,6 +27,7 @@ class PrResult:
     cell_line: str # ID2
     transfection_id: str # ID3
     raw_bret_ratio_df: pd.DataFrame
+    lum_df: pd.DataFrame
 
     # --- Connection to protocol file ---
     # Key = Column Index (1-12), Value = WellMetadata object
@@ -60,9 +61,10 @@ class PrResult:
     is_excluded: bool = False
     excluded_wells: list[str] = field(default_factory=list)
 
-    # --- Internal check and warnings for helping vehicle outlier identification ---
+    # --- Internal check and warnings for outlier identification ---
     vehicle_outliers: dict[str, float] = field(default_factory=dict) # well, value
     warnings : list[str] = field(default_factory=list)
+    vehicle_warnings: list[str] = field(default_factory=list)
 
 @dataclass
 class ProtocolData:
@@ -392,25 +394,29 @@ def extract_bret_data(pr_export_df):
     Uses df from the 'Table All Cycles' sheet of the PR export and extracts raw bret ratio table.
     Reformats df to header Time, wells.
     """
-    df_bret = slice_table(pr_export_df, "Well", row_end_threshold=2)
-
-    # --- Reformat table ---
-    # Drop cols starting with "Raw" and the col "Content"
-    cols_to_drop = [c for c in df_bret.columns if str(c).strip().startswith("Raw")]
-    cols_to_drop.append("Content")
-    df_bret = df_bret.drop(columns=cols_to_drop)
-
-    # Assign the Time row
-    df_bret.iat[0, 0] = "Time (min)"
-
+    df = slice_table(pr_export_df, "Well", row_end_threshold=2)
     # Clean up well names from "A01" to "A1"
     # "([A-Za-z])0(\d)" matching what to replace, () groups parts -> r"\1\2" replace with group1 and 2
-    df_bret.iloc[:, 0] = df_bret.iloc[:, 0].str.replace(r"([A-Za-z])0(\d)", r"\1\2", regex=True)
+    df.iloc[:, 0] = df.iloc[:, 0].str.replace(r"([A-Za-z])0(\d)", r"\1\2", regex=True)
+    df.iat[0, 0] = "Time (min)"
+
+    # --- Split in Lum count and BRET ratio ---
+    cols_to_keep_lum = [c for c in df.columns if str(c).strip().startswith("Raw Data (475")]
+    cols_to_keep_lum.append("Well")
+    df_lum = df.loc[:, cols_to_keep_lum].copy()
+
+    cols_to_drop_bret = [c for c in df.columns if str(c).strip().startswith("Raw")]
+    cols_to_drop_bret.append("Content")
+    df_bret = df.drop(columns=cols_to_drop_bret).copy()
 
     # Transpose
-    df_bret = df_bret.set_index(df_bret.columns[0]).T
+    df_bret = df_bret.set_index("Well").T
     df_bret = df_bret.reset_index(drop=True)  # Make sure index is clean
-    return df_bret
+
+    df_lum = df_lum.set_index("Well").T
+    df_lum = df_lum.reset_index(drop=True)
+
+    return df_bret, df_lum
 
 
 def extract_measurement_data(xls_obj, file_name: str):
@@ -431,14 +437,15 @@ def extract_measurement_data(xls_obj, file_name: str):
         return None
 
     metadata_dic = extract_metadata(pr_export_df)
-    bret_ratio_df = extract_bret_data(pr_export_df)
+    bret_ratio_df , lum_df= extract_bret_data(pr_export_df)
 
     result_obj = PrResult(
         file_name=file_name,
         measurement_date=metadata_dic['measurement_date'],
         cell_line=metadata_dic['cell_line'],
         transfection_id=metadata_dic['transfections'],
-        raw_bret_ratio_df=bret_ratio_df
+        raw_bret_ratio_df=bret_ratio_df,
+        lum_df=lum_df
     )
     return result_obj
 
@@ -805,7 +812,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
         return result
 
     # Reset for re-run
-    result.warnings = []
+    result.vehicle_warnings = []
     result.vehicle_outliers = {}
     result.column_metadata = {}
 
@@ -876,15 +883,16 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData):
     # Define Baseline: First 5 rows (Index 0-4)
     baseline_end_idx = 5
 
-    # Get raw BRET ratio table
+    # Get raw BRET ratio table and lum table
     raw_df = result.raw_bret_ratio_df.copy()
+    lum_df = result.lum_df.copy()
 
     # Assign excluded wells
     if result.excluded_wells:
         # Set entire columns to NaN
         for well in result.excluded_wells:
-            if well in raw_df.columns:
-                raw_df[well] = float('nan')
+            if well in raw_df.columns: raw_df[well] = float('nan')
+            if well in lum_df.columns: lum_df[well] = float('nan')
 
     time_col = "Time (min)"
     if len(raw_df) < baseline_end_idx:
