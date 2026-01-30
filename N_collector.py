@@ -1149,7 +1149,7 @@ class NCollectorApp:
             "kinetic: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
             "kinetic: vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean",
 
-            "CRC: raw BRET counts (from last 3x time points)": "Raw_BRET_Counts",
+            "CRC: raw BRET (from last 3x time points)": "Raw_BRET_CRC",
             "CRC: baseline-corrected BRET ratio": "Bl_AUC",
             "CRC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
             "CRC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
@@ -2139,7 +2139,7 @@ class NCollectorApp:
                 auc_bl_map = res.bl_corr_auc_df.iloc[0].to_dict() if res.bl_corr_auc_df is not None else {}
                 auc_norm_map = res.auc_df.iloc[0].to_dict() if res.auc_df is not None else {}
 
-                merged_df['Raw_BRET_Counts'] = merged_df['Well_ID'].map(raw_bret_map)
+                merged_df['Raw_BRET_CRC'] = merged_df['Well_ID'].map(raw_bret_map)
                 merged_df['Bl_AUC'] = merged_df['Well_ID'].map(auc_bl_map)
                 merged_df['Veh_Norm_AUC'] = merged_df['Well_ID'].map(auc_norm_map)
 
@@ -2231,7 +2231,7 @@ class NCollectorApp:
             "Transfection", "Cell_Line", "Ligand",
             "Ligand_Conc", "Plate_Row", "Well_ID", "Time_(min)",
             "Raw_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
-            "Raw_BRET_Counts", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
+            "Raw_BRET_CRC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
         ]
         final_cols = [c for c in cols_order if c in master_df.columns]
         return master_df[final_cols]
