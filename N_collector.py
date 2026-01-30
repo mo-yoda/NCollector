@@ -64,8 +64,7 @@ class PrResult:
     # --- Internal check and warnings for outlier identification ---
     vehicle_outliers: dict[str, float] = field(default_factory=dict) # well, value
     vehicle_warnings: list[str] = field(default_factory=list)
-    low_lum_cond: dict[str, float] = field(default_factory=dict)
-    low_lum_warnings: list[str] = field(default_factory=list)
+    low_lum_warnings: dict[str, float] = field(default_factory=dict)
 
 @dataclass
 class ProtocolData:
@@ -718,6 +717,7 @@ def calculate_vehicle_means(bl_corrected_df: pd.DataFrame,
     Calculates the mean of the vehicle wells (row H) for each block.
     Works for both Kinetic DataFrames (returns Series mean) and AUC DataFrames (returns Float mean).
     """
+    # Note that passed objects like outlier_dict are modified in place without need to state return
     vehicle_means = {}
 
     # Check if this is AUC (1 row) or Kinetic (>1 row)
@@ -766,12 +766,14 @@ def calculate_vehicle_means(bl_corrected_df: pd.DataFrame,
 
 def calculate_replicate_means(processed_df: pd.DataFrame,
                               plate_blocks: list[range],
-                              col_metadata: dict): # Dic created from PlateColMetadata
+                              col_metadata: dict, # Dic created from PlateColMetadata
+                              group_by_row: bool = True):
     """
     Calculates the mean of technical replicates. As in processed_df each col is one well,
     the mean is performed of three cols within one block.
-    Rows (A-H) are treated as distinct conditions (ligand concentration).
-    Header format of returned df: "Condition_Name|Cell_Line|Ligand_Name|Row"
+    Header format of returned df: "Condition_Name|Cell_Line|Ligand_Name (|Row)"
+    If group_by_row is True: Returns mean per Row (A-H) per Block (Condition).
+    If group_by_row is False: Returns mean of the ENTIRE Block (all Rows A-H).
     """
     mean_data = {}
     row_labels = list("ABCDEFGH")
@@ -786,22 +788,35 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
         cell_line = meta.cell_line if meta else "Unknown"
         ligand_name = meta.ligand_identity
 
-        # Iterate through plate rows (A-H)
-        for row in row_labels:
-            # Construct well IDs for this specific condition (e.g., A1, A2, A3)
-            replicate_wells = [f"{row}{c}" for c in block_cols]
+        if group_by_row:
+            # Iterate through plate rows (A-H)
+            for row in row_labels:
+                # Construct well IDs for this specific condition (e.g., A1, A2, A3)
+                replicate_wells = [f"{row}{c}" for c in block_cols]
 
-            # Filter for wells that actually exist in the processed dataframe
-            valid_wells = [w for w in replicate_wells if w in processed_df.columns]
+                # Filter for wells that actually exist in the processed dataframe
+                valid_wells = [w for w in replicate_wells if w in processed_df.columns]
+
+                if valid_wells:
+                    # Select the data for these wells
+                    # axis=1 calculates the mean across columns (replicates) per time point
+                    # skipna=True is default, handling excluded wells automatically
+                    mean_series = processed_df[valid_wells].apply(pd.to_numeric, errors='coerce').mean(axis=1)
+
+                    # Construct a unique column header
+                    header_key = f"{cond_name}|{cell_line}|{ligand_name}|{row}"
+                    mean_data[header_key] = mean_series
+        else:
+            all_wells_in_block = []
+            for row in row_labels:
+                for c in block_cols:
+                    all_wells_in_block.append(f"{row}{c}")
+
+            valid_wells = [w for w in all_wells_in_block if w in processed_df.columns]
 
             if valid_wells:
-                # Select the data for these wells
-                # axis=1 calculates the mean across columns (replicates) per time point
-                # skipna=True is default, handling excluded wells automatically
                 mean_series = processed_df[valid_wells].apply(pd.to_numeric, errors='coerce').mean(axis=1)
-
-                # Construct a unique column header
-                header_key = f"{cond_name}|{cell_line}|{ligand_name}|{row}"
+                header_key = f"{cond_name}|{cell_line}|{ligand_name}"
                 mean_data[header_key] = mean_series
 
     return pd.DataFrame(mean_data)
@@ -810,7 +825,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     """
     Maps cell line x transfection x ligand plate layout using protocol info.
     Performs baseline correction. Vehicle normalisation with kinetic data and AUC in parallel.
-    Checks vehicle for outliers.
+    Checks vehicle for outliers and luminescence count.
     """
     if result.is_excluded:
         result.kinetic_df = None
@@ -832,8 +847,9 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     lum_threshold = config.lum_threshold
 
     print(f"\n[DEBUG] === Processing File: {result.file_name} ===")
+
     # --- CONFIG LAYOUT ---
-    # Define triplicates (4 blocks); opt. edit for adding labeling layout
+    # TODO: implement layout as part of ProcessingConfig to use for labeling experiments
     plate_blocks = [
         range(1, 4),  # Block 1: Cols 1-3
         range(4, 7),  # Block 2: Cols 4-6
@@ -841,6 +857,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
         range(10, 13)  # Block 4: Cols 10-12
     ]
 
+    # --- METADATA MAPPING ---
     # Get cell line map
     cl_map = get_cell_line_map(protocol.line_layout, result.cell_line)
     # Get transfection map via mapping ID3 info
@@ -892,18 +909,74 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                 ligand_conc=current_conc_map
             )
 
-
+    # --- ASSING EXLUDED WELLS ---
     # Get raw BRET ratio table and lum table
     raw_df = result.raw_bret_ratio_df.copy()
     lum_df = result.lum_df.copy()
 
-    # Assign excluded wells
     if result.excluded_wells:
         # Set entire columns to NaN
         for well in result.excluded_wells:
             if well in raw_df.columns: raw_df[well] = float('nan')
             if well in lum_df.columns: lum_df[well] = float('nan')
 
+    # --- LUM COUNT CHECK ---
+    # Drop time col
+    lum_calc_df = lum_df.drop(columns=["Time (min)"], errors='ignore').apply(pd.to_numeric, errors='coerce')
+    # Use calculate_replicate_means to assign condition keys (and calc mean per row)
+    lum_mean_df = calculate_replicate_means(lum_calc_df, plate_blocks, result.column_metadata, group_by_row=False)
+
+    if not lum_mean_df.empty:
+        # Check last 5 rows (time points)
+        lum_end = lum_mean_df.iloc[-5:] if len(lum_mean_df) >= 5 else lum_mean_df
+        mean_lum_end = lum_end.mean() # Mean value per condition key
+
+        # Compare with threshold
+        low_lum_cond = mean_lum_end[mean_lum_end < lum_threshold]
+        print(low_lum_cond)
+
+        for key, val in low_lum_cond.items():
+            # Extract cond stats from key
+            try:
+                # "Cond_Name|Cell|Ligand"
+                parts = key.split("|")
+                if len(parts) < 3: continue # Safety check
+
+                cond_name = parts[0]
+                cell_line = parts[1]
+                lig_name =  parts[2]
+
+                # Identify which wells belong to this condition (needed for GUI)
+                affected_wells = []
+                for col_idx, meta in result.column_metadata.items():
+                    # Match metadata to the key parts
+                    if (meta.condition_name == cond_name and
+                            meta.cell_line == cell_line and
+                            meta.ligand_identity == lig_name):
+
+                        # Add A-H for this column
+                        for r in "ABCDEFGH":
+                            well_id = f"{r}{col_idx}"
+                            if well_id in lum_df.columns:
+                                affected_wells.append(well_id)
+
+                # Only add warning if wells are not already fully excluded
+                is_fully_excluded = all(w in result.excluded_wells for w in affected_wells)
+
+                if not is_fully_excluded:
+                    result.low_lum_warnings.append({
+                        "key": key,
+                        "condition": cond_name,
+                        "cell": cell_line,
+                        "ligand": lig_name,
+                        "value": float(val),
+                        "wells": affected_wells
+                    })
+
+            except Exception as e:
+                print(f"[WARNING] Error parsing lum key {key}: {e}")
+
+    # --- BUILT TIME VECTOR ---
     time_col = "Time (min)"
     if len(raw_df) < baseline_end_idx:
         print(f"   [WARNING] Data has less than {baseline_end_idx} rows.")
