@@ -63,8 +63,8 @@ class PrResult:
 
     # --- Internal check and warnings for outlier identification ---
     vehicle_outliers: dict[str, float] = field(default_factory=dict) # well, value
-    vehicle_warnings: list[str] = field(default_factory=list)
-    low_lum_warnings: dict[str, float] = field(default_factory=dict)
+    vehicle_warnings: list[dict] = field(default_factory=list)
+    low_lum_warnings: list[dict] = field(default_factory=list) # List of dict carrying all needed metadata
 
 @dataclass
 class ProtocolData:
@@ -709,18 +709,11 @@ def get_block_start_for_col(col_index: int, plate_blocks: list[range]):
 
 def calculate_vehicle_means(bl_corrected_df: pd.DataFrame,
                             plate_blocks: list[range],
-                            excluded_wells: list[str],
-                            acc_range: float,
-                            outlier_dict: dict,
-                            kinetic_reads_count: int = 1):
+                            excluded_wells: list[str]):
     """
     Calculates the mean of the vehicle wells (row H) for each block.
-    Works for both Kinetic DataFrames (returns Series mean) and AUC DataFrames (returns Float mean).
     """
-    # Note that passed objects like outlier_dict are modified in place without need to state return
     vehicle_means = {}
-
-    # Check if this is AUC (1 row) or Kinetic (>1 row)
     is_kinetic = bl_corrected_df.shape[0] > 1
 
     for block in plate_blocks:
@@ -734,25 +727,6 @@ def calculate_vehicle_means(bl_corrected_df: pd.DataFrame,
         if valid_vehicles:
             # Get vehicle values and make sure that data is numeric
             vehicle_data = bl_corrected_df[valid_vehicles].apply(pd.to_numeric, errors='coerce')
-
-            # --- VEHICLE CHECK ---
-            for well in valid_vehicles:
-                if is_kinetic:
-                    # Kinetic: Mean over time should be close to 1.0
-                    val_to_check = vehicle_data[well].mean()
-                    target_value = 1
-                else:
-                    # AUC: Value should be close to (1.0 * number_of_reads)
-                    # Use .iloc[0] to get the float from the series
-                    val_to_check = vehicle_data[well].iloc[0]
-                    target_value = float(kinetic_reads_count)
-
-                threshold = acc_range * target_value
-                # Check deviation (only if value is not NaN)
-                if pd.notna(val_to_check) and abs(val_to_check - target_value) > threshold:
-                    outlier_dict[well] = float(val_to_check)
-
-            # Calculate mean across the valid wells
             if is_kinetic:
                 # Row-wise mean for kinetic traces (result: series of length = timepoints)
                 vehicle_means[start_col] = vehicle_data.mean(axis=1)
@@ -821,11 +795,67 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
 
     return pd.DataFrame(mean_data)
 
+def format_warning_str(warn_type: str,
+                       exp_date: str,
+                       cond_name: str,
+                       cell_line: str,
+                       value: float,
+                       well_id: str = ""):
+    """
+    Creates the warnings str to be displayed in dialogue for lum and vehicle warnings.
+    warn_type: 'Lum' or 'Veh'
+    """
+    if warn_type == "Lum":
+        value_display = round(float(value), 1)
+        prefix = "[LOW LUM]"
+        suffix = f"- value: {value_display}"
+    elif warn_type == "Veh":
+        value_display = round(float(value), 3)
+        prefix = "[VEHICLE WARN]"
+        suffix = f"| {well_id} - value: {value_display}"
+    else:
+        prefix, suffix = "", ""
+
+    warning_str = f"{prefix}   {cell_line} | {cond_name} | {exp_date} {suffix}"
+
+    return warning_str
+
+def create_warning_record(warn_type: str,
+                          exp_date: str,
+                          cond_name: str,
+                          cell_line: str,
+                          value: float,
+                          replicate: str ="",
+                          row: str = "",
+                          well_id: str = ""):
+    """
+    Generates the full warning dictionary from metadata.
+    Calls format_warning_str internally to generate the 'Display' key.
+    """
+    display_text = format_warning_str(
+        warn_type=warn_type,
+        exp_date=exp_date,
+        cond_name=cond_name,
+        cell_line=cell_line,
+        value=value,
+        well_id=well_id
+    )
+
+    # Return the standardized dictionary structure
+    return {
+        "Date": exp_date,
+        "Cell_Line": cell_line,
+        "Condition": cond_name,
+        "Replicate": replicate,
+        "Row": row,
+        "Display": display_text
+    }
+
 def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: ProcessingConfig):
     """
     Maps cell line x transfection x ligand plate layout using protocol info.
     Performs baseline correction. Vehicle normalisation with kinetic data and AUC in parallel.
-    Checks vehicle for outliers and luminescence count.
+    Checks vehicle for outliers and luminescence count, saves warnings.
     """
     if result.is_excluded:
         result.kinetic_df = None
@@ -845,6 +875,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     acc_vehicle_range = config.vehicle_warning_threshold
     baseline_end_idx = config.baseline_end_index
     lum_threshold = config.lum_threshold
+    date_str = result.measurement_date.strftime('%d.%m.%y')
 
     print(f"\n[DEBUG] === Processing File: {result.file_name} ===")
 
@@ -909,7 +940,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                 ligand_conc=current_conc_map
             )
 
-    # --- ASSING EXLUDED WELLS ---
+    # --- ASSIGNING EXCLUDED WELLS ---
     # Get raw BRET ratio table and lum table
     raw_df = result.raw_bret_ratio_df.copy()
     lum_df = result.lum_df.copy()
@@ -933,7 +964,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
         # Compare with threshold
         low_lum_cond = mean_lum_end[mean_lum_end < lum_threshold]
-        print(low_lum_cond)
 
         for key, val in low_lum_cond.items():
             # Extract cond stats from key
@@ -941,10 +971,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                 # "Cond_Name|Cell|Ligand"
                 parts = key.split("|")
                 if len(parts) < 3: continue # Safety check
-
-                cond_name = parts[0]
-                cell_line = parts[1]
-                lig_name =  parts[2]
+                cond_name, cell_line, lig_name = parts[0], parts[1], parts[2]
 
                 # Identify which wells belong to this condition (needed for GUI)
                 affected_wells = []
@@ -961,17 +988,16 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                                 affected_wells.append(well_id)
 
                 # Only add warning if wells are not already fully excluded
-                is_fully_excluded = all(w in result.excluded_wells for w in affected_wells)
+                if not all(w in result.excluded_wells for w in affected_wells):
+                    warning_dict = create_warning_record(
+                        warn_type="Lum",
+                        exp_date=date_str,
+                        cond_name=cond_name,
+                        cell_line=cell_line,
+                        value=float(val)
+                    )
 
-                if not is_fully_excluded:
-                    result.low_lum_warnings.append({
-                        "key": key,
-                        "condition": cond_name,
-                        "cell": cell_line,
-                        "ligand": lig_name,
-                        "value": float(val),
-                        "wells": affected_wells
-                    })
+                    result.low_lum_warnings.append(warning_dict)
 
             except Exception as e:
                 print(f"[WARNING] Error parsing lum key {key}: {e}")
@@ -1004,19 +1030,14 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # Use slicing to sum only the kinetic phase (after baseline)
     bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum().to_frame().T
 
-    # Determine number of reads for dynamic AUC target
-    num_kinetic_points = len(bl_corrected_df.iloc[baseline_end_idx:])
-
     # --- VEHICLE CORRECTION ---
     # Kinetics (df -> returns series of means over time)
     veh_means_kinetic = calculate_vehicle_means(
-        bl_corrected_df, plate_blocks, result.excluded_wells, acc_vehicle_range, result.vehicle_outliers,
-        kinetic_reads_count=1
+        bl_corrected_df, plate_blocks, result.excluded_wells
     )
     # For AUC (df with one row -> returns dictionary of scalars)
     veh_means_auc = calculate_vehicle_means(
-        bl_corr_auc_df, plate_blocks, result.excluded_wells, acc_vehicle_range, result.vehicle_outliers,
-        kinetic_reads_count=num_kinetic_points
+        bl_corr_auc_df, plate_blocks, result.excluded_wells
     )
 
     # Apply Normalization (using dictionaries to avoid fragmentation/warnings for pd.Df)
@@ -1043,6 +1064,37 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # Create df from dict; index setting is required to handle excluded (nan) data
     kinetic_df = pd.DataFrame(kinetic_norm_dict, index=data_df.index)
     auc_df = pd.DataFrame(auc_norm_dict, index=[0])
+
+    # --- VEHICLE CHECK ---
+    print("[DEBUG] starting vehicle check")
+    for block in plate_blocks:
+        for r, c_idx in enumerate(block):
+            repli = r+1
+            well_id = f"H{c_idx}"
+
+            # Skip if well is already excluded or doesn't exist
+            if well_id in result.excluded_wells or well_id not in kinetic_df.columns:
+                continue
+
+            # Check mean of entire kinetic against 1
+            val_to_check = kinetic_df[well_id].mean()
+            deviation = abs(val_to_check - 1)
+
+            if deviation > acc_vehicle_range:
+                meta = result.column_metadata.get(c_idx)
+
+                warning_dict = create_warning_record(
+                    warn_type="Veh",
+                    exp_date=date_str,
+                    cond_name=meta.condition_name,
+                    cell_line=meta.cell_line,
+                    value=float(val_to_check),
+                    replicate=str(repli),  # Specific replicate
+                    row="H",  # Specific row
+                    well_id=well_id
+                )
+
+                result.vehicle_warnings.append(warning_dict)
 
     # --- MEAN OF REPLICATES ---
     kinetic_mean_df = calculate_replicate_means(
@@ -1183,6 +1235,7 @@ class NCollectorApp:
     def __init__(self, main_window):
         self.main_gi = main_window
         main_window.title("N Collector")
+        main_window.geometry("700x700")
 
         # --- Data Storage ---
         self.subfolder_paths_with_files = []
@@ -1447,6 +1500,120 @@ class NCollectorApp:
             self.main_gi.update_idletasks()
         except tk.TclError:
             print(message)
+
+    def show_warning_review(self, all_warnings):
+        """Pop-up window allowing users to select warnings to exclude."""
+        # TODO: pop up should not be triggered again when recalculating, just the first time
+        if not all_warnings:
+            return
+
+        dialog = tk.Toplevel(self.main_gi)
+        dialog.title("Data Quality Warnings")
+        dialog.geometry("700x500")
+
+        tk.Label(dialog, text="Warning - Consider Excluding Items",
+                 font=("Arial", 10, "bold")).pack(pady=10)
+        tk.Label(dialog, text="Select to exclude:",
+                 font=("Arial", 10)).pack(padx=15, pady=5, anchor="w")
+
+        # Select/Deselect button
+        vars_to_apply = []
+
+        def select_all():
+            for var, _ in vars_to_apply:
+                var.set(True)
+
+        def deselect_all():
+            for var, _ in vars_to_apply:
+                var.set(False)
+
+        toggle_frame = tk.Frame(dialog)
+        toggle_frame.pack(fill="x", padx=20, pady=2)
+
+        tk.Button(toggle_frame, text="Select All",
+                  command=select_all,
+                  font=("Arial", 9)).pack(side="left", padx=(0, 10))
+
+        tk.Button(toggle_frame, text="Deselect All",
+                  command=deselect_all,
+                  font=("Arial", 9)).pack(side="left")
+
+
+        # Scrollable Frame Setup
+        container = tk.Frame(dialog)
+        container.pack(fill="both", expand=True, padx=10)
+        canvas = tk.Canvas(container)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # List to track tuples of (BooleanVar, WarningData)
+        vars_to_apply = []
+
+        for warn in all_warnings:
+            var = tk.BooleanVar(value=True)
+            # Checkboxes
+            cb = tk.Checkbutton(
+                scrollable_frame,
+                text=warn["Display"],
+                variable=var,
+                anchor="w"
+            )
+            cb.pack(fill="x", padx=10, pady=2, anchor="w")
+            vars_to_apply.append((var, warn))
+
+        # Action Buttons
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(fill="x", pady=15)
+
+        tk.Button(
+            btn_frame,
+            text="Exclude Selected & Re-Calculate",
+            command=lambda: self.confirm_warning_selection(vars_to_apply, dialog),
+            bg="#ffcccc",
+            padx=10,
+            relief="raised"
+        ).pack(side="left", fill="x", expand=True, padx=5, pady=10)
+
+        tk.Button(
+            btn_frame,
+            text="Cancel",
+            command=dialog.destroy,
+        ).pack(side="left", fill="x", expand=True, padx=5, pady=10)
+
+    def confirm_warning_selection(self, vars_to_apply, dialog_window):
+        """Processes selected check buttons and adds them to pending exclusions."""
+        applied_any = False
+
+        for var, data in vars_to_apply:
+            if var.get():
+                # Add to the pending exclusions list using existing format
+                self.pending_exclusions.append({
+                    "Date": data["Date"],
+                    "Cell_Line": data["Cell_Line"],
+                    "Condition": data["Condition"],
+                    "Row": data["Row"],
+                    "Replicate": data["Replicate"]
+                })
+
+                # Update the GUI listbox in Tab 2
+                display_str = f"AUTO: {data['Display']}"
+                self.lb_exclusions.insert(tk.END, display_str)
+                applied_any = True
+
+        # Close the pop-up
+        dialog_window.destroy()
+
+        if applied_any:
+            self.log("Auto-applying selected warnings...")
+            # Directly trigger exclusion
+            self.apply_exclusions()
 
     def update_repl_options(self, event=None):
         """Reset replicate when conditions changes"""
@@ -2153,6 +2320,9 @@ class NCollectorApp:
         selected_exp_name = self.handle_main_plasmids_selection()
         self.main_plasmids_label.config(text=f"{selected_exp_name}")
 
+        # List to collect all warnings
+        all_detected_warnings = []
+
         # Iterate through data and perform mapping+calculations
         for folder in self.experiment:
             if not folder.protocol: continue # Protocol is needed for processing
@@ -2161,13 +2331,20 @@ class NCollectorApp:
                 # Also assigns conditions to data
                 result = process_bret_measurement(result, folder.protocol, current_config)
 
+                # Gather warnings
+                all_detected_warnings.extend(result.low_lum_warnings)
+                all_detected_warnings.extend(result.vehicle_warnings)
+
                 # Handle outliers stored in dic
                 if result.vehicle_outliers:
-                    vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
-                    self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
+                     vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
+                     self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
 
         # Built master indexing table (needed for flexible data exclusion)
         self.built_master_index()
+
+        if all_detected_warnings:
+            self.show_warning_review(all_detected_warnings)
 
         self.log("\n--- Compiling Master Dataframe... ---")
         self.master_df = self.compile_master_dataframe()
