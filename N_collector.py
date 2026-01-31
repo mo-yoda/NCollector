@@ -1244,6 +1244,7 @@ class NCollectorApp:
         self.rule_history_text = ""
         self.pending_exclusions = []
         self.master_df = pd.DataFrame  # Used for master csv file storage (by generation or import)
+        self.ignored_warnings = set()
 
         # --- GUI Variables ---
         self.folder_path = tk.StringVar(value="No folder selected.")
@@ -1588,7 +1589,10 @@ class NCollectorApp:
         ).pack(side="left", fill="x", expand=True, padx=5, pady=10)
 
     def confirm_warning_selection(self, vars_to_apply, dialog_window):
-        """Processes selected check buttons and adds them to pending exclusions."""
+        """
+        Processes selected check buttons and adds them to pending exclusions.
+        Saves unchecked buttons as warnings to be ignored.
+        """
         applied_any = False
 
         for var, data in vars_to_apply:
@@ -1606,6 +1610,8 @@ class NCollectorApp:
                 display_str = f"AUTO: {data['Display']}"
                 self.lb_exclusions.insert(tk.END, display_str)
                 applied_any = True
+            else:
+                self.ignored_warnings.add(data['Display'])
 
         # Close the pop-up
         dialog_window.destroy()
@@ -2221,6 +2227,7 @@ class NCollectorApp:
         self.rule_history_text = ""
         self.lbl_rules_summary.config(text="")
         self.clear_exclusion_list()
+        self.ignored_warnings.clear()
 
         self.log("\n--- Starting Data Collection ---")
 
@@ -2343,8 +2350,16 @@ class NCollectorApp:
         # Built master indexing table (needed for flexible data exclusion)
         self.built_master_index()
 
-        if all_detected_warnings:
-            self.show_warning_review(all_detected_warnings)
+        # Only show warnings that were not ignored previously
+        new_warnings = [
+            w for w in all_detected_warnings
+            if w['Display'] not in self.ignored_warnings
+        ]
+
+        if new_warnings:
+            self.show_warning_review(new_warnings)
+        elif all_detected_warnings:
+            self.log(f"[INFO] {len(all_detected_warnings)} warnings detected but previously ignored.")
 
         self.log("\n--- Compiling Master Dataframe... ---")
         self.master_df = self.compile_master_dataframe()
