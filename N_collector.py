@@ -862,6 +862,9 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
         result.kinetic_mean_df = None
         result.auc_df = None
         result.auc_mean_df = None
+        result.vehicle_warnings = []
+        result.low_lum_warnings = []
+        result.vehicle_outliers = {}
         return result
 
     # Reset for re-run
