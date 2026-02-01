@@ -1373,14 +1373,18 @@ class NCollectorApp:
         summary_frame.pack(pady=10, fill="both", expand=True, padx=20)
         tree_scroll = tk.Scrollbar(summary_frame) # Scrollbar for table
         tree_scroll.pack(side="right", fill="y")
-        self.summary_tree = ttk.Treeview(summary_frame, columns=("Cell", "Cond", "N", "Dates"), show="headings",
+        self.summary_tree = ttk.Treeview(summary_frame,
+                                         columns=("Ligand", "Cell", "Cond", "N", "Dates"),
+                                         show="headings",
                                          yscrollcommand=tree_scroll.set, height=6)
         tree_scroll.config(command=self.summary_tree.yview)
         # Define Columns
+        self.summary_tree.heading("Ligand", text="Ligand")
         self.summary_tree.heading("Cell", text="Cell Line")
         self.summary_tree.heading("Cond", text="Condition")
         self.summary_tree.heading("N", text="N")
         self.summary_tree.heading("Dates", text="Dates")
+        self.summary_tree.column("Ligand", width=80)
         self.summary_tree.column("Cell", width=100)
         self.summary_tree.column("Cond", width=250)
         self.summary_tree.column("N", width=30, anchor="center")
@@ -1404,7 +1408,7 @@ class NCollectorApp:
         self.btn_export_excel.pack(side="left", fill="x", expand=True, padx=5, pady=10)
 
     def update_summary_table(self):
-        """Fills the summary table with N counts and dates per condition"""
+        """Fills the summary table with N counts and dates per condition, per ligand"""
         # Clear existing data
         for i in self.summary_tree.get_children():
             self.summary_tree.delete(i)
@@ -1412,10 +1416,10 @@ class NCollectorApp:
         if self.master_index.empty:
             return
 
-        # Group by Cell Line and Condition
-        grouped = self.master_index.groupby(['Cell_Line', 'Condition'])
+        # Group by Ligand, Cell Line and Condition
+        grouped = self.master_index.groupby(['Ligand', 'Cell_Line', 'Condition'])
 
-        for (cell, cond), group in grouped:
+        for (lig, cell, cond), group in grouped:
             # Count unique filenames for N (experiments)
             n_count = group['File_Name'].nunique()
 
@@ -1424,7 +1428,7 @@ class NCollectorApp:
             date_str = ", ".join(unique_dates)
 
             # Insert into tree
-            self.summary_tree.insert("", "end", values=(cell, cond, n_count, date_str))
+            self.summary_tree.insert("", "end", values=(lig, cell, cond, n_count, date_str))
 
     def setup_exclusion_tab(self):
         """Builds GUI for Tab 2 data selection"""
@@ -2194,6 +2198,7 @@ class NCollectorApp:
                         "Date": result.measurement_date.strftime('%d.%m.%y'),  # String for dropdowns
                         "Cell_Line": meta.cell_line,
                         "Condition": meta.condition_name,
+                        "Ligand": meta.ligand_identity,
                         "Transfection_ID": meta.transfection_id,
                         "Column_Index": col_idx,
                         "Ref_Result": result  # Store the actual object to manipulate later
