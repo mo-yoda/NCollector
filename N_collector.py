@@ -1354,7 +1354,7 @@ class NCollectorApp:
                   command=self.select_folder).pack(pady=10, padx=10)
 
         # Display label for path
-        self.path_label = tk.Label(self.tab_import, textvariable=self.folder_path, wraplength=1000, justify="left",
+        self.path_label = tk.Label(self.tab_import, textvariable=self.folder_path, wraplength=700, justify="left",
                                    font=('Arial', 10))
         self.path_label.pack(pady=10, padx=10)
 
