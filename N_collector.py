@@ -800,6 +800,7 @@ def format_warning_str(warn_type: str,
                        cond_name: str,
                        cell_line: str,
                        value: float,
+                       ligand: str = "",
                        well_id: str = ""):
     """
     Creates the warnings str to be displayed in dialogue for lum and vehicle warnings.
@@ -816,7 +817,8 @@ def format_warning_str(warn_type: str,
     else:
         prefix, suffix = "", ""
 
-    warning_str = f"{prefix}   {cell_line} | {cond_name} | {exp_date} {suffix}"
+    # Build warning string
+    warning_str = f"{prefix}   {ligand} | {cell_line} | {cond_name} | {exp_date} {suffix}"
 
     return warning_str
 
@@ -825,7 +827,8 @@ def create_warning_record(warn_type: str,
                           cond_name: str,
                           cell_line: str,
                           value: float,
-                          replicate: str ="",
+                          ligand: str = "",
+                          replicate: str = "",
                           row: str = "",
                           well_id: str = ""):
     """
@@ -838,11 +841,13 @@ def create_warning_record(warn_type: str,
         cond_name=cond_name,
         cell_line=cell_line,
         value=value,
+        ligand=ligand,
         well_id=well_id
     )
 
     # Return the standardized dictionary structure
     return {
+        "Ligand": ligand,
         "Date": exp_date,
         "Cell_Line": cell_line,
         "Condition": cond_name,
@@ -997,6 +1002,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                         exp_date=date_str,
                         cond_name=cond_name,
                         cell_line=cell_line,
+                        ligand=lig_name,
                         value=float(val)
                     )
 
@@ -1091,6 +1097,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                     exp_date=date_str,
                     cond_name=meta.condition_name,
                     cell_line=meta.cell_line,
+                    ligand=meta.ligand_identity,
                     value=float(val_to_check),
                     replicate=str(repli),  # Specific replicate
                     row="H",  # Specific row
@@ -1238,7 +1245,7 @@ class NCollectorApp:
     def __init__(self, main_window):
         self.main_gi = main_window
         main_window.title("N Collector")
-        main_window.geometry("700x700")
+        main_window.geometry("800x700")
 
         # --- Data Storage ---
         self.subfolder_paths_with_files = []
@@ -1252,11 +1259,12 @@ class NCollectorApp:
         # --- GUI Variables ---
         self.folder_path = tk.StringVar(value="No folder selected.")
         self.var_lum_threshold = tk.IntVar(value=100)
+        self.var_lig = tk.StringVar(value="")
         self.var_date = tk.StringVar(value="All")
         self.var_cell = tk.StringVar(value="All")
         self.var_cond = tk.StringVar(value="All")
-        self.var_repl = tk.StringVar(value="")
-        self.var_row = tk.StringVar(value="")
+        self.var_repl = tk.StringVar(value="All")
+        self.var_row = tk.StringVar(value="All")
         self.var_data_type = tk.StringVar(value="")
         self.var_group_by = tk.StringVar(value="Transfection")
 
@@ -1275,6 +1283,7 @@ class NCollectorApp:
         self.btn_export_excel = None
         # Tab 2
         self.tab_select = None
+        self.cb_lig = None
         self.cb_date = None
         self.cb_cell = None
         self.cb_cond = None
@@ -1438,6 +1447,7 @@ class NCollectorApp:
         filter_frame.pack(fill = "x", pady=10, padx=5)
 
         # Variables
+        self.var_lig = tk.StringVar(value="")
         self.var_date = tk.StringVar(value="All")
         self.var_cell = tk.StringVar(value="All")
         self.var_cond = tk.StringVar(value="All")
@@ -1446,23 +1456,29 @@ class NCollectorApp:
         # List to store rules
         self.pending_exclusions = []
 
-        # 1. Date Dropdown
-        tk.Label(filter_frame, text="Date:").grid(row=0, column=0, padx=5, pady=5)
-        self.cb_date = ttk.Combobox(filter_frame, textvariable=self.var_date, state="readonly")
-        self.cb_date.grid(row=0, column=1, padx=5, pady=5)
-        self.cb_date.bind("<<ComboboxSelected>>", self.update_cell_options)
+        # 1. Ligand Dropdown
+        tk.Label(filter_frame, text="Ligand:").grid(row=0, column=0, padx=5, pady=5)
+        self.cb_lig = ttk.Combobox(filter_frame, textvariable=self.var_lig, state="readonly", width=12)
+        self.cb_lig.grid(row=0, column=1, padx=5, pady=5)
+        self.cb_lig.bind("<<ComboboxSelected>>", lambda e: self.update_dropdown_options("Ligand"))
 
-        # 2. Cell Line Dropdown
-        tk.Label(filter_frame, text="Cell Line:").grid(row=0, column=2, padx=5, pady=5)
-        self.cb_cell = ttk.Combobox(filter_frame, textvariable=self.var_cell, state="readonly")
-        self.cb_cell.grid(row=0, column=3, padx=5, pady=5)
-        self.cb_cell.bind("<<ComboboxSelected>>", self.update_cond_options)
+        # 2. Date Dropdown
+        tk.Label(filter_frame, text="Date:").grid(row=0, column=2, padx=5, pady=5)
+        self.cb_date = ttk.Combobox(filter_frame, textvariable=self.var_date, state="readonly", width=8)
+        self.cb_date.grid(row=0, column=3, padx=5, pady=5)
+        self.cb_date.bind("<<ComboboxSelected>>", lambda e: self.update_dropdown_options("Date"))
 
-        # 3. Condition Dropdown
-        tk.Label(filter_frame, text="Condition:").grid(row=0, column=4, padx=5, pady=5)
+        # 3. Cell Line Dropdown
+        tk.Label(filter_frame, text="Cell Line:").grid(row=0, column=4, padx=5, pady=5)
+        self.cb_cell = ttk.Combobox(filter_frame, textvariable=self.var_cell, state="readonly", width=8)
+        self.cb_cell.grid(row=0, column=5, padx=5, pady=5)
+        self.cb_cell.bind("<<ComboboxSelected>>", lambda e: self.update_dropdown_options("Cell_Line"))
+
+        # 4. Condition Dropdown
+        tk.Label(filter_frame, text="Condition:").grid(row=0, column=6, padx=5, pady=5)
         self.cb_cond = ttk.Combobox(filter_frame, textvariable=self.var_cond, state="readonly")
-        self.cb_cond.grid(row=0, column=5, padx=5, pady=5)
-        self.cb_cond.bind("<<ComboboxSelected>>", self.update_repl_options)
+        self.cb_cond.grid(row=0, column=7, padx=5, pady=5)
+        self.cb_cond.bind("<<ComboboxSelected>>", lambda e: self.update_dropdown_options("Condition"))
 
         # 4. Granular Filters Col (replicate) and Row (ligand conc)
         granular_frame = tk.Frame(filter_frame)
@@ -1511,7 +1527,6 @@ class NCollectorApp:
 
     def show_warning_review(self, all_warnings):
         """Pop-up window allowing users to select warnings to exclude."""
-        # TODO: pop up should not be triggered again when recalculating, just the first time
         if not all_warnings:
             return
 
@@ -1606,6 +1621,7 @@ class NCollectorApp:
             if var.get():
                 # Add to the pending exclusions list using existing format
                 self.pending_exclusions.append({
+                    "Ligand": data["Ligand"],
                     "Date": data["Date"],
                     "Cell_Line": data["Cell_Line"],
                     "Condition": data["Condition"],
@@ -1628,11 +1644,6 @@ class NCollectorApp:
             # Directly trigger exclusion
             self.apply_exclusions()
 
-    def update_repl_options(self, event=None):
-        """Reset replicate when conditions changes"""
-        self.var_repl.set("")
-        self.toggle_row_dropdown()
-
     def toggle_row_dropdown(self, event=None):
         """Enable row dropdown only if a specific replicate is selected"""
         if self.var_repl.get() != "":
@@ -1645,53 +1656,74 @@ class NCollectorApp:
         """Called during built master index. Updates dropdown options of date, cell line and condition."""
         if self.master_index.empty: return
 
-        # Get unique dates and add "All"
-        dates = sorted(self.master_index['Date'].unique().tolist())
-        self.cb_date['values'] = ["All"] + dates
+        # Reset Variables
+        self.var_lig.set("All")
         self.var_date.set("All")
-
-        # Reset others
-        self.update_cell_options()
-
-    def update_cell_options(self, event=None):
-        """Updates Cell Line options based on selected Date."""
-        selected_date = self.var_date.get()
-
-        if self.master_index.empty: return
-
-        if selected_date == "All":
-            # Show all cell lines available in the whole dataset
-            cells = sorted(self.master_index['Cell_Line'].unique().tolist())
-        else:
-            # Filter DF by date
-            subset = self.master_index[self.master_index['Date'] == selected_date]
-            cells = sorted(subset['Cell_Line'].unique().tolist())
-
-        self.cb_cell['values'] = ["All"] + cells
         self.var_cell.set("All")
-        self.update_cond_options()
+        self.var_cond.set("All")
+        self.var_repl.set("")
+        self.cb_row.config(state="disabled")
 
-    def update_cond_options(self, event=None):
-        """Updates Condition options based on selected Date AND Cell Line."""
-        selected_date = self.var_date.get()
-        selected_cell = self.var_cell.get()
+        # If only one ligand exists, default to it and disable the box.
+        unique_ligands = sorted(self.master_index['Ligand'].dropna().unique().tolist())
+        if len(unique_ligands) == 1:
+            single_ligand = unique_ligands[0]
+            self.var_lig.set(single_ligand)
+            self.cb_lig.config(state="disabled")  # Lock user into this ligand
+        else:
+            self.var_lig.set("All")
+            self.cb_lig.config(state="readonly")  # Allow selection
 
+        # Trigger the update logic (trigger_source=None means full reset)
+        trigger = "Ligand" if len(unique_ligands) == 1 else None
+        self.update_dropdown_options(trigger_source=trigger)
+
+    def update_dropdown_options(self, trigger_source=None):
+        """
+        Dynamically updates the values of all dropdowns based on the current selection of others.
+        trigger_source: The name of the field that triggered the update.
+        """
         if self.master_index.empty: return
 
-        # Start with full DF
-        subset = self.master_index.copy()
+        # Map Columns to their UI Components
+        field_map = {
+            "Ligand": (self.var_lig, self.cb_lig),
+            "Date": (self.var_date, self.cb_date),
+            "Cell_Line": (self.var_cell, self.cb_cell),
+            "Condition": (self.var_cond, self.cb_cond)
+        }
 
-        # Apply Date Filter
-        if selected_date != "All":
-            subset = subset[subset['Date'] == selected_date]
+        # Get current selection
+        current_selections = {col: var.get() for col, (var, _) in field_map.items()}
 
-        # Apply Cell Filter
-        if selected_cell != "All":
-            subset = subset[subset['Cell_Line'] == selected_cell]
+        # Iterate through each field
+        for param, (target_var, target_widget) in field_map.items():
+            # Built an all true mask
+            mask = pd.Series(True, index=self.master_index.index)
 
-        conds = sorted(subset['Condition'].unique().tolist())
-        self.cb_cond['values'] = ["All"] + conds
-        self.var_cond.set("All")
+            # Apply filters from ALL OTHER fields
+            for curr_param, val in current_selections.items():
+                # Skip the changed dropdown (curr_param) so it doesn't filter itself
+                if curr_param != param and val != "All" and val != "":
+                    mask &= (self.master_index[curr_param] == val)
+
+            # Extract unique values using the mask directly
+            valid_options = sorted(self.master_index.loc[mask, param].dropna().unique().tolist())
+
+            # Update Widget
+            target_widget['values'] = ["All"] + valid_options
+
+            # If the current selection is no longer valid, reset it to "All"
+            # Unless it was the user who just changed it (trigger_source)
+            current_val = current_selections[param]
+            if current_val != "All" and current_val not in valid_options:
+                if param != trigger_source:
+                    target_var.set("All")
+
+        # Granular reset of Replicate specific to condition
+        if trigger_source == "Condition":
+            self.var_repl.set("")
+            self.toggle_row_dropdown()
 
     def add_exclusion_rule(self):
         """
@@ -1702,6 +1734,7 @@ class NCollectorApp:
         row_val = self.var_row.get()
 
         rule = {
+            "Ligand": self.var_lig.get(),
             "Date": self.var_date.get(),
             "Cell_Line": self.var_cell.get(),
             "Condition": self.var_cond.get(),
@@ -1714,7 +1747,9 @@ class NCollectorApp:
         row_str = row_val if row_val else "All (A-H)"
 
         # Check for duplicates or empty
-        rule_str = f"Date: {rule['Date']} | Cell: {rule['Cell_Line']} | Cond: {rule['Condition']} | Rep:{rep_str} | Row:{row_str}"
+        rule_str = f"Ligand: {rule['Ligand']} | Date: {rule['Date']} | "\
+                   f"Cell: {rule['Cell_Line']} | Cond: {rule['Condition']} | "\
+                   f"Rep:{rep_str} | Row:{row_str}"
 
         self.pending_exclusions.append(rule)
         self.lb_exclusions.insert(tk.END, rule_str)
@@ -1750,6 +1785,7 @@ class NCollectorApp:
         for rule in self.pending_exclusions:
             # If entire date is excluded
             if (rule['Date'] != "All" and
+                    rule['Ligand'] == "All" and
                     rule['Cell_Line'] == "All" and
                     rule['Condition'] == "All" and
                     rule['Replicate'] == "" and
@@ -1769,6 +1805,8 @@ class NCollectorApp:
             df = self.master_index.copy()
 
             # Apply high level filters
+            if rule.get('Ligand', 'All') != "All":
+                df = df[df['Ligand'] == rule['Ligand']]
             if rule['Date'] != "All":
                 df = df[df['Date'] == rule['Date']]
             if rule['Cell_Line'] != "All":
