@@ -17,6 +17,7 @@ class PlateColMetadata:
     ligand_identity: str = "N/A"
     # Dic mapping row A-H to concentration (float)
     ligand_conc: dict[str, float] = field(default_factory=dict)
+    replicate: int = 0
 
 @dataclass
 class PrResult:
@@ -100,6 +101,12 @@ class ProcessingConfig:
     lum_threshold: int=100
     vehicle_warning_threshold: float = 0.2
     baseline_end_index: int=5
+    plate_layout: list[range] = field(default_factory=lambda: [
+        range(1, 4),  # Block 1: Cols 1-3
+        range(4, 7),  # Block 2: Cols 4-6
+        range(7, 10),  # Block 3: Cols 7-9
+        range(10, 13)  # Block 4: Cols 10-12
+    ])
 
 # --- Tool Functions --- #
 
@@ -738,16 +745,18 @@ def calculate_vehicle_means(bl_corrected_df: pd.DataFrame,
 
     return vehicle_means
 
-def calculate_replicate_means(processed_df: pd.DataFrame,
-                              plate_blocks: list[range],
-                              col_metadata: dict, # Dic created from PlateColMetadata
-                              group_by_row: bool = True):
+def calculate_means_on_meta(processed_df: pd.DataFrame,
+                            plate_blocks: list[range],
+                            col_metadata: dict,  # Dic created from PlateColMetadata
+                            grouping_mode: str = "row"):
     """
     Calculates the mean of technical replicates. As in processed_df each col is one well,
     the mean is performed of three cols within one block.
-    Header format of returned df: "Condition_Name|Cell_Line|Ligand_Name (|Row)"
-    If group_by_row is True: Returns mean per Row (A-H) per Block (Condition).
-    If group_by_row is False: Returns mean of the ENTIRE Block (all Rows A-H).
+    Header format of returned df: "Condition_Name|Cell_Line|Ligand_Name"
+    Grouping mode is either
+        "row"   Returns mean per Row (A-H) per Block (Condition)
+        "col"   Returns mean of the per Replicate (1-x)
+    or block.   Returns mean of the ENTIRE Block (all Rows A-H)
     """
     mean_data = {}
     row_labels = list("ABCDEFGH")
@@ -762,7 +771,8 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
         cell_line = meta.cell_line if meta else "Unknown"
         ligand_name = meta.ligand_identity
 
-        if group_by_row:
+        # Used to calculate means of replicates
+        if grouping_mode == "row":
             # Iterate through plate rows (A-H)
             for row in row_labels:
                 # Construct well IDs for this specific condition (e.g., A1, A2, A3)
@@ -780,11 +790,23 @@ def calculate_replicate_means(processed_df: pd.DataFrame,
                     # Construct a unique column header
                     header_key = f"{cond_name}|{cell_line}|{ligand_name}|{row}"
                     mean_data[header_key] = mean_series
-        else:
+        # Used for luminescence check
+        elif grouping_mode == "column":
+            for i, col_idx in enumerate(block_cols):
+                repl_num = i + 1
+                wells = [f"{r}{col_idx}" for r in row_labels]
+
+                valid = [w for w in wells if w in processed_df.columns]
+
+                if valid:
+                    val = processed_df[valid].apply(pd.to_numeric, errors='coerce').mean(axis=1)
+                    key = f"{cond_name}|{cell_line}|{ligand_name}|{repl_num}"
+                    mean_data[key] = val
+
+        elif grouping_mode == "block":
             all_wells_in_block = []
             for row in row_labels:
-                for c in block_cols:
-                    all_wells_in_block.append(f"{row}{c}")
+                all_wells_in_block.extend([f"{row}{c}" for c in block_cols])
 
             valid_wells = [w for w in all_wells_in_block if w in processed_df.columns]
 
@@ -801,6 +823,7 @@ def format_warning_str(warn_type: str,
                        cell_line: str,
                        value: float,
                        ligand: str = "",
+                       replicate: str = "",
                        well_id: str = ""):
     """
     Creates the warnings str to be displayed in dialogue for lum and vehicle warnings.
@@ -809,7 +832,7 @@ def format_warning_str(warn_type: str,
     if warn_type == "Lum":
         value_display = round(float(value), 1)
         prefix = "[LOW LUM]"
-        suffix = f"- value: {value_display}"
+        suffix = f"| Replicate {replicate} - value: {value_display}"
     elif warn_type == "Veh":
         value_display = round(float(value), 3)
         prefix = "[VEHICLE WARN]"
@@ -842,6 +865,7 @@ def create_warning_record(warn_type: str,
         cell_line=cell_line,
         value=value,
         ligand=ligand,
+        replicate= replicate,
         well_id=well_id
     )
 
@@ -889,12 +913,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- CONFIG LAYOUT ---
     # TODO: implement layout as part of ProcessingConfig to use for labeling experiments
-    plate_blocks = [
-        range(1, 4),  # Block 1: Cols 1-3
-        range(4, 7),  # Block 2: Cols 4-6
-        range(7, 10),  # Block 3: Cols 7-9
-        range(10, 13)  # Block 4: Cols 10-12
-    ]
+    plate_blocks = config.plate_layout
 
     # --- METADATA MAPPING ---
     # Get cell line map
@@ -926,7 +945,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
             current_cond_name = f"ID {t_id} (Missing)"
 
         # Assign to all columns in this block
-        for col in block_cols:
+        for rep_idx, col in enumerate(block_cols):
+            current_rep_id = rep_idx + 1
             c_line = cl_map.get(col, "Unknown")
 
             # Check the placeholder token ('L1' or 'L2')
@@ -945,7 +965,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                 condition_name=current_cond_name,
                 plasmids=current_plasmids,
                 ligand_identity=current_ligand_name,
-                ligand_conc=current_conc_map
+                ligand_conc=current_conc_map,
+                replicate=current_rep_id
             )
 
     # --- ASSIGNING EXCLUDED WELLS ---
@@ -963,7 +984,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # Drop time col
     lum_calc_df = lum_df.drop(columns=["Time (min)"], errors='ignore').apply(pd.to_numeric, errors='coerce')
     # Use calculate_replicate_means to assign condition keys (and calc mean per row)
-    lum_mean_df = calculate_replicate_means(lum_calc_df, plate_blocks, result.column_metadata, group_by_row=False)
+    lum_mean_df = calculate_means_on_meta(lum_calc_df, plate_blocks, result.column_metadata, grouping_mode="column")
 
     if not lum_mean_df.empty:
         # Check last 5 rows (time points)
@@ -978,34 +999,18 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
             try:
                 # "Cond_Name|Cell|Ligand"
                 parts = key.split("|")
-                if len(parts) < 3: continue # Safety check
-                cond_name, cell_line, lig_name = parts[0], parts[1], parts[2]
-
-                # Identify which wells belong to this condition (needed for GUI)
-                affected_wells = []
-                for col_idx, meta in result.column_metadata.items():
-                    # Match metadata to the key parts
-                    if (meta.condition_name == cond_name and
-                            meta.cell_line == cell_line and
-                            meta.ligand_identity == lig_name):
-
-                        # Add A-H for this column
-                        for r in "ABCDEFGH":
-                            well_id = f"{r}{col_idx}"
-                            if well_id in lum_df.columns:
-                                affected_wells.append(well_id)
-
-                # Only add warning if wells are not already fully excluded
-                if not all(w in result.excluded_wells for w in affected_wells):
-                    warning_dict = create_warning_record(
-                        warn_type="Lum",
-                        exp_date=date_str,
-                        cond_name=cond_name,
-                        cell_line=cell_line,
-                        ligand=lig_name,
-                        value=float(val)
-                    )
-
+                if len(parts) < 4: continue # Safety check
+                cond_name, cell_line, lig_name, repl_num = parts[0], parts[1], parts[2], parts[3]
+                warning_dict = create_warning_record(
+                    warn_type="Lum",
+                    exp_date=date_str,
+                    cond_name=cond_name,
+                    cell_line=cell_line,
+                    ligand=lig_name,
+                    value=float(val),
+                    replicate=str(repl_num)
+                )
+                if warning_dict not in result.low_lum_warnings:
                     result.low_lum_warnings.append(warning_dict)
 
             except Exception as e:
@@ -1077,8 +1082,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # --- VEHICLE CHECK ---
     print("[DEBUG] starting vehicle check")
     for block in plate_blocks:
-        for r, c_idx in enumerate(block):
-            repli = r+1
+        for c_idx in block:
             well_id = f"H{c_idx}"
 
             # Skip if well is already excluded or doesn't exist
@@ -1099,7 +1103,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                     cell_line=meta.cell_line,
                     ligand=meta.ligand_identity,
                     value=float(val_to_check),
-                    replicate=str(repli),  # Specific replicate
+                    replicate=str(meta.replicate),
                     row="H",  # Specific row
                     well_id=well_id
                 )
@@ -1107,10 +1111,10 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                 result.vehicle_warnings.append(warning_dict)
 
     # --- MEAN OF REPLICATES ---
-    kinetic_mean_df = calculate_replicate_means(
+    kinetic_mean_df = calculate_means_on_meta(
         kinetic_df, plate_blocks, result.column_metadata
     )
-    auc_mean_df = calculate_replicate_means(
+    auc_mean_df = calculate_means_on_meta(
         auc_df, plate_blocks, result.column_metadata
     )
 
@@ -1813,62 +1817,38 @@ class NCollectorApp:
                 df = df[df['Cell_Line'] == rule['Cell_Line']]
             if rule['Condition'] != "All":
                 df = df[df['Condition'] == rule['Condition']]
+            if rule['Replicate'] != "":
+                target_rep = int(rule['Replicate'])
+                df = df[df['Replicate'] == target_rep]
 
             if df.empty:
                 self.log(f"   [WARNING] Rule {rule} matched 0 records.")
                 continue
 
-            # Logic to handle replicates and wells
-            # Grouping to handle different plates separately
-            grouped_by_file = df.groupby('File_Name')
+            # Handle specific Replicates and Rows
+            for index, row_data in df.iterrows():
+                result_obj = row_data['Ref_Result']
+                col_idx = int(row_data['Column_Index'])
 
-            for file_name, group_df in grouped_by_file:
-                # group_df should contain one row per plate column of specified block
+                target_rows = "ABCDEFGH"
+                if rule['Row'] != "": target_rows = rule['Row']
 
-                if rule['Replicate'] == "":
-                    # If no replicate specified, take all columns of this block
-                    rows_to_process = group_df
-                else:
-                    try:
-                        repl_index = int(rule['Replicate']) - 1  # Convert "1" -> 0
-                        rows_to_process = group_df.iloc[[repl_index]]
-                    except IndexError:
-                        self.log(f"   [SKIP] File {file_name} does not have replicate {rule['Replicate']}")
-                        continue
+                for r in target_rows:
+                    well_id = f"{r}{col_idx}"
+                    if well_id not in result_obj.excluded_wells:
+                        result_obj.excluded_wells.append(well_id)
+                        count_wells += 1
+                        print(f"Excluded {well_id} in {result_obj.file_name}")
 
-                # Iterate through the specific rows to store the well ids in PrResult (result_obj)
-                for index, row_data in rows_to_process.iterrows():
-                    # Assigning to PrResult to store well ids in (PrResult.excluded_wells)
-                    # -> by assigning it to result_obj defined previously it globally changes this obj (python logic!)
-                    result_obj = row_data['Ref_Result']
-                    col_idx = int(row_data['Column_Index'])
-
-                    # Determine Rows (A-H)
-                    target_rows = "ABCDEFGH"
-                    # If row in plate is specified (not empty), use the specified row to built ID
-                    if rule['Row'] != "": target_rows = rule['Row']
-
-                    # Generate Well IDs and Append to Object
-                    for r in target_rows:
-                        well_id = f"{r}{col_idx}"
-
-                        # Modify the object directly (Objects are mutable, so this updates the global state)
-                        if well_id not in result_obj.excluded_wells:
-                            result_obj.excluded_wells.append(well_id)
-                            count_wells += 1
-
-                            print(f"Excluded {well_id} in {result_obj.file_name}")
-
-        if count_files > 0:
-            self.log(f"   [DONE] Excluded {count_files} entire files.")
-        if count_wells > 0:
-            self.log(f"   [DONE] Excluded {count_wells} specific wells.")
+        if count_files > 0: self.log(f"   [DONE] Excluded {count_files} entire files.")
+        if count_wells > 0: self.log(f"   [DONE] Excluded {count_wells} specific wells.")
 
         # Clear list after applying
         self.clear_exclusion_list()
 
         # Rerun processing to update graphs/stats
         self.run_processing_pipeline()
+        self.refresh_filter_options()
 
     def setup_plot_helper_tab(self):
         """Builds the GUI for tab 3 plot helper"""
@@ -2239,6 +2219,7 @@ class NCollectorApp:
                         "Ligand": meta.ligand_identity,
                         "Transfection_ID": meta.transfection_id,
                         "Column_Index": col_idx,
+                        "Replicate": meta.replicate,
                         "Ref_Result": result  # Store the actual object to manipulate later
                     }
                     records.append(record)
