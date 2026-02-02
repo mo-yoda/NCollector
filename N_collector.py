@@ -2530,19 +2530,25 @@ class NCollectorApp:
                 merged_df["Applied_Exclusions"] = exclusion_text_clean
 
                 # Meta Lookups (Optimization: Build dicts once per file)
-                meta_lookups = {'Transfection': {}, 'Cell_Line': {}, 'Ligand': {}, 'Ligand_Conc': {}, 'Plate_Row': {}}
+                meta_lookups = {'Transfection': {},
+                                'Cell_Line': {},
+                                'Ligand': {},
+                                'Ligand_Conc': {},
+                                'Plate_Row': {},
+                                'Replicate': {}}
 
                 for well_id in merged_df['Well_ID'].unique():
                     try:
                         c_idx = int(well_id[1:])
-                        r_char = well_id[0]
+                        row_char = well_id[0]
                         meta = res.column_metadata.get(c_idx)
                         if meta:
                             meta_lookups['Transfection'][well_id] = meta.condition_name
                             meta_lookups['Cell_Line'][well_id] = meta.cell_line
                             meta_lookups['Ligand'][well_id] = meta.ligand_identity
-                            meta_lookups['Ligand_Conc'][well_id] = meta.ligand_conc.get(r_char, 0.0)
-                            meta_lookups['Plate_Row'][well_id] = r_char
+                            meta_lookups['Ligand_Conc'][well_id] = meta.ligand_conc.get(row_char, 0.0)
+                            meta_lookups['Plate_Row'][well_id] = row_char
+                            meta_lookups['Replicate'][well_id] = meta.replicate
                     except: pass
 
                 merged_df['Transfection'] = merged_df['Well_ID'].map(meta_lookups['Transfection'])
@@ -2550,6 +2556,7 @@ class NCollectorApp:
                 merged_df['Ligand'] = merged_df['Well_ID'].map(meta_lookups['Ligand'])
                 merged_df['Ligand_Conc'] = merged_df['Well_ID'].map(meta_lookups['Ligand_Conc'])
                 merged_df['Plate_Row'] = merged_df['Well_ID'].map(meta_lookups['Plate_Row'])
+                merged_df['Replicate'] = merged_df['Well_ID'].map(meta_lookups['Replicate'])
 
         if not all_files_data:
             return pd.DataFrame()
@@ -2560,7 +2567,7 @@ class NCollectorApp:
         cols_order = [
             "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
             "Transfection", "Cell_Line", "Ligand",
-            "Ligand_Conc", "Plate_Row", "Well_ID", "Time_(min)",
+            "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
             "Raw_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
             "Raw_BRET_CRC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
         ]
