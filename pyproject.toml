@@ -1,0 +1,11 @@
+[project]
+name = "pr-analyser"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openpyxl==3.1.*",
+    "pandas==3.0.*",
+    "pyinstaller==6.18.*",
+]
