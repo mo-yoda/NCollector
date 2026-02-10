@@ -1038,7 +1038,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     bl_corrected_df = data_df / baseline_means
 
     # Handle columns where baseline_mean was 0 (to avoid infinity)
-    bl_corrected_df = bl_corrected_df.replace([float('inf'), -float('inf')], float('nan'))
+    bl_corrected_df = bl_corrected_df.replace([float('inf'), -float('inf')], float('nan')).infer_objects(copy=False)
 
     # --- AUC CALCULATION ---
     # Use slicing to sum only the kinetic phase (after baseline)
