@@ -63,7 +63,6 @@ class PrResult:
     excluded_wells: list[str] = field(default_factory=list)
 
     # --- Internal check and warnings for outlier identification ---
-    vehicle_outliers: dict[str, float] = field(default_factory=dict) # well, value
     vehicle_warnings: list[dict] = field(default_factory=list)
     low_lum_warnings: list[dict] = field(default_factory=list) # List of dict carrying all needed metadata
 
@@ -893,12 +892,10 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
         result.auc_mean_df = None
         result.vehicle_warnings = []
         result.low_lum_warnings = []
-        result.vehicle_outliers = {}
         return result
 
     # Reset for re-run
     result.vehicle_warnings = []
-    result.vehicle_outliers = {}
     result.low_lum_warnings = []
     result.low_lum_cond = {}
     result.column_metadata = {}
@@ -2377,11 +2374,6 @@ class NCollectorApp:
                 # Gather warnings
                 all_detected_warnings.extend(result.low_lum_warnings)
                 all_detected_warnings.extend(result.vehicle_warnings)
-
-                # Handle outliers stored in dic
-                if result.vehicle_outliers:
-                     vehicle_out = ", ".join([f"{well} = {val:.2f}" for well, val in result.vehicle_outliers.items()])
-                     self.log(f"   [VEHICLE WARNING] {result.file_name}: {vehicle_out}")
 
         # Built master indexing table (needed for flexible data exclusion)
         self.built_master_index()
