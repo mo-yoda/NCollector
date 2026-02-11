@@ -1263,6 +1263,7 @@ class NCollectorApp:
 
         # --- GUI Variables ---
         self.folder_path = tk.StringVar(value="No folder selected.")
+        self.var_is_checked = tk.BooleanVar(value=False)
         self.var_lum_threshold = tk.IntVar(value=100)
         self.var_lig = tk.StringVar(value="")
         self.var_date = tk.StringVar(value="All")
@@ -1361,29 +1362,52 @@ class NCollectorApp:
         # Display label for path
         self.path_label = tk.Label(self.tab_import, textvariable=self.folder_path, wraplength=700, justify="left",
                                    font=('Arial', 10))
-        self.path_label.pack(pady=10, padx=10)
+        self.path_label.pack(pady=0, padx=15, anchor="nw")
 
         # Load frame
         load_frame = tk.Frame(self.tab_import)
-        load_frame.pack(pady=15, fill="x", padx=20)
+        load_frame.pack(pady=5, fill="x", padx=10)
+        # Weight setting to place load button in the middle
+        load_frame.columnconfigure(0, weight=4)
+        load_frame.columnconfigure(1, weight=1)
 
         # Load button
         self.load_files_button = tk.Button(load_frame, text="Load Files", state="disabled",
                                            command=self.collect_files)
-        self.load_files_button.pack(padx=10)
+        # self.load_files_button.pack(padx=10)
+        self.load_files_button.grid(row=0, column=0, padx=5, pady=0, sticky="sew")
+
+        # Loading specs
+        load_settings_frame = tk.LabelFrame(load_frame, text="Loading Specs")
+        load_settings_frame.grid(row=0, column=1, sticky="ew")
+
+        # Labeling correction checkbox
+        chk_container = tk.Frame(load_settings_frame)
+        chk_container.pack(anchor="ne")
+        # Container needed as text is only supported right of chbx
+
+        lbl_correction = tk.Label(chk_container, text="Labeling correction")
+        lbl_correction.pack(side="left", padx=(0, 5))
+        labeling_chk = tk.Checkbutton(chk_container,
+                                      variable=self.var_is_checked,
+                                      command=self.on_checkbox_toggle)
+        labeling_chk.pack(side="right")
 
         # Threshold Input
-        lum_thresh_entry = tk.Entry(load_frame, textvariable=self.var_lum_threshold, width=10)
-        lum_thresh_entry.pack(side="right")
-        tk.Label(load_frame, text="Lum. Threshold:").pack(side="right", padx=(10, 5))
+        lum_thresh_entry = tk.Entry(load_settings_frame, textvariable=self.var_lum_threshold, width=10)
+        lum_thresh_entry.pack(side="right", padx=(10, 5), pady=(0,8))
+        tk.Label(load_settings_frame, text="Lum. Threshold:").pack(side="right", padx=(10, 5))
 
+        # Collected Ns frame
+        loaded_data_frame = tk.LabelFrame(self.tab_import, text="Loaded Data")
+        loaded_data_frame.pack(fill="both", expand=True,  padx=10, pady=5)
 
         # Label to display Main Plasmids
-        self.main_plasmids_label = tk.Label(self.tab_import, text="", justify="left", font=("Arial", 10, "bold"))
+        self.main_plasmids_label = tk.Label(loaded_data_frame, text="", justify="left", font=("Arial", 10, "bold"))
         self.main_plasmids_label.pack(pady=(0, 5))
 
         # Display of N summary table
-        summary_frame = tk.Frame(self.tab_import)
+        summary_frame = tk.Frame(loaded_data_frame)
         summary_frame.pack(pady=10, fill="both", expand=True, padx=20)
         tree_scroll = tk.Scrollbar(summary_frame) # Scrollbar for table
         tree_scroll.pack(side="right", fill="y")
@@ -1407,19 +1431,26 @@ class NCollectorApp:
 
         # Text of applies exclusion rules
         rules_frame = tk.LabelFrame(self.tab_import, text="Applied Exclusion Rules")
-        rules_frame.pack(fill="x", padx=20, pady=5)
+        rules_frame.pack(fill="x", padx=10, pady=5)
         self.lbl_rules_summary = tk.Label(rules_frame, text="No exclusion rules applied", justify="left", anchor="w")
         self.lbl_rules_summary.pack(fill="x", padx=5, pady=5)
 
         # --- EXPORT SECTION ---
         export_frame = tk.LabelFrame(self.tab_import, text="Export Options")
-        export_frame.pack(fill="x", padx=20, pady=10)
+        export_frame.pack(fill="x", padx=10, pady=10)
         self.btn_export_master = tk.Button(export_frame, text="Export Master CSV", state="disabled",
                                            command=self.export_master_csv)
         self.btn_export_master.pack(side="left", fill="x", expand=True, padx=5, pady=10)
         self.btn_export_excel = tk.Button(export_frame, text="Export Excel Report (Default)", state="disabled",
                                           command=self.export_excel_report)
         self.btn_export_excel.pack(side="left", fill="x", expand=True, padx=5, pady=10)
+
+    def on_checkbox_toggle(self):
+        # TODO: implement labeling correction, store in ProcessingConfig
+        if self.var_is_checked.get():
+            self.log("[PROCESSING CONFIG]   Labeling correction is enabled")
+        else:
+            self.log("[PROCESSING CONFIG]   Labeling correction is disabled")
 
     def update_summary_table(self):
         """Fills the summary table with N counts and dates per condition, per ligand"""
