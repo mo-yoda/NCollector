@@ -940,7 +940,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
             current_plasmids = protocol.transfection_conditions[t_id]
             current_cond_name = " + ".join(sorted(current_plasmids))
         elif t_id == "N/A":
-            current_cond_name = "Empty/NoID"
+            current_cond_name = "Empty"
         else:
             current_cond_name = f"ID {t_id} (Missing)"
 
@@ -1001,6 +1001,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                 parts = key.split("|")
                 if len(parts) < 4: continue # Safety check
                 cond_name, cell_line, lig_name, repl_num = parts[0], parts[1], parts[2], parts[3]
+                # Case for empty cols
+                if cond_name == "Empty": continue
                 warning_dict = create_warning_record(
                     warn_type="Lum",
                     exp_date=date_str,
@@ -1095,6 +1097,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
             if deviation > acc_vehicle_range:
                 meta = result.column_metadata.get(c_idx)
+                # Case for empty cols
+                if meta.condition_name == "Empty": continue
 
                 warning_dict = create_warning_record(
                     warn_type="Veh",
@@ -2364,6 +2368,11 @@ class NCollectorApp:
                 # Process each result file within one folder (belonging to one protocol)
                 # Also assigns conditions to data
                 result = process_bret_measurement(result, folder.protocol, current_config)
+
+                empty_cols = [str(idx) for idx, meta in result.column_metadata.items() if
+                              meta.condition_name == "Empty"]
+                if empty_cols:
+                    self.log(f"   [EMPTY WELLS] Empty columns {', '.join(empty_cols)} detected in {result.file_name}")
 
                 # Gather warnings
                 all_detected_warnings.extend(result.low_lum_warnings)
