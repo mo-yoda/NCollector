@@ -97,9 +97,11 @@ class MeasurementFolder:
 @dataclass
 class ProcessingConfig:
     """All user-defined processing settings"""
+    labeling_correction: bool = field(default=False)
     lum_threshold: int=100
     vehicle_warning_threshold: float = 0.2
     baseline_end_index: int=5
+    # Default to triplicates
     plate_layout: list[range] = field(default_factory=lambda: [
         range(1, 4),  # Block 1: Cols 1-3
         range(4, 7),  # Block 2: Cols 4-6
@@ -901,16 +903,14 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     result.column_metadata = {}
 
     # --- CONFIG PROCESSING ---
+    is_labeling = config.labeling_correction
     acc_vehicle_range = config.vehicle_warning_threshold
     baseline_end_idx = config.baseline_end_index
     lum_threshold = config.lum_threshold
+    plate_blocks = config.plate_layout
     date_str = result.measurement_date.strftime('%d.%m.%y')
 
     print(f"\n[DEBUG] === Processing File: {result.file_name} ===")
-
-    # --- CONFIG LAYOUT ---
-    # TODO: implement layout as part of ProcessingConfig to use for labeling experiments
-    plate_blocks = config.plate_layout
 
     # --- METADATA MAPPING ---
     # Get cell line map
@@ -1260,10 +1260,11 @@ class NCollectorApp:
         self.pending_exclusions = []
         self.master_df = pd.DataFrame  # Used for master csv file storage (by generation or import)
         self.ignored_warnings = set()
+        self.current_config = None
 
         # --- GUI Variables ---
         self.folder_path = tk.StringVar(value="No folder selected.")
-        self.var_is_checked = tk.BooleanVar(value=False)
+        self.var_labeling_is_checked = tk.BooleanVar(value=False)
         self.var_lum_threshold = tk.IntVar(value=100)
         self.var_lig = tk.StringVar(value="")
         self.var_date = tk.StringVar(value="All")
@@ -1389,7 +1390,7 @@ class NCollectorApp:
         lbl_correction = tk.Label(chk_container, text="Labeling correction")
         lbl_correction.pack(side="left", padx=(0, 5))
         labeling_chk = tk.Checkbutton(chk_container,
-                                      variable=self.var_is_checked,
+                                      variable=self.var_labeling_is_checked,
                                       command=self.on_checkbox_toggle)
         labeling_chk.pack(side="right")
 
@@ -1447,7 +1448,7 @@ class NCollectorApp:
 
     def on_checkbox_toggle(self):
         # TODO: implement labeling correction, store in ProcessingConfig
-        if self.var_is_checked.get():
+        if self.var_labeling_is_checked.get():
             self.log("[PROCESSING CONFIG]   Labeling correction is enabled")
         else:
             self.log("[PROCESSING CONFIG]   Labeling correction is disabled")
@@ -2282,6 +2283,36 @@ class NCollectorApp:
             print("No folders to analyze.")
             return
 
+        # Create config
+        try:
+            is_labeling = self.var_labeling_is_checked.get()
+            lum_threshold = self.var_lum_threshold.get()
+        except tk.TclError:
+            is_labeling = False
+            lum_threshold = 100
+
+        if is_labeling:
+            # Quadruplicates
+            selected_layout = [
+                range(1, 5),  # Block 1: Cols 1-4
+                range(5, 9),  # Block 2: Cols 5-8
+                range(9, 13)   # Block 3: Cols 9-12
+            ]
+        else:
+            # Standard triplicate Layout
+            selected_layout = [
+                range(1, 4),  # Block 1: Cols 1-3
+                range(4, 7),  # Block 2: Cols 4-6
+                range(7, 10),  # Block 3: Cols 7-9
+                range(10, 13)  # Block 4: Cols 10-12
+            ]
+
+        self.current_config = ProcessingConfig(
+            lum_threshold=lum_threshold,
+            labeling_correction=is_labeling,
+            plate_layout=selected_layout
+        )
+
         # Reset exclusion state
         self.rule_history_text = ""
         self.lbl_rules_summary.config(text="")
@@ -2372,15 +2403,9 @@ class NCollectorApp:
         """
         self.log("\n--- Starting Processing Pipeline ---")
 
-        # Get config from GUI state
-        try:
-            lum_threshold = self.var_lum_threshold.get()
-        except tk.TclError:
-            lum_threshold = 100
-
-        current_config = ProcessingConfig(
-            lum_threshold=lum_threshold
-        )
+        # Get current configuration
+        current_config = self.current_config
+        self.log("[PROCESSING CONFIG]   Labeling correction is applied")
 
         # Check for plasmids transfected in all conditions (main plasmids) and filter if needed
         selected_exp_name = self.handle_main_plasmids_selection()
