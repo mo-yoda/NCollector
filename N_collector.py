@@ -17,7 +17,7 @@ class PlateColMetadata:
     ligand_identity: str = "N/A"
     # Dic mapping row A-H to concentration (float)
     ligand_conc: dict[str, float] = field(default_factory=dict)
-    replicate: int = 0
+    replicate: str = ""
 
 @dataclass
 class PrResult:
@@ -235,8 +235,11 @@ def process_transfection_scheme(df: pd.DataFrame):
         return [], {}
 
     # Separate metadata cols from transfection cols
-    metadata_cols = {'DNA', 'DB#', 'Conc (ng/uL)', 'vol per transfection', 'vol master'}
-    transfection_cols = [c for c in df.columns if c not in metadata_cols]
+    metadata_cols = {'dna', 'db#', 'db#/ flash', 'conc (ng/ul)', 'vol per transfection', 'vol master'}
+    transfection_cols = [
+        c for c in df.columns
+        if str(c).lower() not in metadata_cols
+    ]
 
     if not transfection_cols:
         return [], {}
@@ -943,7 +946,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
         # Assign to all columns in this block
         for rep_idx, col in enumerate(block_cols):
-            current_rep_id = rep_idx + 1
+            current_rep_id = str(rep_idx + 1)
             c_line = cl_map.get(col, "Unknown")
 
             # Check the placeholder token ('L1' or 'L2')
@@ -955,6 +958,11 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
             else:
                 current_ligand_name = str(protocol.ligand)
                 current_conc_map = conc_map_1
+
+            # In case of labeling correction, use last col in block as mock labeling control
+            if is_labeling and rep_idx == (len(block_cols) - 1):
+                current_rep_id = "labeling control"
+                # current_conc_map = {r: 0.0 for r in "ABCDEFGH"}
 
             result.column_metadata[col] = PlateColMetadata(
                 cell_line=c_line,
@@ -1031,6 +1039,51 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- RAW BRET LAST MEASUREMENT POINTS ---
     lp_raw_bret_df = raw_df.iloc[-3:].mean().to_frame().T
+
+    # --- OPTIONAL LABELING CORRECTION ---
+    wells_to_drop = []
+    if is_labeling:
+        print("   [INFO] Applying Labeling Correction (Background Subtraction)")
+        for block in plate_blocks:
+            control_col = [
+                c for c in block
+                if result.column_metadata.get(c) and result.column_metadata[c].replicate == "labeling control"
+            ]
+
+            # Use entire col
+            control_wells = [f"{r}{control_col[0]}" for r in "ABCDEFGH"]
+
+            valid_controls = [w for w in control_wells
+                              if w in data_df.columns and w not in result.excluded_wells]
+
+            if not valid_controls:
+                print(
+                    f"      [WARNING] No valid control wells found for labeling control in block {block}. Skipping.")
+                continue
+
+            # axis=1 computes mean across the selected control wells for each row (time point)
+            mock_labeling = data_df[valid_controls].mean(axis=1)
+
+            # construct a list of all wells in the block (targets + controls)
+            block_wells = []
+            for col_idx in block:
+                block_wells.extend([f"{r}{col_idx}" for r in "ABCDEFGH"])
+
+            # Only subtract from wells that exist in the dataframe
+            valid_targets = [w for w in block_wells if w in data_df.columns]
+
+            # Perform subtraction in-place
+            # .sub(bg_vector, axis=0) ensures alignment on the time index
+            data_df[valid_targets] = data_df[valid_targets].sub(mock_labeling, axis=0)
+            # TODO: save the corrected data_df as table to store in results class
+
+            # Collect labeling control wells to drop after using for correction
+            wells_to_drop.extend(control_wells)
+
+    # Remove labeling control columns from the dataframe
+    # Ensures they are ignored by Baseline Correction, Vehicle Norm, and AUC
+    if wells_to_drop:
+        data_df.drop(columns=wells_to_drop, inplace=True, errors='ignore')
 
     # --- BASELINE CORRECTION ---
     baseline_means = data_df.iloc[0:baseline_end_idx].mean()
@@ -1522,9 +1575,8 @@ class NCollectorApp:
         granular_frame.grid(row=1, column=0, columnspan=6, pady=5, sticky="w")
 
         tk.Label(granular_frame, text="Technical Replicate:").pack(side="left", padx=5)
-        self.cb_rep = ttk.Combobox(granular_frame, textvariable=self.var_repl, state="readonly", width=5)
+        self.cb_rep = ttk.Combobox(granular_frame, textvariable=self.var_repl, state="readonly", width=12)
         self.cb_rep.pack(side="left", padx=5)
-        self.cb_rep['values'] = ["", "1", "2", "3"]
         self.cb_rep.bind("<<ComboboxSelected>>", self.toggle_row_dropdown)
 
         # Row dropdown (Initially disabled/hidden until Replicate is picked)
@@ -1688,6 +1740,7 @@ class NCollectorApp:
         else:
             self.var_repl.set("")
             self.cb_row.config(state="disabled")
+        self.update_dropdown_options("Replicate")
 
     def refresh_filter_options(self):
         """Called during built master index. Updates dropdown options of date, cell line and condition."""
@@ -1727,7 +1780,8 @@ class NCollectorApp:
             "Ligand": (self.var_lig, self.cb_lig),
             "Date": (self.var_date, self.cb_date),
             "Cell_Line": (self.var_cell, self.cb_cell),
-            "Condition": (self.var_cond, self.cb_cond)
+            "Condition": (self.var_cond, self.cb_cond),
+            "Replicate": (self.var_repl, self.cb_rep)
         }
 
         # Get current selection
@@ -1742,7 +1796,7 @@ class NCollectorApp:
             for curr_param, val in current_selections.items():
                 # Skip the changed dropdown (curr_param) so it doesn't filter itself
                 if curr_param != param and val != "All" and val != "":
-                    mask &= (self.master_index[curr_param] == val)
+                    mask &= (self.master_index[curr_param].astype(str) == str(val))
 
             # Extract unique values using the mask directly
             valid_options = sorted(self.master_index.loc[mask, param].dropna().unique().tolist())
@@ -1825,7 +1879,7 @@ class NCollectorApp:
                     rule['Ligand'] == "All" and
                     rule['Cell_Line'] == "All" and
                     rule['Condition'] == "All" and
-                    rule['Replicate'] == "" and
+                    rule['Replicate'] == "All" and
                     rule['Row'] == ""):
 
                 # Find matching files and exclude them entirely
@@ -1851,7 +1905,7 @@ class NCollectorApp:
             if rule['Condition'] != "All":
                 df = df[df['Condition'] == rule['Condition']]
             if rule['Replicate'] != "":
-                target_rep = int(rule['Replicate'])
+                target_rep = str(rule['Replicate'])
                 df = df[df['Replicate'] == target_rep]
 
             if df.empty:
@@ -2405,7 +2459,8 @@ class NCollectorApp:
 
         # Get current configuration
         current_config = self.current_config
-        self.log("[PROCESSING CONFIG]   Labeling correction is applied")
+        if current_config.labeling_correction:
+            self.log("[PROCESSING CONFIG]   Labeling correction is applied")
 
         # Check for plasmids transfected in all conditions (main plasmids) and filter if needed
         selected_exp_name = self.handle_main_plasmids_selection()
@@ -2461,6 +2516,7 @@ class NCollectorApp:
         Structure: 1 row per well per timepoint.
         Means are repeated for respective technical replicates as AUCs for all timepoints.
         """
+        # TODO: add labeling-corrected state - if is_labeling = False use nan
         if not self.experiment:
             return None
         self.log("\n--- Building Master CSV ---")
