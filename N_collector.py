@@ -1250,7 +1250,7 @@ class NCollectorApp:
         self.master_index = pd.DataFrame()  # Index for populating tab 2
         self.rule_history_text = ""
         self.pending_exclusions = []
-        self.master_df = pd.DataFrame  # Used for master csv file storage (by generation or import)
+        self.master_df = pd.DataFrame()  # Used for master csv file storage (by generation or import)
         self.ignored_warnings = set()
         self.current_config = None
 
@@ -1995,7 +1995,7 @@ class NCollectorApp:
             pass
         else:
             #  Fresh Analysis mode
-            experiment = self.master_df['Main_Plasmids'].unique()[0]
+            experiment = self.master_df['Main_Plasmids'].unique()[0] if 'Main_Plasmids' in self.master_df.columns else "Experiment"
             self.lbl_data_source.config(text=f"Internal: {experiment}")
 
         self.btn_run_plot_helper.config(state="normal")
@@ -2004,9 +2004,8 @@ class NCollectorApp:
         valid_options = []
 
         for display_name, internal_col_name in self.data_type_map.items():
-            # 1. Check if the column exists in the dataframe
             if internal_col_name in self.master_df.columns:
-                # 2. Check if the column has at least one non-NaN value
+                # Check if the column has at least one non-NaN value
                 # .notna() creates a boolean mask, .any() returns True if any True exists
                 if self.master_df[internal_col_name].notna().any():
                     valid_options.append(display_name)
