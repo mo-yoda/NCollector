@@ -1194,28 +1194,39 @@ def generate_header_key(df, group_by=None):
         df["Header_Key"] = "Data"
     return df
 
-def create_clean_pivot(df, index_col, value_col, disregard_well_id, drop_labeling_control_col):
+def create_clean_pivot(df_input, index_col, value_col, disregard_well_id, drop_labeling_control_col):
     """
     Pivots the table. If Mean Data: One column per File.
     If Raw Data: One column per Well (Technical Replicates side-by-side)
     """
     if drop_labeling_control_col:
-        df = df[df["Replicate"] != "labeling control"]
+        df = df_input[df_input["Replicate"] != "labeling control"].copy()
+    else:
+        df = df_input.copy()
 
     is_kinetic = df["Time_(min)"].nunique() > 1
 
+    # Zero-padding for correct sorting of two-digit numbers
+    well_parts = df['Well_ID'].astype(str).str.extract(r'([A-Za-z])(\d+)', expand=True)
+
+    if not well_parts.empty and well_parts.shape[1] == 2:
+        df['well_sort_key'] = well_parts[0] + well_parts[1].str.zfill(2)
+    else:
+        # Fallback if regex fails
+        df['well_sort_key'] = df['Well_ID']
+
     # Assign a replicate number (1, 2, 3...) per Header_Key
-    df = df.copy()
     if disregard_well_id:
-        df['Rep_Num'] = df.groupby('Header_Key')['File_Name'].rank(method='dense').astype(int)
+        # For mean data sort only by file name
+        df['sort_key'] = df['File_Name'].astype(str)
     else:
         # Consider File_Name and Well ID or Plate Col for technical replicates
         if is_kinetic:
-            df['sort_key'] = df['File_Name'].astype(str) + "_" + df['Well_ID'].astype(str)
+            df['sort_key'] = df['File_Name'].astype(str) + "_" + df['well_sort_key'].astype(str)
         else:
             # Only get Col number instead of complete well id
-            df['sort_key'] = df['File_Name'].astype(str) + "_" + df['Well_ID'].astype(str).str[1:].str.zfill(2)
-        df['Rep_Num'] = df.groupby('Header_Key')['sort_key'].rank(method='dense').astype(int)
+            df['sort_key'] = df['File_Name'].astype(str) + "_" + df['well_sort_key'].astype(str).str[1:].str.zfill(2)
+    df['Rep_Num'] = df.groupby('Header_Key')['sort_key'].rank(method='dense').astype(int)
 
     # Pivot
     pivot = df.pivot_table(
