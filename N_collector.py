@@ -2531,15 +2531,17 @@ class NCollectorApp:
                 # Ignore time col in raw bret df
                 raw_clean = res.raw_bret_ratio_cleaned.drop(columns=["Time (min)"], errors='ignore')
 
+                df_og = melt_df(res.raw_bret_ratio_df, "OG_BRET_ratio", t_vec)
                 df_raw = melt_df(raw_clean, "Raw_BRET_kinetic", t_vec)
                 df_lab = melt_df(res.labeling_corr_kinetic, "Lab_BRET_kinetic", t_vec)
                 df_bl = melt_df(res.bl_corr_kinetic, "Bl_Corrected_BRET", t_vec)
                 df_norm = melt_df(res.kinetic_df, "Veh_Norm_Kinetic", t_vec)
 
                 # Merge on [Time_(min), Well_ID]
-                merge_on = [df_raw.columns[0], "Well_ID"]
+                merge_on = [df_og.columns[0], "Well_ID"]
 
-                merged_df = df_raw.merge(df_lab, on=merge_on, how="left") \
+                merged_df = df_og.merge(df_raw, on=merge_on, how="left") \
+                    .merge(df_lab, on=merge_on, how="left") \
                     .merge(df_bl, on=merge_on, how="left") \
                     .merge(df_norm, on=merge_on, how="left")
 
