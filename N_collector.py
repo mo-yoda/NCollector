@@ -37,6 +37,8 @@ class PrResult:
     # --- Processed BRET data ---
     # Time column
     time_vector: list[float] = field(default_factory=list)
+    # Labeling corrected kinetic data
+    labeling_corr_kinetic: pd.DataFrame | None = None
     # Baseline corrected kinetic data
     bl_corr_kinetic: pd.DataFrame | None = None
     # Baseline- and vehicle-normalised kinetic data (technical replicates)
@@ -45,6 +47,8 @@ class PrResult:
     kinetic_mean_df: pd.DataFrame | None = None
     # Raw BRET from last 3x datapoints
     raw_bret_points_df: pd.DataFrame | None = None
+    # Pre-baseline and vehicle norm AUC but after labeling correction
+    labeling_corr_auc_df: pd.DataFrame | None = None
     # Pre-vehicle norm AUC
     bl_corr_auc_df: pd.DataFrame | None = None
     # Baseline- and vehicle-normalised AUC data (technical replicates)
@@ -1041,6 +1045,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     lp_raw_bret_df = raw_df.iloc[-3:].mean().to_frame().T
 
     # --- OPTIONAL LABELING CORRECTION ---
+    labeling_corr_df = None
     wells_to_drop = []
     if is_labeling:
         print("   [INFO] Applying Labeling Correction (Background Subtraction)")
@@ -1075,7 +1080,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
             # Perform subtraction in-place
             # .sub(bg_vector, axis=0) ensures alignment on the time index
             data_df[valid_targets] = data_df[valid_targets].sub(mock_labeling, axis=0)
-            # TODO: save the corrected data_df as table to store in results class
+            labeling_corr_df = data_df.copy()
 
             # Collect labeling control wells to drop after using for correction
             wells_to_drop.extend(control_wells)
@@ -1094,6 +1099,10 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- AUC CALCULATION ---
     # Use slicing to sum only the kinetic phase (after baseline)
+    if labeling_corr_df is not None:
+        labeling_corr_auc_df = labeling_corr_df.iloc[baseline_end_idx:].sum().to_frame().T
+    else:
+        labeling_corr_auc_df = None
     bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum().to_frame().T
 
     # --- VEHICLE CORRECTION ---
@@ -1178,11 +1187,13 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- Kinetic data
     result.time_vector = time_vec
+    result.labeling_corr_kinetic = labeling_corr_df
     result.bl_corr_kinetic = bl_corrected_df
     result.kinetic_df = kinetic_df
     result.kinetic_mean_df = kinetic_mean_df
 
     # --- AUC data (tidy for CRC)
+    result.labeling_corr_auc_df = labeling_corr_auc_df
     result.bl_corr_auc_df = bl_corr_auc_df
     result.bl_corr_auc_tidy_df = convert_to_plate_layout(bl_corr_auc_df)
     result.auc_df = auc_df
@@ -1500,11 +1511,10 @@ class NCollectorApp:
         self.btn_export_excel.pack(side="left", fill="x", expand=True, padx=5, pady=10)
 
     def on_checkbox_toggle(self):
-        # TODO: implement labeling correction, store in ProcessingConfig
         if self.var_labeling_is_checked.get():
-            self.log("[PROCESSING CONFIG]   Labeling correction is enabled")
+            self.log("[LABELING CORRECTION ENABLED]   Press load files to apply.")
         else:
-            self.log("[PROCESSING CONFIG]   Labeling correction is disabled")
+            self.log("[LABELING CORRECTION DISABLED]")
 
     def update_summary_table(self):
         """Fills the summary table with N counts and dates per condition, per ligand"""
