@@ -1010,6 +1010,9 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
             # Collect labeling control wells to drop after using for correction
             wells_to_drop.extend(control_wells)
+    else:
+        # Nan-filled df for non-labeling data
+        labeling_corr_df = pd.DataFrame(float('nan'), index=data_df.index, columns=data_df.columns)
 
     # Remove labeling control columns from the dataframe
     # Ensures they are ignored by Baseline Correction, Vehicle Norm, and AUC
@@ -1025,10 +1028,11 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- AUC CALCULATION ---
     # Use slicing to sum only the kinetic phase (after baseline)
-    if labeling_corr_df is not None:
-        labeling_corr_auc_df = labeling_corr_df.iloc[baseline_end_idx:].sum().to_frame().T
+    if labeling_corr_df.isna().all().all():
+        labeling_corr_auc_df = pd.DataFrame(float('nan'), index=data_df.index, columns=data_df.columns)
     else:
-        labeling_corr_auc_df = None
+        labeling_corr_auc_df = labeling_corr_df.iloc[baseline_end_idx:].sum().to_frame().T
+
     bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum().to_frame().T
 
     # --- VEHICLE CORRECTION ---
@@ -1935,9 +1939,9 @@ class NCollectorApp:
         self.var_data_type = tk.StringVar(value=default_key)
         self.var_data_type.trace_add("write", self.toggle_kinetic_options) # Trace kinetic selection
 
-        combo_type = ttk.Combobox(type_frame, textvariable=self.var_data_type, state="readonly", width=57)
-        combo_type['values'] = list(self.data_type_map.keys())
-        combo_type.grid(row=0, column=1, padx=5, pady=5)
+        self.combo_type = ttk.Combobox(type_frame, textvariable=self.var_data_type, state="readonly", width=57)
+        self.combo_type['values'] = list(self.data_type_map.keys())
+        self.combo_type.grid(row=0, column=1, padx=5, pady=5)
 
         # --- Layout Selection ---
         # Groupy py
@@ -1995,6 +1999,19 @@ class NCollectorApp:
             self.lbl_data_source.config(text=f"Internal: {experiment}")
 
         self.btn_run_plot_helper.config(state="normal")
+
+        # Filter Data type options from master_df
+        valid_options = []
+
+        for display_name, internal_col_name in self.data_type_map.items():
+            # 1. Check if the column exists in the dataframe
+            if internal_col_name in self.master_df.columns:
+                # 2. Check if the column has at least one non-NaN value
+                # .notna() creates a boolean mask, .any() returns True if any True exists
+                if self.master_df[internal_col_name].notna().any():
+                    valid_options.append(display_name)
+        self.combo_type['values'] = valid_options
+
         # Enable kinetic layout to populate list box, afterwards disable
         self.lb_kin_layout.config(state="normal")
 
