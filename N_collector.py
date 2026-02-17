@@ -56,12 +56,6 @@ class PrResult:
     # Mean of baseline- and vehicle-normalised AUC data
     auc_mean_df:pd.DataFrame | None = None
 
-    # --- Export tidy CRC data ---
-    raw_bret_points_tidy_df: pd.DataFrame | None = None
-    bl_corr_auc_tidy_df: pd.DataFrame | None = None
-    auc_tidy_df: pd.DataFrame | None = None
-    auc_mean_tidy_df: pd.DataFrame | None = None
-
     # --- Optional exclusion by user interaction  ---
     is_excluded: bool = False
     excluded_wells: list[str] = field(default_factory=list)
@@ -622,73 +616,6 @@ def get_transfection_map(layout_type: str, t_ids: list[str], block_count: int = 
     # Default fallback
     return (t_ids + ["N/A"] * block_count)[:block_count]
 
-def convert_to_plate_layout(data_input) -> pd.DataFrame:
-    """
-    Converts a 1-row df OR a dictionary of {Well_ID: Value} as in AUC data
-    into a pandas df representing a 96-well plate (Rows A-H, Cols 1-12).
-    """
-    # Handle input types:
-    # If df (like auc_raw_df), convert 1st row to dict
-    if isinstance(data_input, pd.DataFrame):
-        if data_input.empty:
-            return pd.DataFrame()
-        data_dict = data_input.iloc[0].to_dict()
-    # If a series, convert to dict
-    elif isinstance(data_input, pd.Series):
-        data_dict = data_input.to_dict()
-    else:
-        data_dict = data_input
-
-    if not data_dict: return pd.DataFrame()
-
-    # Check format by checking the first key (well ids as row headers or also conditions)
-    first_key = str(list(data_dict.keys())[0])
-
-    rows = list("ABCDEFGH")
-
-    # AUC mean data (header cond|cell|row)
-    if "|" in first_key:
-        # create {row_char: {col_Header: value}}
-        reshaped_data = {r: {} for r in rows}
-        for key, value in data_dict.items():
-            # "cond|cell|A" -> ["cond|cell", "A"]
-            parts = str(key).rsplit('|', 1)
-
-            if len(parts) == 2:
-                col_header = parts[0]  # The name without the row letter
-                row_char = parts[1]  # The row letter (A, B, etc.)
-
-                if row_char in rows:
-                    reshaped_data[row_char][col_header] = value
-
-        # Create df (index=A-H, cols=conditions)
-        df_mean = pd.DataFrame.from_dict(reshaped_data, orient='index')
-        return df_mean
-
-    # AUC data in other processing steps (header A1, B2...) ---
-    else:
-        cols = list(range(1, 13))
-
-        # Initialize empty DataFrame with NaN
-        plate_df = pd.DataFrame(None, index=rows, columns=cols)
-
-        for well_id, value in data_dict.items():
-            # Skip if header is not a string (safety)
-            if not isinstance(well_id, str) or len(well_id) < 2:
-                continue
-
-            r = well_id[0].upper()
-            # Try-except block handles headers that aren't well IDs (like "Time")
-            try:
-                c = int(well_id[1:])
-                # Assign value if coordinates are valid
-                if r in rows and c in cols:
-                    plate_df.at[r, c] = value
-            except ValueError:
-                continue
-
-        return plate_df
-
 def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: int):
     """
     Calculates a relative time vector. Uses the measuring interval of the kinetic reading to
@@ -1183,7 +1110,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- SAVE RESULTS ---
     result.raw_bret_points_df = lp_raw_bret_df
-    result.raw_bret_points_tidy_df = convert_to_plate_layout(lp_raw_bret_df)
 
     # --- Kinetic data
     result.time_vector = time_vec
@@ -1195,11 +1121,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # --- AUC data (tidy for CRC)
     result.labeling_corr_auc_df = labeling_corr_auc_df
     result.bl_corr_auc_df = bl_corr_auc_df
-    result.bl_corr_auc_tidy_df = convert_to_plate_layout(bl_corr_auc_df)
     result.auc_df = auc_df
-    result.auc_tidy_df = convert_to_plate_layout(result.auc_df)
     result.auc_mean_df = auc_mean_df
-    result.auc_mean_tidy_df = convert_to_plate_layout(result.auc_mean_df)
 
     return result
 
