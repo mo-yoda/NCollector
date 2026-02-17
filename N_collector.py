@@ -1496,8 +1496,8 @@ class NCollectorApp:
         self.var_date = tk.StringVar(value="All")
         self.var_cell = tk.StringVar(value="All")
         self.var_cond = tk.StringVar(value="All")
-        self.var_repl = tk.StringVar(value="")
-        self.var_row = tk.StringVar(value="")
+        self.var_repl = tk.StringVar(value="All")
+        self.var_row = tk.StringVar(value="All")
         # List to store rules
         self.pending_exclusions = []
 
@@ -1540,7 +1540,7 @@ class NCollectorApp:
 
         self.cb_row = ttk.Combobox(granular_frame, textvariable=self.var_row, state="disabled", width=5)
         self.cb_row.pack(side="left", padx=5)
-        self.cb_row['values'] = ["", "A", "B", "C", "D", "E", "F", "G", "H"]
+        self.cb_row['values'] = ["All", "A", "B", "C", "D", "E", "F", "G", "H"]
 
         # Buttons
         btn_frame = tk.Frame(filter_frame)
@@ -1706,7 +1706,7 @@ class NCollectorApp:
         self.var_date.set("All")
         self.var_cell.set("All")
         self.var_cond.set("All")
-        self.var_repl.set("")
+        self.var_repl.set("All")
         self.cb_row.config(state="disabled")
 
         # If only one ligand exists, default to it and disable the box.
@@ -1768,7 +1768,7 @@ class NCollectorApp:
 
         # Granular reset of Replicate specific to condition
         if trigger_source == "Condition":
-            self.var_repl.set("")
+            self.var_repl.set("All")
             self.toggle_row_dropdown()
 
     def add_exclusion_rule(self):
@@ -1776,26 +1776,19 @@ class NCollectorApp:
         Adds the current dropdown state to the pending list.
         Handles empty strings for Replicate/Col and Row.
         """
-        rep_val = self.var_repl.get()
-        row_val = self.var_row.get()
-
         rule = {
             "Ligand": self.var_lig.get(),
             "Date": self.var_date.get(),
             "Cell_Line": self.var_cell.get(),
             "Condition": self.var_cond.get(),
-            "Replicate": rep_val,
-            "Row": row_val
+            "Replicate": self.var_repl.get(),
+            "Row": self.var_row.get()
         }
-
-        # Create display string
-        rep_str = rep_val if rep_val else "All (1-3)"
-        row_str = row_val if row_val else "All (A-H)"
 
         # Check for duplicates or empty
         rule_str = f"Ligand: {rule['Ligand']} | Date: {rule['Date']} | "\
                    f"Cell: {rule['Cell_Line']} | Cond: {rule['Condition']} | "\
-                   f"Rep:{rep_str} | Row:{row_str}"
+                   f"Rep:{rule['Replicate']} | Row:{rule['Row']}"
 
         self.pending_exclusions.append(rule)
         self.lb_exclusions.insert(tk.END, rule_str)
@@ -1835,7 +1828,7 @@ class NCollectorApp:
                     rule['Cell_Line'] == "All" and
                     rule['Condition'] == "All" and
                     rule['Replicate'] == "All" and
-                    rule['Row'] == ""):
+                    rule['Row'] == "All"):
 
                 # Find matching files and exclude them entirely
                 for folder in self.experiment:
@@ -1859,7 +1852,7 @@ class NCollectorApp:
                 df = df[df['Cell_Line'] == rule['Cell_Line']]
             if rule['Condition'] != "All":
                 df = df[df['Condition'] == rule['Condition']]
-            if rule['Replicate'] != "":
+            if rule['Replicate'] != "All":
                 target_rep = str(rule['Replicate'])
                 df = df[df['Replicate'] == target_rep]
 
@@ -1873,7 +1866,7 @@ class NCollectorApp:
                 col_idx = int(row_data['Column_Index'])
 
                 target_rows = "ABCDEFGH"
-                if rule['Row'] != "": target_rows = rule['Row']
+                if rule['Row'] != "All": target_rows = rule['Row']
 
                 for r in target_rows:
                     well_id = f"{r}{col_idx}"
