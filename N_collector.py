@@ -2531,7 +2531,8 @@ class NCollectorApp:
                 # Ignore time col in raw bret df
                 raw_clean = res.raw_bret_ratio_cleaned.drop(columns=["Time (min)"], errors='ignore')
 
-                df_og = melt_df(res.raw_bret_ratio_df, "OG_BRET_ratio", t_vec)
+                df_og = melt_df(res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore'),
+                                "OG_BRET_ratio", t_vec)
                 df_raw = melt_df(raw_clean, "Raw_BRET_kinetic", t_vec)
                 df_lab = melt_df(res.labeling_corr_kinetic, "Lab_BRET_kinetic", t_vec)
                 df_bl = melt_df(res.bl_corr_kinetic, "Bl_Corrected_BRET", t_vec)
