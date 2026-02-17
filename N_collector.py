@@ -37,6 +37,8 @@ class PrResult:
     # --- Processed BRET data ---
     # Time column
     time_vector: list[float] = field(default_factory=list)
+    # Raw BRET ratio after with applied exclusions
+    raw_bret_ratio_cleaned: pd.DataFrame | None = None
     # Labeling corrected kinetic data
     labeling_corr_kinetic: pd.DataFrame | None = None
     # Baseline corrected kinetic data
@@ -1112,6 +1114,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     )
 
     # --- SAVE RESULTS ---
+    # Raw BRET ratio with applied exclusions
+    result.raw_bret_ratio_cleaned = raw_df
 
     # --- Kinetic data
     result.time_vector = time_vec
@@ -1822,9 +1826,12 @@ class NCollectorApp:
         count_files = 0
 
         for rule in self.pending_exclusions:
+            # Check whether all ligands or the only one possible is selected
+            ligand_is_all = (rule['Ligand'] == "All" or str(self.cb_lig['state']) == 'disabled')
+
             # If entire date is excluded
             if (rule['Date'] != "All" and
-                    rule['Ligand'] == "All" and
+                    ligand_is_all and
                     rule['Cell_Line'] == "All" and
                     rule['Condition'] == "All" and
                     rule['Replicate'] == "All" and
@@ -2476,7 +2483,6 @@ class NCollectorApp:
         Structure: 1 row per well per timepoint.
         Means are repeated for respective technical replicates as AUCs for all timepoints.
         """
-        # TODO: add labeling-corrected state - if is_labeling = False use nan
         if not self.experiment:
             return None
         self.log("\n--- Building Master CSV ---")
@@ -2491,8 +2497,6 @@ class NCollectorApp:
 
             for res in folder.results:
                 if res.is_excluded: continue
-                if res.kinetic_df is None or res.raw_bret_ratio_df is None:
-                    continue # ----------------------add all that is needed!
 
                 # --- PREPARE KINETIC DATA ---
                 # Use pandas melt function to prepare each df from wide to long format
@@ -2522,10 +2526,10 @@ class NCollectorApp:
                 t_vec = res.time_vector
                 if not t_vec:
                     # Fallback if time vector calculation failed
-                    t_vec = range(len(res.raw_bret_ratio_df))
+                    t_vec = range(len(res.raw_bret_ratio_cleaned))
 
                 # Ignore time col in raw bret df
-                raw_clean = res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore')
+                raw_clean = res.raw_bret_ratio_cleaned.drop(columns=["Time (min)"], errors='ignore')
 
                 df_raw = melt_df(raw_clean, "Raw_BRET_kinetic", t_vec)
                 df_lab = melt_df(res.labeling_corr_kinetic, "Lab_BRET_kinetic", t_vec)
