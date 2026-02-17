@@ -1194,11 +1194,14 @@ def generate_header_key(df, group_by=None):
         df["Header_Key"] = "Data"
     return df
 
-def create_clean_pivot(df, index_col, value_col, disregard_well_id):
+def create_clean_pivot(df, index_col, value_col, disregard_well_id, drop_labeling_control_col):
     """
     Pivots the table. If Mean Data: One column per File.
     If Raw Data: One column per Well (Technical Replicates side-by-side)
     """
+    if drop_labeling_control_col:
+        df = df[df["Replicate"] != "labeling control"]
+
     is_kinetic = df["Time_(min)"].nunique() > 1
 
     # Assign a replicate number (1, 2, 3...) per Header_Key
@@ -1296,6 +1299,7 @@ class NCollectorApp:
         self.lb_ligands = None
         self.lb_exp_cells = None
         self.lb_exp_trans = None
+        self.combo_type = None
         self.lb_kin_layout = None
         self.btn_run_plot_helper = None
 
@@ -2687,6 +2691,9 @@ class NCollectorApp:
             else:
                 data_groups.append(("", df_subset))  # No grouping
 
+            # Check whether labeling control was applied
+            is_labeling = True if "labeling control" in df_subset["Replicate"].values else False
+
             # Definition which is kinetic and what is CRC
             kinetic_types = [val for key, val in self.data_type_map.items() if "kinetic:" in key]
             crc = [val for key, val in self.data_type_map.items() if "CRC:" in key]
@@ -2702,7 +2709,6 @@ class NCollectorApp:
                     if len(mp_vals) > 0: mp_str = mp_vals[0]
                 if 'Ligand' in df_subset.columns:
                     ligand = df_subset['Ligand'].unique()
-                print(ligand)
 
                 meta_dict = {
                     "Export Date": [datetime.now().strftime("%d.%m.%Y - %H:%M:%S")],
@@ -2729,6 +2735,12 @@ class NCollectorApp:
 
                     # --- KINETIC DATA ---
                     for dtype in selected_types:
+                        # Only keep the labeling control column if raw BRET ratio is exported
+                        if dtype in ["Raw_BRET_kinetic", "Raw_BRET_CRC"] and is_labeling:
+                            drop_labeling_col = False
+                        else:
+                            drop_labeling_col = True
+
                         if dtype in kinetic_types:
                             k_layout = config.get('kinetic_mode', [])
                             if not k_layout:
@@ -2758,7 +2770,9 @@ class NCollectorApp:
                                 continue
 
                             df_kin = generate_header_key(df_kin, group_by)
-                            kin_pivot = create_clean_pivot(df_kin, "Time_(min)", dtype, "Mean" in dtype)
+                            kin_pivot = create_clean_pivot(df_kin, "Time_(min)",
+                                                           dtype, "Mean" in dtype,
+                                                           drop_labeling_col)
                             kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
 
                             # Sheet Name with group_prefix (Max 31 chars)
@@ -2778,7 +2792,9 @@ class NCollectorApp:
                             if dtype not in df_crc.columns: continue
 
                             # Always pivot on plate row
-                            crc_pivot = create_clean_pivot(df_crc, "Plate_Row", dtype, "Mean" in dtype)
+                            crc_pivot = create_clean_pivot(df_crc, "Plate_Row",
+                                                           dtype, "Mean" in dtype,
+                                                           drop_labeling_col)
 
                             # Display ligand conc instead of plate row if there is one ligand
                             if df_crc['Ligand'].nunique() == 1:
