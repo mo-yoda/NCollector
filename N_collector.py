@@ -45,8 +45,10 @@ class PrResult:
     kinetic_df: pd.DataFrame | None = None
     # Mean of baseline- and vehicle-normalised kinetic data
     kinetic_mean_df: pd.DataFrame | None = None
+
     # Raw BRET from last 3x datapoints
     raw_bret_points_df: pd.DataFrame | None = None
+
     # Pre-baseline and vehicle norm AUC but after labeling correction
     labeling_corr_auc_df: pd.DataFrame | None = None
     # Pre-vehicle norm AUC
@@ -968,9 +970,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # Prepare the full dataframe for normalization (removing the time col)
     data_df = raw_df.drop(columns=[time_col]).copy()
 
-    # --- RAW BRET LAST MEASUREMENT POINTS ---
-    lp_raw_bret_df = raw_df.iloc[-3:].mean().to_frame().T
-
     # --- OPTIONAL LABELING CORRECTION ---
     labeling_corr_df = None
     wells_to_drop = []
@@ -1109,7 +1108,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     )
 
     # --- SAVE RESULTS ---
-    result.raw_bret_points_df = lp_raw_bret_df
 
     # --- Kinetic data
     result.time_vector = time_vec
@@ -1117,6 +1115,9 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     result.bl_corr_kinetic = bl_corrected_df
     result.kinetic_df = kinetic_df
     result.kinetic_mean_df = kinetic_mean_df
+
+    # --- Last 3x TP data
+    result.raw_bret_points_df = raw_df.iloc[-3:].mean().to_frame().T
 
     # --- AUC data (tidy for CRC)
     result.labeling_corr_auc_df = labeling_corr_auc_df
@@ -1296,12 +1297,14 @@ class NCollectorApp:
 
         # --- Constants ---
         self.data_type_map = {
-            "kinetic: raw BRET ratio (kinetic)": "Raw_BRET_kinetic",
+            "kinetic: raw BRET ratio": "Raw_BRET_kinetic",
+            "kinetic: labeling-corrected BRET ratio": "Lab_BRET_kinetic",
             "kinetic: baseline-corrected BRET ratio": "Bl_Corrected_BRET",
             "kinetic: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
             "kinetic: vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean",
 
             "CRC: raw BRET (from last 3x time points)": "Raw_BRET_CRC",
+            "CRC: labeling-corrected BRET ratio ": "Lab_AUC",
             "CRC: baseline-corrected BRET ratio": "Bl_AUC",
             "CRC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
             "CRC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
@@ -2501,22 +2504,26 @@ class NCollectorApp:
                 raw_clean = res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore')
 
                 df_raw = melt_df(raw_clean, "Raw_BRET_kinetic", t_vec)
+                df_lab = melt_df(res.labeling_corr_kinetic, "Lab_BRET_kinetic", t_vec)
                 df_bl = melt_df(res.bl_corr_kinetic, "Bl_Corrected_BRET", t_vec)
                 df_norm = melt_df(res.kinetic_df, "Veh_Norm_Kinetic", t_vec)
 
                 # Merge on [Time_(min), Well_ID]
                 merge_on = [df_raw.columns[0], "Well_ID"]
 
-                merged_df = df_raw.merge(df_bl, on=merge_on, how="left") \
+                merged_df = df_raw.merge(df_lab, on=merge_on, how="left") \
+                    .merge(df_bl, on=merge_on, how="left") \
                     .merge(df_norm, on=merge_on, how="left")
 
                 # --- MAP AUC DATA and RAW BRET POINTS---
                 # AUC is 1 value per well. We map it to Well_ID.
                 raw_bret_map = res.raw_bret_points_df.iloc[0].to_dict() if res.raw_bret_points_df is not None else {}
+                auc_lab_map = res.labeling_corr_auc_df.iloc[0].to_dict() if res.labeling_corr_auc_df is not None else {}
                 auc_bl_map = res.bl_corr_auc_df.iloc[0].to_dict() if res.bl_corr_auc_df is not None else {}
                 auc_norm_map = res.auc_df.iloc[0].to_dict() if res.auc_df is not None else {}
 
                 merged_df['Raw_BRET_CRC'] = merged_df['Well_ID'].map(raw_bret_map)
+                merged_df['Lab_AUC'] = merged_df['Well_ID'].map(auc_lab_map)
                 merged_df['Bl_AUC'] = merged_df['Well_ID'].map(auc_bl_map)
                 merged_df['Veh_Norm_AUC'] = merged_df['Well_ID'].map(auc_norm_map)
 
@@ -2614,8 +2621,8 @@ class NCollectorApp:
             "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
             "Transfection", "Cell_Line", "Ligand",
             "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
-            "Raw_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
-            "Raw_BRET_CRC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
+            "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
+            "Raw_BRET_CRC", "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
         ]
         final_cols = [c for c in cols_order if c in master_df.columns]
         return master_df[final_cols]
