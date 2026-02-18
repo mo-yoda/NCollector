@@ -1282,7 +1282,8 @@ class NCollectorApp:
         self.var_cond = tk.StringVar(value="All")
         self.var_repl = tk.StringVar(value="All")
         self.var_row = tk.StringVar(value="All")
-        self.var_data_type = tk.StringVar(value="")
+        self.var_category = tk.StringVar(value="")
+        self.var_specific_type = tk.StringVar(value="")
         self.var_group_by = tk.StringVar(value="Transfection")
 
         # --- GUI Widgets (Initialised to None) ---
@@ -1314,23 +1315,27 @@ class NCollectorApp:
         self.lb_ligands = None
         self.lb_exp_cells = None
         self.lb_exp_trans = None
-        self.combo_type = None
+        self.combo_category = None
+        self.combo_specific = None
         self.lb_kin_layout = None
         self.btn_run_plot_helper = None
 
         # --- Constants ---
         self.data_type_map = {
-            "kinetic: raw BRET ratio": "Raw_BRET_kinetic",
-            "kinetic: labeling-corrected BRET ratio": "Lab_BRET_kinetic",
-            "kinetic: baseline-corrected BRET ratio": "Bl_Corrected_BRET",
-            "kinetic: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
-            "kinetic: vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean",
-
-            "CRC: raw BRET (from last 3x time points)": "Raw_BRET_CRC",
-            "CRC: labeling-corrected BRET ratio ": "Lab_AUC",
-            "CRC: baseline-corrected BRET ratio": "Bl_AUC",
-            "CRC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
-            "CRC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
+            "kinetic": {
+                "raw BRET ratio": "Raw_BRET_kinetic",
+                "labeling-corrected BRET ratio": "Lab_BRET_kinetic",
+                "baseline-corrected BRET ratio": "Bl_Corrected_BRET",
+                "vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
+                "vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean"
+            },
+            "CRC": {
+                "raw BRET (from last 3x time points)": "Raw_BRET_CRC",
+                "labeling-corrected BRET ratio": "Lab_AUC",
+                "baseline-corrected BRET ratio": "Bl_AUC",
+                "vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
+                "vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
+            }
         }
 
         # --- Setup GUI ---
@@ -1948,37 +1953,39 @@ class NCollectorApp:
         type_frame = tk.LabelFrame(self.tab_plot_helper, text="Export Settings")
         type_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # Data Type Dropdown
-        tk.Label(type_frame, text="Data Type:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        default_key = list(self.data_type_map.keys())[6]
-        self.var_data_type = tk.StringVar(value=default_key)
-        self.var_data_type.trace_add("write", self.toggle_kinetic_options) # Trace kinetic selection
+        # Data Category Dropdown
+        tk.Label(type_frame, text="Category:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.combo_category = ttk.Combobox(type_frame, textvariable=self.var_category, state="readonly", width=10)
+        self.combo_category.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        # Bind change event to update the second dropdown
+        self.combo_category.bind("<<ComboboxSelected>>", self.update_subtype_options)
 
-        self.combo_type = ttk.Combobox(type_frame, textvariable=self.var_data_type, state="readonly", width=57)
-        self.combo_type['values'] = list(self.data_type_map.keys())
-        self.combo_type.grid(row=0, column=1, padx=5, pady=5)
+        # Specific Data Type
+        tk.Label(type_frame, text="Subtype:").grid(row=1, column=0, padx=5, pady=2, sticky="w")
+        self.combo_specific = ttk.Combobox(type_frame, textvariable=self.var_specific_type, state="readonly", width=60)
+        self.combo_specific.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         # --- Layout Selection ---
-        # Groupy py
-        tk.Label(type_frame, text="Group By:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        # Groupy by
+        tk.Label(type_frame, text="Group By:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
         self.var_group_by = tk.StringVar(value="None")
         combo_group = ttk.Combobox(type_frame, textvariable=self.var_group_by, state="readonly", width=15)
         combo_group['values'] = ["None", "Cell Line", "Transfection"]
-        combo_group.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        combo_group.grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
         # Kinetic Layout (Only applies if a Kinetic type is chosen)
         tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
         self.lb_kin_layout = tk.Listbox(type_frame, selectmode="multiple", height=6, exportselection=False)
         self.lb_kin_layout.grid(row=0, column=3, rowspan = 2, padx=3, pady=5, sticky="nsew")
         tk.Button(type_frame, text="Select All Rows", command=lambda: self.lb_kin_layout.select_set(0, tk.END)).grid(
-            row=1, column=2, pady=5, sticky="nsew")
+            row=2, column=3, pady=5, sticky="nsew")
+        tk.Button(type_frame, text="Deselect All Rows", command=lambda: self.lb_kin_layout.selection_clear(0, tk.END)).grid(
+            row=3, column=3, pady=5, sticky="nsew")
 
         type_frame.columnconfigure(1, weight=1)
         type_frame.columnconfigure(3, weight=3)
-        type_frame.rowconfigure(0, weight=1)
-
-        # Initialize state based on default value
-        self.toggle_kinetic_options()
+        type_frame.rowconfigure(0, weight=2)
+        type_frame.rowconfigure(1, weight=2)
 
         # --- Action Button ---
         btn_frame = tk.Frame(self.tab_plot_helper)
@@ -1988,12 +1995,35 @@ class NCollectorApp:
                                             state="disabled", command=self.run_plot_helper)
         self.btn_run_plot_helper.pack(fill="x", ipady=5)
 
-    def toggle_kinetic_options(self, *args):
-        """Enables/Disables Kinetic Layout dropdown based on Data Type selection."""
-        selection = self.var_data_type.get()
+    def update_subtype_options(self, event=None):
+        """
+        Triggered when Data type Category changes.
+        Populates specific type dropdown based on category and availability in master_df.
+        Toggles Kinetic Layout listbox visibility.
+        """
+        if self.master_df is None or self.master_df.empty: return
 
-        # Check if "kinetic" is in the selected string
-        if "kinetic" in selection.lower():
+        selected_cat = self.var_category.get()  # "kinetic" or "CRC"
+        subtype_map = self.data_type_map.get(selected_cat, {})
+
+        # Filter to find valid specific options in master_df
+        valid_specifics = []
+
+        # Iterate over the sub-dictionary
+        for display_name, internal_col in subtype_map.items():
+            # Check if data exists for this specific type
+            if internal_col in self.master_df.columns and self.master_df[internal_col].notna().any():
+                valid_specifics.append(display_name)
+
+        self.combo_specific['values'] = valid_specifics
+
+        if valid_specifics:
+            self.combo_specific.current(0)  # Select first
+        else:
+            self.var_specific_type.set("")
+
+        # Toggle Kinetic Layout Listbox
+        if selected_cat == "kinetic":
             self.lb_kin_layout.config(state="normal")
         else:
             self.lb_kin_layout.config(state="disabled")
@@ -2015,18 +2045,25 @@ class NCollectorApp:
 
         self.btn_run_plot_helper.config(state="normal")
 
-        # Filter Data type options from master_df
-        valid_options = []
+        available_categories = set()
 
-        for display_name, internal_col_name in self.data_type_map.items():
-            if internal_col_name in self.master_df.columns:
-                # Check if the column has at least one non-NaN value
-                # .notna() creates a boolean mask, .any() returns True if any True exists
-                if self.master_df[internal_col_name].notna().any():
-                    valid_options.append(display_name)
-        self.combo_type['values'] = valid_options
+        # Iterate over high-level keys ("kinetic", "CRC")
+        for cat, sub_map in self.data_type_map.items():
+            # Check if ANY column in this category exists in the dataframe
+            for internal_col in sub_map.values():
+                # And at least one value is not NA
+                if internal_col in self.master_df.columns and self.master_df[internal_col].notna().any():
+                    available_categories.add(cat)
+                    break  # Found one valid column, so this category is valid
 
-        # Enable kinetic layout to populate list box, afterwards disable
+        sorted_cats = sorted(list(available_categories), reverse=True)
+        self.combo_category['values'] = sorted_cats
+
+        # Trigger update of specific types if categories exist
+        if sorted_cats:
+            self.update_subtype_options()
+
+        # Enable kinetic layout to populate list box
         self.lb_kin_layout.config(state="normal")
 
         # Clear
@@ -2056,8 +2093,6 @@ class NCollectorApp:
         rows = build_row_info_str(df)
         for r in rows: self.lb_kin_layout.insert(tk.END, r)
         self.lb_kin_layout.select_set(0, tk.END)  # Default to all
-        # Disable listbox if not kinetic is selected
-        self.toggle_kinetic_options()
 
     def run_plot_helper(self):
         """Collects GUI selections and calls the core export engine."""
@@ -2069,14 +2104,14 @@ class NCollectorApp:
         ligands = [self.lb_ligands.get(i) for i in self.lb_ligands.curselection()]
         rows = [self.lb_kin_layout.get(i) for i in self.lb_kin_layout.curselection()]
 
-        display_name = self.var_data_type.get()
-        if not display_name: return
+        category = self.var_category.get()
+        specific_type = self.var_specific_type.get()
 
-        # TRANSLATE: Display Name -> Internal Column Name
-        internal_name = self.data_type_map.get(display_name)
+        if not category or not specific_type: return
+        internal_name = self.data_type_map.get(category, {}).get(specific_type)
 
         if not internal_name:
-            print(f"[ERROR] Unknown data type selected: {display_name}")
+            print(f"[ERROR] Unknown data type selected: {category} - {specific_type}")
             return
 
         config = {
@@ -2706,8 +2741,8 @@ class NCollectorApp:
             is_labeling = True if "labeling control" in df_subset["Replicate"].values else False
 
             # Definition which is kinetic and what is CRC
-            kinetic_types = [val for key, val in self.data_type_map.items() if "kinetic:" in key]
-            crc = [val for key, val in self.data_type_map.items() if "CRC:" in key]
+            kinetic_types = list(self.data_type_map["kinetic"].values())
+            crc = list(self.data_type_map["CRC"].values())
 
             with pd.ExcelWriter(file_path) as writer:
                 sheets_written = False
