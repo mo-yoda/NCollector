@@ -50,11 +50,20 @@ class PrResult:
 
     # Raw BRET from last 3x datapoints
     raw_bret_points_df: pd.DataFrame | None = None
+    # From last 3x datapoints: pre-baseline and vehicle norm but after labeling correction
+    labeling_corr_lp_df: pd.DataFrame | None = None
+    # From last 3x datapoints: pre-vehicle norm
+    bl_corr_lp_df: pd.DataFrame | None = None
+    # From last 3x datapoints: baseline- and vehicle-normalised data
+    lp_df: pd.DataFrame | None = None
+    # From last 3x datapoints: mean of baseline- and vehicle-normalised data
+    lp_mean_df: pd.DataFrame | None = None
 
     # Pre-baseline and vehicle norm AUC but after labeling correction
     labeling_corr_auc_df: pd.DataFrame | None = None
     # Pre-vehicle norm AUC
     bl_corr_auc_df: pd.DataFrame | None = None
+
     # Baseline- and vehicle-normalised AUC data (technical replicates)
     auc_df: pd.DataFrame | None = None
     # Mean of baseline- and vehicle-normalised AUC data
@@ -1126,6 +1135,10 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- Last 3x TP data
     result.raw_bret_points_df = raw_df.iloc[-3:].mean().to_frame().T
+    result.labeling_corr_lp_df = labeling_corr_df.iloc[-3:].mean().to_frame().T
+    result.bl_corr_lp_df = bl_corrected_df.iloc[-3:].mean().to_frame().T
+    result.lp_df = kinetic_df.iloc[-3:].mean().to_frame().T
+    result.lp_mean_df = kinetic_mean_df.iloc[-3:].mean().to_frame().T
 
     # --- AUC data (tidy for CRC)
     result.labeling_corr_auc_df = labeling_corr_auc_df
@@ -1330,11 +1343,13 @@ class NCollectorApp:
                 "vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean"
             },
             "CRC": {
-                "raw BRET (from last 3x time points)": "Raw_BRET_CRC",
-                "labeling-corrected BRET ratio": "Lab_AUC",
-                "baseline-corrected BRET ratio": "Bl_AUC",
-                "vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
-                "vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
+                "last 3x timepoints: raw BRET": "Raw_BRET_CRC",
+                "last 3x timepoints: labeling-corrected BRET ratio": "Lab_LP",
+                "last 3x timepoints: baseline-corrected BRET ratio": "Bl_LP",
+                "last 3x tp: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_LP",
+                "last 3x tp: vehicle-normalised BRET ratio, mean of techn. replicates": "LP_Mean",
+                "AUC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
+                "AUC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
             }
         }
 
@@ -2581,25 +2596,36 @@ class NCollectorApp:
                     .merge(df_bl, on=merge_on, how="left") \
                     .merge(df_norm, on=merge_on, how="left")
 
-                # --- MAP AUC DATA and RAW BRET POINTS---
-                # AUC is 1 value per well. We map it to Well_ID.
+                # --- MAP DATA FOR CRC ---
+                # Last 3x points/AUC is 1 value per well, map data to Well_ID
+                # Last 3 time points (lp)
                 raw_bret_map = res.raw_bret_points_df.iloc[0].to_dict() if res.raw_bret_points_df is not None else {}
+                lp_lab_map = res.labeling_corr_lp_df.iloc[0].to_dict() if res.labeling_corr_lp_df is not None else {}
+                lp_bl_map = res.bl_corr_lp_df.iloc[0].to_dict() if res.bl_corr_lp_df is not None else {}
+                lp_norm_map = res.lp_df.iloc[0].to_dict() if res.lp_df is not None else {}
+
+                # AUC
                 auc_lab_map = res.labeling_corr_auc_df.iloc[0].to_dict() if res.labeling_corr_auc_df is not None else {}
                 auc_bl_map = res.bl_corr_auc_df.iloc[0].to_dict() if res.bl_corr_auc_df is not None else {}
                 auc_norm_map = res.auc_df.iloc[0].to_dict() if res.auc_df is not None else {}
 
                 merged_df['Raw_BRET_CRC'] = merged_df['Well_ID'].map(raw_bret_map)
+                merged_df['Lab_LP'] = merged_df['Well_ID'].map(lp_lab_map)
+                merged_df['Lab_LP'] = merged_df['Well_ID'].map(lp_bl_map)
+                merged_df['Veh_Norm_LP'] = merged_df['Well_ID'].map(lp_norm_map)
+
                 merged_df['Lab_AUC'] = merged_df['Well_ID'].map(auc_lab_map)
                 merged_df['Bl_AUC'] = merged_df['Well_ID'].map(auc_bl_map)
                 merged_df['Veh_Norm_AUC'] = merged_df['Well_ID'].map(auc_norm_map)
 
                 # --- PREPARE MEAN KINETIC AND AUC MAPPING ---
                 well_to_mean_map = {}
+                well_to_lp_mean_map = {}
                 well_to_auc_mean_map = {}
                 for col_idx, meta in res.column_metadata.items():
                     col_str = str(col_idx)
                     for row_char in "ABCDEFGH":
-                        well_id = f"{row_char}{col_idx}"
+                        well_id = f"{row_char}{col_str}"
 
                         # Construct Key: "Condition|Cell|Ligand|Row"
                         mean_key = f"{meta.condition_name}|{meta.cell_line}|{meta.ligand_identity}|{row_char}"
@@ -2608,10 +2634,15 @@ class NCollectorApp:
                         if res.kinetic_mean_df is not None and mean_key in res.kinetic_mean_df.columns:
                             well_to_mean_map[well_id] = res.kinetic_mean_df[mean_key].tolist()
 
+                        # Grab Last points Mean Value
+                        if res.lp_mean_df is not None and mean_key in res.lp_mean_df.columns:
+                            well_to_lp_mean_map[well_id] = res.lp_mean_df[mean_key].iloc[0]
+
                         # Grab AUC Mean Value
                         if res.auc_mean_df is not None and mean_key in res.auc_mean_df.columns:
                             well_to_auc_mean_map[well_id] = res.auc_mean_df[mean_key].iloc[0]
 
+                merged_df['LP_Mean'] = merged_df['Well_ID'].map(well_to_lp_mean_map)
                 merged_df['AUC_Mean'] = merged_df['Well_ID'].map(well_to_auc_mean_map)
 
                 # --- MAP KINETIC MEANS ---
@@ -2688,7 +2719,8 @@ class NCollectorApp:
             "Transfection", "Cell_Line", "Ligand",
             "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
             "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
-            "Raw_BRET_CRC", "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
+            "Raw_BRET_CRC", "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
+            "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
         ]
         final_cols = [c for c in cols_order if c in master_df.columns]
         return master_df[final_cols]
