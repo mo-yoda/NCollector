@@ -94,6 +94,7 @@ class ProtocolData:
     # Second ligand is optional; by | None = None
     ligand_2: str | None = None
     ligand_2_conc: pd.DataFrame | None = None
+    ligand_layout: str | None = None # Only available in protocols > 1.03
 
 @dataclass
 class MeasurementFolder:
@@ -344,9 +345,11 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
     if check_ligand_2 is not None and str(check_ligand_2).strip().lower() not in ["nan", ""]:
         ligand_2 = check_ligand_2
         ligand_2_conc = slice_table(protocol_sheet, "final concentration in well (log(M))", match_index=1)
+        ligand_layout = extract_value(protocol_sheet,"Ligand layout", col_offset= 0, row_offset= 1)
     else:
         ligand_2 = None
         ligand_2_conc = None
+        ligand_layout = None
 
     protocol_info = ProtocolData(file_name=file_name,
                                  exp_date = exp_date,
@@ -359,7 +362,8 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
                                  ligand = ligand_1,
                                  ligand_conc=ligand_1_conc,
                                  ligand_2 = ligand_2,
-                                 ligand_2_conc= ligand_2_conc)
+                                 ligand_2_conc= ligand_2_conc,
+                                 ligand_layout = ligand_layout)
     return protocol_info
 
 def extract_metadata(pr_export_df):
@@ -478,48 +482,54 @@ def extract_measurement_data(xls_obj, file_name: str):
     )
     return result_obj
 
-def get_cell_line_map(layout_type: str, cell_lines: str):
+def generate_col_mapping(layout_style: str, item_1: str, item_2: str, block_count: int = 4) -> dict:
+    """Shared helper to map two items across 12 columns based on standard layouts."""
+    mapping = {}
+    style = str(layout_style).lower()
+
+    if "half" in style:
+        # First 6 cols Item 1, Last 6 cols Item 2
+        for col in range(1, 7): mapping[col] = item_1
+        for col in range(7, 13): mapping[col] = item_2
+
+    elif "alternating" in style:
+        # Calculate how many columns are in each block
+        block_size = 12 // block_count
+
+        # Loop through each block index (0, 1, 2, etc.)
+        for i in range(block_count):
+            # Even blocks get item_1, odd blocks get item_2
+            current_item = item_1 if i % 2 == 0 else item_2
+
+            # Calculate the start and end column for this specific block
+            start_col = (i * block_size) + 1
+            end_col = start_col + block_size
+
+            # Map the columns
+            for col in range(start_col, end_col):
+                mapping[col] = current_item
+
+    else:
+        # "one line", "one ligand", or unrecognized fallback -> All cols Item 1
+        for col in range(1, 13): mapping[col] = item_1
+
+    return mapping
+
+def get_cell_line_map(protocol: ProtocolData, cell_lines: str, block_count: int = 4):
     """
     Defines the plate layout for cell lines based on the dropdown selection protocol (.line_layout)
     and cell_lines in ID2 of the plate reader metadata (PrResult.cell_line)
     """
     print(f"\n[DEBUG] --- Mapping Cell Lines ---")
-    print(f"[DEBUG] Layout Type: '{layout_type}' | Raw ID2: '{cell_lines}'")
+    print(f"[DEBUG] Layout Type: '{protocol.line_layout}' | Raw ID2: '{cell_lines}'")
     # Split ID2 string to get potentially multiple cell lines
     lines = [x.strip() for x in cell_lines.split(',')]
-    mapping = {}
 
-    # Handle selection made in dropdown for line layout
-    if "one line" in layout_type.lower():
-        # Use the first (and likely only) cell line for all columns
-        c_name = lines[0] if lines else "Unknown"
-        for col in range(1, 13):
-            mapping[col] = c_name
+    # Safely assign line names or default to Unknown
+    line_1 = lines[0] if len(lines) > 0 else "Unknown_1"
+    line_2 = lines[1] if len(lines) > 1 else "Unknown_2"
 
-    elif "half" in layout_type.lower():
-        line_1 = lines[0] if len(lines) > 0 else "Unknown_1"
-        line_2 = lines[1] if len(lines) > 1 else "Unknown_2"
-
-        for col in range(1, 7): mapping[col] = line_1
-        for col in range(7, 13): mapping[col] = line_2
-
-    elif "alternating" in layout_type.lower():
-        line_1 = lines[0] if len(lines) > 0 else "Unknown_1"
-        line_2 = lines[1] if len(lines) > 1 else "Unknown_2"
-
-        # Block 1 (1-3) & Block 3 (7-9) -> Line 1
-        for col in list(range(1, 4)) + list(range(7, 10)):
-            mapping[col] = line_1
-
-        # Block 2 (4-6) & Block 4 (10-12) -> Line 2
-        for col in list(range(4, 7)) + list(range(10, 13)):
-            mapping[col] = line_2
-
-    else:
-        print(f"   [WARNING] Unknown layout type: '{layout_type}'. Defaulting to global.")
-        for col in range(1, 13): mapping[col] = cell_lines
-
-    return mapping
+    return generate_col_mapping(protocol.line_layout, line_1, line_2, block_count)
 
 def built_conc_dic(df_conc: pd.DataFrame):
     """
@@ -548,86 +558,133 @@ def built_conc_dic(df_conc: pd.DataFrame):
 
     return conc_dic
 
-def get_ligand_map(protocol: ProtocolData):
+def get_ligand_map(protocol: ProtocolData, block_count: int = 4):
     """
     Determines which columns contain Ligand 1 and which contain Ligand 2.
     Returns dic of col idx and ligands.
     """
-    ligand_map = {}
 
     # If no second ligand exists, everything is Ligand 1
     if not protocol.ligand_2:
-        for c in range(1, 13): ligand_map[c] = 'L1'
-        return ligand_map
+        return generate_col_mapping("one", 'L1', 'L2', block_count)
 
-    # Determine Ligand Layout Strategy based on Cell Layout
-    cell_layout = str(protocol.line_layout).lower()
+    # If a specific Ligand Layout is provided (v1.03+)
+    if protocol.ligand_layout:
+        l_layout = str(protocol.ligand_layout).lower()
+        if "one ligand" in l_layout:
+            pass  # TODO: create pop up to ask which ligand was used for each plate
+        return generate_col_mapping(l_layout, 'L1', 'L2', block_count)
 
-    if "one line" in cell_layout:
-        # STRICT RULE: One line layout cannot support 2 ligands in this logic
-        print(f"   [ERROR] Protocol '{protocol.file_name}' lists 2 ligands but uses 'One Line' cell layout.")
-        print(f"           This configuration is not supported. Defaulting all columns to Ligand 1 {protocol.ligand}.")
-        for c in range(1, 13): ligand_map[c] = 'L1'
-        return ligand_map
+    # Fallback for older protocols (Inferred from Cell Layout)
+    c_layout = str(protocol.line_layout).lower()
 
-    elif "half" in cell_layout:
-        # Cell Layout: Half (1-6 / 7-12) -> Ligand Layout: Alternating Blocks
-        # L1: 1-3, 7-9 | L2: 4-6, 10-12
-        l1_cols = list(range(1, 4)) + list(range(7, 10))
-        l2_cols = list(range(4, 7)) + list(range(10, 13))
-        for c in l1_cols: ligand_map[c] = 'L1'
-        for c in l2_cols: ligand_map[c] = 'L2'
+    if "one line" in c_layout:
+        print(f"   [ERROR] Protocol '{protocol.file_name}' lists 2 ligands but uses 'One Line' "
+              f"cell layout without specifying ligand layout.")
+        # TODO: create pop up to ask which ligand was used for each plate
+        return generate_col_mapping("one", 'L1', 'L2', block_count)
 
-    elif "alternating" in cell_layout:
-        # Cell Layout: Alternating Blocks -> Ligand Layout: Half/Half
-        # L1: 1-6 | L2: 7-12
-        for c in range(1, 7): ligand_map[c] = 'L1'
-        for c in range(7, 13): ligand_map[c] = 'L2'
+    elif "half" in c_layout:
+        # If Cells are Half, Ligands are Alternating
+        return generate_col_mapping("alternating", 'L1', 'L2', block_count)
+
+    elif "alternating" in c_layout:
+        # If Cells are Alternating, Ligands are Half
+        return generate_col_mapping("half", 'L1', 'L2', block_count)
 
     else:
-        print(f"   [WARNING] Unknown cell layout '{cell_layout}'. Defaulting all to Ligand 1 {protocol.ligand}.")
-        for c in range(1, 13): ligand_map[c] = 'L1'
+        print(f"   [WARNING] Unknown cell layout '{c_layout}'. Defaulting all to Ligand 1 {protocol.ligand}.")
+        return generate_col_mapping("one", 'L1', 'L2', block_count)
 
-    return ligand_map
 
-def get_transfection_map(layout_type: str, t_ids: list[str], block_count: int = 4):
+def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, t_ids: list[str], block_count: int = 4):
     """
-    Defines the plate layout for blocks of transfection based on the cell line layout
-    dropdown selection protocol (.line_layout) and # transfection in ID3 of
-    the plate reader metadata (PrResult.transfection_id)
+    Defines the plate layout for blocks of transfection (taken from ID3 of the plate reader metadata).
+    Depending on whether ligand layout is provided, transfection layout is decided on
+    cell line layout or cell line and ligand layout.
     """
     print(f"[DEBUG] --- Mapping Transfections ---")
     print(f"[DEBUG] Raw ID3 List: {t_ids}")
+    print(f"[DEBUG] Layouts: Cell='{cell_layout_type}' / Ligand='{ligand_layout_type}'")
     # If no IDs, return empty
     if not t_ids:
         return ["N/A"] * block_count
 
-    lower_layout = str(layout_type).lower()
-    # IDs 1:1 to blocks
-    if "one line" in lower_layout:
-        # Extend list if shorter than blocks (fill with last or N/A)
-        # Slicing [:block_count] ensures we don't overflow if ID3 has too many
-        mapped_ids = (t_ids + ["N/A"] * block_count)[:block_count]
-        return mapped_ids
-    # IDs alternating in layout to cover all cell line x transfection combinations
-    elif "half" in  lower_layout:
-        if len(t_ids) >= 2:
-            return [t_ids[0], t_ids[1], t_ids[0], t_ids[1]]
-        elif len(t_ids) == 1:
-            return [t_ids[0]] * 4
-        else:
-            return ["N/A"] * 4
-    # IDs half/half of blocks to cover all cell line x transfection combinations
-    elif "alternating" in lower_layout:
-        if len(t_ids) >= 2:
-            return [t_ids[0], t_ids[0], t_ids[1], t_ids[1]]
-        elif len(t_ids) == 1:
-            return [t_ids[0]] * 4
-        else:
-            return ["N/A"] * 4
+    # Transfection ids are padded with N/A to be safe with indexing
+    safe_ids = t_ids + ["N/A"] * block_count
+    cell_layout = str(cell_layout_type).lower()
 
-    # Default fallback
-    return (t_ids + ["N/A"] * block_count)[:block_count]
+    def _unique():
+        """1 per block (e.g. 1, 2, 3, 4)"""
+        return safe_ids[:block_count]
+
+    def _single():
+        """Single ID repeated (e.g. 1, 1, 1, 1)"""
+        return [safe_ids[0]] * block_count
+
+    def _seq_repeat():
+        """Repeat sequence (e.g. 1, 2, 1, 2)"""
+        if len(t_ids) == 1:
+            return _single()
+        if len(t_ids) >= block_count:
+            return _unique()
+        if len(t_ids) == block_count / 2:
+            return t_ids * 2
+
+        # Fallback for uneven lengths
+        return (safe_ids[:block_count // 2] * 2)[:block_count]
+
+    def _elem_repeat():
+        """Repeat elements (e.g. 1, 1, 2, 2)"""
+        if len(t_ids) == 1:
+            return _single()
+        if len(t_ids) >= block_count:
+            return _unique()
+        if len(t_ids) == block_count / 2:
+            res = []
+            for x in t_ids:
+                res.extend([x, x])
+            return res
+
+        # Fallback for uneven lengths
+        res = []
+        for x in safe_ids[:(block_count + 1) // 2]:
+            res.extend([x, x])
+        return res[:block_count]
+
+    if not ligand_layout_type:
+        if "one line" in cell_layout:
+            return _unique()
+        elif "half" in cell_layout:
+            return _seq_repeat()
+        elif "alternating" in cell_layout:
+            return _elem_repeat()
+        return _unique()  # Default fallback
+
+    ligand_layout = str(ligand_layout_type).lower()
+    if "one line" in cell_layout:
+        if "one ligand" in ligand_layout:    return _unique()
+        if "half" in ligand_layout:          return _seq_repeat()
+        if "alternating" in ligand_layout:   return _elem_repeat()
+
+    elif "half" in cell_layout:
+        if "one ligand" in ligand_layout:    return _seq_repeat()
+        if "half" in ligand_layout:
+            # "1,2,1,2 or 1,2,3,4" -> depends on t_id count vs block_count
+            return _unique() if len(t_ids) >= block_count else _seq_repeat()
+        if "alternating" in ligand_layout:   return _single()
+
+    elif "alternating" in cell_layout:
+        if "one ligand" in ligand_layout:    return _elem_repeat()
+        if "half" in ligand_layout:          return _single()
+        if "alternating" in ligand_layout:
+            # "1,1,2,2 or 1,2,3,4" -> depends on t_id count vs block_count
+            return _unique() if len(t_ids) >= block_count else _elem_repeat()
+
+        # Fallback
+    print(f"[WARNING] Unhandled layout combination: {cell_layout} + {ligand_layout}")
+    return _unique()
+
 
 def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: int):
     """
@@ -861,14 +918,19 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # --- METADATA MAPPING ---
     # Get cell line map
-    cl_map = get_cell_line_map(protocol.line_layout, result.cell_line)
+    cl_map = get_cell_line_map(protocol, result.cell_line, len(plate_blocks))
     # Get transfection map via mapping ID3 info
     raw_ids = [x.strip() for x in str(result.transfection_id).split(',')] if result.transfection_id else []
-    mapped_t_ids = get_transfection_map(protocol.line_layout, raw_ids, len(plate_blocks))
+    mapped_t_ids = get_transfection_map(
+        cell_layout_type=protocol.line_layout,
+        ligand_layout_type=protocol.ligand_layout,  # Pass the new field
+        t_ids=raw_ids,
+        block_count=len(plate_blocks)
+    )
     print(f"[DEBUG] Mapped Block Sequence: {mapped_t_ids}")
 
     # Ligand identity and conc map
-    ligand_col_map = get_ligand_map(protocol)
+    ligand_col_map = get_ligand_map(protocol, len(plate_blocks))
     conc_map_1 = built_conc_dic(protocol.ligand_conc)
     # Only built if second ligand is defined
     conc_map_2 = built_conc_dic(protocol.ligand_2_conc) if protocol.ligand_2 else {}
