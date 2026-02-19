@@ -2226,6 +2226,25 @@ class NCollectorApp:
                 self.log("[ERROR] Invalid CSV format. Columns missing.")
                 return
 
+            # For Backward compatibility with NCollector v1.0.0
+            if "Empty/NoID" in df['Transfection'].values:
+                print("[INFO] Removing legacy 'Empty/NoID' data...")
+                df = df[df['Transfection'] != "Empty/NoID"].copy()
+
+            if 'Bl_LP' not in df.columns and 'Bl_Corrected_BRET' in df.columns:
+                print("[INFO] 'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
+                # Sort to guarantee chronological order
+                df_sorted = df.sort_values(by=['File_Name', 'Well_ID', 'Time_(min)'])
+                # Grab the last 3 timepoints per file and well
+                last_3 = df_sorted.groupby(['File_Name', 'Well_ID']).tail(3)
+
+                # Calculate the mean of those last 3 points
+                bl_lp_means = last_3.groupby(['File_Name', 'Well_ID'])['Bl_Corrected_BRET'].mean().reset_index()
+                bl_lp_means.rename(columns={'Bl_Corrected_BRET': 'Bl_LP'}, inplace=True)
+
+                # Merge the calculated values back into the main DataFrame
+                df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
+
             # Store in the unified variable
             self.master_df = df
 
