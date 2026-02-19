@@ -2673,7 +2673,7 @@ class NCollectorApp:
 
                 merged_df['Raw_BRET_CRC'] = merged_df['Well_ID'].map(raw_bret_map)
                 merged_df['Lab_LP'] = merged_df['Well_ID'].map(lp_lab_map)
-                merged_df['Lab_LP'] = merged_df['Well_ID'].map(lp_bl_map)
+                merged_df['Bl_LP'] = merged_df['Well_ID'].map(lp_bl_map)
                 merged_df['Veh_Norm_LP'] = merged_df['Well_ID'].map(lp_norm_map)
 
                 merged_df['Lab_AUC'] = merged_df['Well_ID'].map(auc_lab_map)
