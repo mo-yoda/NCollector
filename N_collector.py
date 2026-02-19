@@ -1334,7 +1334,7 @@ def create_clean_pivot(df_input, index_col, value_col, disregard_well_id, drop_l
 class NCollectorApp:
     def __init__(self, main_window):
         self.main_gi = main_window
-        main_window.title("N Collector")
+        main_window.title("N Collector v2.0 Beta")
         main_window.geometry("800x700")
 
         # --- Data Storage ---
