@@ -8,7 +8,7 @@ from datetime import datetime, date
 from models import MeasurementFolder, ProcessingConfig
 from parsing import extract_protocol_info, extract_measurement_data
 from processing import process_bret_measurement
-from export import apply_export_filters, build_row_info_str, generate_header_key, create_clean_pivot
+from export import apply_export_filters, build_row_info_str, generate_header_key, create_clean_pivot, ensure_master_csv_schema
 
 logger = logging.getLogger("NCollector")
 
@@ -911,32 +911,8 @@ class NCollectorApp:
                 self.log("[ERROR] Invalid CSV format. Columns missing.")
                 return
 
-            # For Backward compatibility: Assign default version and path for older CSVs (< v2)
-            if "NCollector_version" not in df.columns:
-                df["NCollector_version"] = "< v2"
-                logger.info("'NCollector_version' column missing. Assigned '< v2'.")
-            if "Path" not in df.columns:
-                df["Path"] = "undocumented path"
-                logger.info("'Path' column missing. Assigned 'undocumented path'.")
-
-            # For Backward compatibility with NCollector v1.0.0
-            if "Empty/NoID" in df['Transfection'].values:
-                logger.info("Removing legacy 'Empty/NoID' data...")
-                df = df[df['Transfection'] != "Empty/NoID"].copy()
-
-            if 'Bl_LP' not in df.columns and 'Bl_Corrected_BRET' in df.columns:
-                logger.info("'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
-                # Sort to guarantee chronological order
-                df_sorted = df.sort_values(by=['File_Name', 'Well_ID', 'Time_(min)'])
-                # Grab the last 3 timepoints per file and well
-                last_3 = df_sorted.groupby(['File_Name', 'Well_ID']).tail(3)
-
-                # Calculate the mean of those last 3 points
-                bl_lp_means = last_3.groupby(['File_Name', 'Well_ID'])['Bl_Corrected_BRET'].mean().reset_index()
-                bl_lp_means.rename(columns={'Bl_Corrected_BRET': 'Bl_LP'}, inplace=True)
-
-                # Merge the calculated values back into the main DataFrame
-                df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
+            # Backward compatibility: fill missing columns and clean legacy data
+            df = ensure_master_csv_schema(df)
 
             # Store in the unified variable
             self.master_df = df

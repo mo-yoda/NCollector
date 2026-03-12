@@ -1,4 +1,39 @@
+import logging
 import pandas as pd
+
+logger = logging.getLogger("NCollector")
+
+
+def ensure_master_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fills in missing columns and cleans legacy data for Master CSVs from older NCollector versions.
+    Add new columns to the defaults dict as the schema evolves.
+    """
+    # --- Fill missing columns with defaults ---
+    defaults = {
+        "NCollector_version": "< v2",
+        "Path": "undocumented path",
+    }
+    for col, default_val in defaults.items():
+        if col not in df.columns:
+            df[col] = default_val
+            logger.info(f"'{col}' column missing. Assigned '{default_val}'.")
+
+    # --- v1.0.0 legacy cleanup ---
+    if "Empty/NoID" in df.get('Transfection', pd.Series()).values:
+        logger.info("Removing legacy 'Empty/NoID' data...")
+        df = df[df['Transfection'] != "Empty/NoID"].copy()
+
+    # --- Reconstruct Bl_LP if missing (pre-v2 CSVs only had Bl_Corrected_BRET) ---
+    if 'Bl_LP' not in df.columns and 'Bl_Corrected_BRET' in df.columns:
+        logger.info("'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
+        df_sorted = df.sort_values(by=['File_Name', 'Well_ID', 'Time_(min)'])
+        last_3 = df_sorted.groupby(['File_Name', 'Well_ID']).tail(3)
+        bl_lp_means = last_3.groupby(['File_Name', 'Well_ID'])['Bl_Corrected_BRET'].mean().reset_index()
+        bl_lp_means.rename(columns={'Bl_Corrected_BRET': 'Bl_LP'}, inplace=True)
+        df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
+
+    return df
 
 
 def apply_export_filters(df, config):
