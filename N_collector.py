@@ -1334,10 +1334,12 @@ def create_clean_pivot(df_input, index_col, value_col, disregard_well_id, drop_l
 class NCollectorApp:
     def __init__(self, main_window):
         self.main_gi = main_window
-        main_window.title("N Collector v2.0 Beta")
+        self.version = "N Collector v2.0 Beta"
+        main_window.title(self.version)
         main_window.geometry("800x700")
 
         # --- Data Storage ---
+        self.directory = ""
         self.subfolder_paths_with_files = []
         self.experiment: list[MeasurementFolder] = []
         self.master_index = pd.DataFrame()  # Index for populating tab 2
@@ -2226,6 +2228,14 @@ class NCollectorApp:
                 self.log("[ERROR] Invalid CSV format. Columns missing.")
                 return
 
+            # For Backward compatibility: Assign default version and path for older CSVs (< v2)
+            if "NCollector_version" not in df.columns:
+                df["NCollector_version"] = "< v2"
+                print("[INFO] 'NCollector_version' column missing. Assigned '< v2'.")
+            if "Path" not in df.columns:
+                df["Path"] = "undocumented path"
+                print("[INFO] 'Path' column missing. Assigned 'undocumented path'.")
+
             # For Backward compatibility with NCollector v1.0.0
             if "Empty/NoID" in df['Transfection'].values:
                 print("[INFO] Removing legacy 'Empty/NoID' data...")
@@ -2262,8 +2272,8 @@ class NCollectorApp:
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
-            directory = filedialog.askdirectory(title="Select a folder...")
-            if not directory: return
+            self.directory = filedialog.askdirectory(title="Select a folder...")
+            if not self.directory: return
 
             # --- RESET STATE: Clear old data when a new folder is selected
             self.subfolder_paths_with_files = []
@@ -2281,12 +2291,12 @@ class NCollectorApp:
 
 
             # Update GUI immediately
-            self.folder_path.set(f"Selected Path: {directory}\n\nScanning for files...")
+            self.folder_path.set(f"Selected Path: {self.directory}\n\nScanning for files...")
             self.load_files_button.config(state="disabled")
             self.main_gi.update()
 
             # --- Scan new directory for xlsx or xlsm---
-            for root, dirs, files in os.walk(directory):
+            for root, dirs, files in os.walk(self.directory):
                 if any(f.endswith((".xlsx", ".xlsm")) for f in files):
                     self.subfolder_paths_with_files.append(root) # Save paths of files
 
@@ -2296,13 +2306,13 @@ class NCollectorApp:
                 folder_names = [os.path.basename(path) for path in self.subfolder_paths_with_files]
                 folder_names_string = "\n ".join(folder_names)
                 self.folder_path.set(
-                    f"Selected Path: {directory}\n\n Found following subfolders with xlsx/xlsm files:\n {folder_names_string}")
+                    f"Selected Path: {self.directory}\n\n Found following subfolders with xlsx/xlsm files:\n {folder_names_string}")
                 self.load_files_button.config(state="normal")
                 print(f"Found {count} folders: \n {folder_names_string}")
             else:
-                self.folder_path.set(f"Error: No .xlsx or .xlsm files found in {directory} or any subfolder.")
+                self.folder_path.set(f"Error: No .xlsx or .xlsm files found in {self.directory} or any subfolder.")
                 self.load_files_button.config(state="disabled")
-                print(f"No .xlsx or .xlsm files found starting from: {directory}")
+                print(f"No .xlsx or .xlsm files found starting from: {self.directory}")
 
     def handle_main_plasmids_selection(self):
         """
@@ -2750,6 +2760,8 @@ class NCollectorApp:
                 all_files_data.append(merged_df)
 
                 # --- ADD METADATA ---
+                merged_df["NCollector_version"] = self.version
+                merged_df["Path"] = self.directory
                 merged_df["File_Name"] = res.file_name
                 merged_df["Date"] = res.measurement_date
                 merged_df["Main_Plasmids"] = main_plasmids
@@ -2796,6 +2808,7 @@ class NCollectorApp:
         master_df = pd.concat(all_files_data, ignore_index=True)
         # Cleanup columns
         cols_order = [
+            "NCollector_version", "Path",
             "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
             "Transfection", "Cell_Line", "Ligand",
             "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
