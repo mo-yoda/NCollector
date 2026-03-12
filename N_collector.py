@@ -1,9 +1,13 @@
 import os
+import logging
 import tkinter as tk
 from tkinter import filedialog, ttk
 import pandas as pd
 from datetime import datetime, date
 from dataclasses import dataclass, field
+
+# --- Module-Level Logger --- #
+logger = logging.getLogger("NCollector")
 
 # --- Dataclass Definition --- #
 
@@ -136,13 +140,13 @@ def get_location(df: pd.DataFrame, marker: str, match_index: int = 0):
     all_matches = mask.stack()[mask.stack()].index.tolist()
 
     if not all_matches:
-        print(f"   [ERROR] Marker '{marker}' not found in sheet.")
+        logger.error(f"Marker '{marker}' not found in sheet.")
         return None
 
     # Check if the requested occurrence exists
     if match_index >= len(all_matches):
-        print(
-            f"   [ERROR] Requested occurrence #{match_index + 1} of '{marker}' not found. Only {len(all_matches)} found.")
+        logger.error(
+            f"Requested occurrence #{match_index + 1} of '{marker}' not found. Only {len(all_matches)} found.")
         return None
 
     # Return the specific (row, col) tuple
@@ -172,7 +176,7 @@ def extract_value(
 
     # Safety check for bounds of sheet
     if target_row >= df.shape[0] or target_col >= df.shape[1]:
-        print(f"   [ERROR] Target for '{marker}' is outside the sheet boundaries.")
+        logger.error(f"Target for '{marker}' is outside the sheet boundaries.")
         return None
 
     # .iloc uses [row, col]
@@ -288,7 +292,6 @@ def process_transfection_scheme(df: pd.DataFrame):
         unique_dna = dna_set - common_dna
         variable_dic[col] = sorted(list(unique_dna))
 
-    # print(f"identified conditions {variable_dic}")
     return main_plasmids, variable_dic
 
 def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
@@ -305,7 +308,7 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
                                        header=None)
     except ValueError:
         # Error if sheet is missing
-        print(f"[ERROR] Worksheet '{protocol_worksheet}' not found in file.")
+        logger.error(f"Worksheet '{protocol_worksheet}' not found in file.")
         return None
 
     exp_date = None
@@ -315,7 +318,7 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
         try:
             exp_date = datetime.strptime(date_str.strip(), '%d.%m.%y').date()
         except ValueError:
-            print(f"   [WARNING] Protocol date '{date_str}' not in DD.MM.YY format.")
+            logger.warning(f"Protocol date '{date_str}' not in DD.MM.YY format.")
 
     exp_n = extract_value(protocol_sheet, "n =")
 
@@ -411,12 +414,12 @@ def extract_metadata(pr_export_df):
         try:
             metadata["measurement_date"] = datetime.strptime(date_str.strip(), '%d/%m/%Y').date()
         except ValueError:
-            print(f"   [WARNING] Analysis date '{date_str}' not in DD/MM/YYYY format.")
+            logger.warning(f"Analysis date '{date_str}' not in DD/MM/YYYY format.")
             return None  # Fail extraction if date is invalid
 
     # Ensure all required metadata fields were found
     if 'measurement_date' not in metadata or 'cell_line' not in metadata or 'transfections' not in metadata:
-        print("   [WARNING] Missing Date, ID2, or ID3 from metadata sheet.")
+        logger.warning("Missing Date, ID2, or ID3 from metadata sheet.")
         return None
 
     return metadata
@@ -466,7 +469,7 @@ def extract_measurement_data(xls_obj, file_name: str):
                                      )
     except ValueError:
         # Error if sheet is missing
-        print(f"[ERROR] Worksheet '{worksheet}' not found in file.")
+        logger.error(f"Worksheet '{worksheet}' not found in file.")
         return None
 
     metadata_dic = extract_metadata(pr_export_df)
@@ -520,8 +523,8 @@ def get_cell_line_map(protocol: ProtocolData, cell_lines: str, block_count: int 
     Defines the plate layout for cell lines based on the dropdown selection protocol (.line_layout)
     and cell_lines in ID2 of the plate reader metadata (PrResult.cell_line)
     """
-    print(f"\n[DEBUG] --- Mapping Cell Lines ---")
-    print(f"[DEBUG] Layout Type: '{protocol.line_layout}' | Raw ID2: '{cell_lines}'")
+    logger.debug(f"--- Mapping Cell Lines ---")
+    logger.debug(f"Layout Type: '{protocol.line_layout}' | Raw ID2: '{cell_lines}'")
     # Split ID2 string to get potentially multiple cell lines
     lines = [x.strip() for x in cell_lines.split(',')]
 
@@ -554,7 +557,7 @@ def built_conc_dic(df_conc: pd.DataFrame):
             else:
                 conc_dic[row_char] = 0.0 # For vehicle row
     except Exception as e:
-        print(f"   [WARNING] Error parsing concentration table: {e}")
+        logger.warning(f"Error parsing concentration table: {e}")
 
     return conc_dic
 
@@ -579,7 +582,7 @@ def get_ligand_map(protocol: ProtocolData, block_count: int = 4):
     c_layout = str(protocol.line_layout).lower()
 
     if "one line" in c_layout:
-        print(f"   [ERROR] Protocol '{protocol.file_name}' lists 2 ligands but uses 'One Line' "
+        logger.error(f"Protocol '{protocol.file_name}' lists 2 ligands but uses 'One Line' "
               f"cell layout without specifying ligand layout.")
         # TODO: create pop up to ask which ligand was used for each plate
         return generate_col_mapping("one", 'L1', 'L2', block_count)
@@ -593,7 +596,7 @@ def get_ligand_map(protocol: ProtocolData, block_count: int = 4):
         return generate_col_mapping("half", 'L1', 'L2', block_count)
 
     else:
-        print(f"   [WARNING] Unknown cell layout '{c_layout}'. Defaulting all to Ligand 1 {protocol.ligand}.")
+        logger.warning(f"Unknown cell layout '{c_layout}'. Defaulting all to Ligand 1 {protocol.ligand}.")
         return generate_col_mapping("one", 'L1', 'L2', block_count)
 
 
@@ -603,9 +606,9 @@ def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, 
     Depending on whether ligand layout is provided, transfection layout is decided on
     cell line layout or cell line and ligand layout.
     """
-    print(f"[DEBUG] --- Mapping Transfections ---")
-    print(f"[DEBUG] Raw ID3 List: {t_ids}")
-    print(f"[DEBUG] Layouts: Cell='{cell_layout_type}' / Ligand='{ligand_layout_type}'")
+    logger.debug(f"--- Mapping Transfections ---")
+    logger.debug(f"Raw ID3 List: {t_ids}")
+    logger.debug(f"Layouts: Cell='{cell_layout_type}' / Ligand='{ligand_layout_type}'")
     # If no IDs, return empty
     if not t_ids:
         return ["N/A"] * block_count
@@ -682,7 +685,7 @@ def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, 
             return _unique() if len(t_ids) >= block_count else _elem_repeat()
 
         # Fallback
-    print(f"[WARNING] Unhandled layout combination: {cell_layout} + {ligand_layout}")
+    logger.warning(f"Unhandled layout combination: {cell_layout} + {ligand_layout}")
     return _unique()
 
 
@@ -914,7 +917,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     plate_blocks = config.plate_layout
     date_str = result.measurement_date.strftime('%d.%m.%y')
 
-    print(f"\n[DEBUG] === Processing File: {result.file_name} ===")
+    logger.debug(f"=== Processing File: {result.file_name} ===")
 
     # --- METADATA MAPPING ---
     # Get cell line map
@@ -927,7 +930,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
         t_ids=raw_ids,
         block_count=len(plate_blocks)
     )
-    print(f"[DEBUG] Mapped Block Sequence: {mapped_t_ids}")
+    logger.debug(f"Mapped Block Sequence: {mapped_t_ids}")
 
     # Ligand identity and conc map
     ligand_col_map = get_ligand_map(protocol, len(plate_blocks))
@@ -1027,12 +1030,12 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                     result.low_lum_warnings.append(warning_dict)
 
             except Exception as e:
-                print(f"[WARNING] Error parsing lum key {key}: {e}")
+                logger.warning(f"Error parsing lum key {key}: {e}")
 
     # --- BUILT TIME VECTOR ---
     time_col = "Time (min)"
     if len(raw_df) < baseline_end_idx:
-        print(f"   [WARNING] Data has less than {baseline_end_idx} rows.")
+        logger.warning(f"Data has fewer than {baseline_end_idx} rows.")
         return result
 
     # Built time vector
@@ -1047,7 +1050,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     labeling_corr_df = None
     wells_to_drop = []
     if is_labeling:
-        print("   [INFO] Applying Labeling Correction (Background Subtraction)")
+        logger.info("Applying Labeling Correction (Background Subtraction)")
         for block in plate_blocks:
             control_col = [
                 c for c in block
@@ -1061,8 +1064,8 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                               if w in data_df.columns and w not in result.excluded_wells]
 
             if not valid_controls:
-                print(
-                    f"      [WARNING] No valid control wells found for labeling control in block {block}. Skipping.")
+                logger.warning(
+                    f"No valid control wells found for labeling control in block {block}. Skipping.")
                 continue
 
             # axis=1 computes mean across the selected control wells for each row (time point)
@@ -1144,7 +1147,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     auc_df = pd.DataFrame(auc_norm_dict, index=[0])
 
     # --- VEHICLE CHECK ---
-    print("[DEBUG] starting vehicle check")
+    logger.debug("Starting vehicle check")
     for block in plate_blocks:
         for c_idx in block:
             well_id = f"H{c_idx}"
@@ -1655,7 +1658,7 @@ class NCollectorApp:
             self.log_text.see(tk.END)
             self.main_gi.update_idletasks()
         except tk.TclError:
-            print(message)
+            logger.info(message)
 
     def show_warning_review(self, all_warnings):
         """Pop-up window allowing users to select warnings to exclude."""
@@ -1964,7 +1967,7 @@ class NCollectorApp:
                     if well_id not in result_obj.excluded_wells:
                         result_obj.excluded_wells.append(well_id)
                         count_wells += 1
-                        print(f"Excluded {well_id} in {result_obj.file_name}")
+                        logger.debug(f"Excluded {well_id} in {result_obj.file_name}")
 
         if count_files > 0: self.log(f"   [DONE] Excluded {count_files} entire files.")
         if count_wells > 0: self.log(f"   [DONE] Excluded {count_wells} specific wells.")
@@ -2190,7 +2193,7 @@ class NCollectorApp:
         internal_name = self.data_type_map.get(category, {}).get(specific_type)
 
         if not internal_name:
-            print(f"[ERROR] Unknown data type selected: {category} - {specific_type}")
+            logger.error(f"Unknown data type selected: {category} - {specific_type}")
             return
 
         config = {
@@ -2231,18 +2234,18 @@ class NCollectorApp:
             # For Backward compatibility: Assign default version and path for older CSVs (< v2)
             if "NCollector_version" not in df.columns:
                 df["NCollector_version"] = "< v2"
-                print("[INFO] 'NCollector_version' column missing. Assigned '< v2'.")
+                logger.info("'NCollector_version' column missing. Assigned '< v2'.")
             if "Path" not in df.columns:
                 df["Path"] = "undocumented path"
-                print("[INFO] 'Path' column missing. Assigned 'undocumented path'.")
+                logger.info("'Path' column missing. Assigned 'undocumented path'.")
 
             # For Backward compatibility with NCollector v1.0.0
             if "Empty/NoID" in df['Transfection'].values:
-                print("[INFO] Removing legacy 'Empty/NoID' data...")
+                logger.info("Removing legacy 'Empty/NoID' data...")
                 df = df[df['Transfection'] != "Empty/NoID"].copy()
 
             if 'Bl_LP' not in df.columns and 'Bl_Corrected_BRET' in df.columns:
-                print("[INFO] 'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
+                logger.info("'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
                 # Sort to guarantee chronological order
                 df_sorted = df.sort_values(by=['File_Name', 'Well_ID', 'Time_(min)'])
                 # Grab the last 3 timepoints per file and well
@@ -2308,11 +2311,11 @@ class NCollectorApp:
                 self.folder_path.set(
                     f"Selected Path: {self.directory}\n\n Found following subfolders with xlsx/xlsm files:\n {folder_names_string}")
                 self.load_files_button.config(state="normal")
-                print(f"Found {count} folders: \n {folder_names_string}")
+                logger.info(f"Found {count} folders: \n {folder_names_string}")
             else:
                 self.folder_path.set(f"Error: No .xlsx or .xlsm files found in {self.directory} or any subfolder.")
                 self.load_files_button.config(state="disabled")
-                print(f"No .xlsx or .xlsm files found starting from: {self.directory}")
+                logger.warning(f"No .xlsx or .xlsm files found starting from: {self.directory}")
 
     def handle_main_plasmids_selection(self):
         """
@@ -2370,7 +2373,7 @@ class NCollectorApp:
 
         # Filter the experiment list
         self.experiment = main_plasmids_groups[selected_key]
-        print(f"   [FILTER] Keeping {len(self.experiment)} folders matching main plasmids: {selected_key}")
+        logger.info(f"Keeping {len(self.experiment)} folders matching main plasmids: {selected_key}")
 
         return " + ".join(selected_key)
 
@@ -2424,7 +2427,7 @@ class NCollectorApp:
 
             # --- Summary for verification ---
             summary = self.master_index.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
-            print("\n[DEBUG] Data Summary:\n", summary)
+            logger.debug(f"Data Summary:\n{summary}")
             self.refresh_filter_options()
             self.update_summary_table()
             self.refresh_plot_helper_options()
@@ -2432,7 +2435,7 @@ class NCollectorApp:
         else:
             self.master_index = pd.DataFrame()
             self.update_summary_table()
-            print("No valid data found")
+            logger.warning("No valid data found")
             return self.master_index
 
     def collect_files(self):
@@ -2442,7 +2445,7 @@ class NCollectorApp:
         Validation of correct protocol to analysis files is done via date of measurement in the folder name.
         """
         if not self.subfolder_paths_with_files:
-            print("No folders to analyze.")
+            logger.warning("No folders to analyze.")
             return
 
         # Create config
@@ -2546,7 +2549,7 @@ class NCollectorApp:
 
             # Store the collected data for this experiment
             self.experiment.append(folder_data)
-            print(f"   [SKIPPED]: {folder_data.skipped_files}")
+            logger.debug(f"Skipped files: {folder_data.skipped_files}")
 
         self.log(f"--- Loading Complete. Loaded {len(self.experiment)} folders. ---")
 
@@ -2647,8 +2650,8 @@ class NCollectorApp:
                     df_work = df.copy()
                     # Check lengths
                     if len(df_work) != len(time_vec):
-                        print(
-                            f"[WARNING] Length mismatch in {res.file_name}: Data {len(df_work)} vs Time {len(time_vec)}")
+                        logger.warning(
+                            f"Length mismatch in {res.file_name}: Data {len(df_work)} vs Time {len(time_vec)}")
                         # Use generic index
                         df_work.index.name = "Time_Idx"
                         id_var = "Time_Idx"
@@ -2847,7 +2850,7 @@ class NCollectorApp:
             df_subset = apply_export_filters(self.master_df, config)
 
             if df_subset.empty:
-                print("[ERROR] Export failed: Filter resulted in no data.")
+                logger.error("Export failed: Filter resulted in no data.")
                 return
 
             # Define groups
@@ -3025,7 +3028,7 @@ class NCollectorApp:
         log_content = self.log_text.get("1.0", tk.END)
 
         if not log_content.strip():
-            print("Log is empty, nothing to save.")
+            logger.info("Log is empty, nothing to save.")
             return
 
         file_path = filedialog.asksaveasfilename(
@@ -3038,12 +3041,19 @@ class NCollectorApp:
             try:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(log_content)
-                print(f"Log saved to: {file_path}")
+                logger.info(f"Log saved to: {file_path}")
             except Exception as e:
-                print(f"Error saving log: {e}")
+                logger.error(f"Error saving log: {e}")
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
+    # Configure logging: DEBUG to console
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S"
+    )
+
     # Create the main window
     root = tk.Tk()
 
