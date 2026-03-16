@@ -209,47 +209,24 @@ def create_warning_record(warn_type: str,
         "Display": display_text
     }
 
-# --- Main Processing Pipeline --- #
+# --- Processing Sub-Steps --- #
 
-def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: ProcessingConfig):
+def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: ProcessingConfig):
     """
-    Maps cell line x transfection x ligand plate layout using protocol info.
-    Performs baseline correction. Vehicle normalisation with kinetic data and AUC in parallel.
-    Checks vehicle for outliers and luminescence count, saves warnings.
+    Maps cell line, transfection, and ligand identity onto each plate column (1-12).
+    Populates result.column_metadata with PlateColMetadata for each column.
     """
-    if result.is_excluded:
-        result.kinetic_df = None
-        result.kinetic_mean_df = None
-        result.auc_df = None
-        result.auc_mean_df = None
-        result.vehicle_warnings = []
-        result.low_lum_warnings = []
-        return result
-
-    # Reset for re-run
-    result.vehicle_warnings = []
-    result.low_lum_warnings = []
-    result.low_lum_cond = {}
-    result.column_metadata = {}
-
-    # --- CONFIG PROCESSING ---
-    is_labeling = config.labeling_correction
-    acc_vehicle_range = config.vehicle_warning_threshold
-    baseline_end_idx = config.baseline_end_index
-    lum_threshold = config.lum_threshold
     plate_blocks = config.plate_layout
-    date_str = result.measurement_date.strftime('%d.%m.%y')
+    is_labeling = config.labeling_correction
 
-    logger.debug(f"=== Processing File: {result.file_name} ===")
-
-    # --- METADATA MAPPING ---
     # Get cell line map
     cl_map = get_cell_line_map(protocol, result.cell_line, len(plate_blocks))
+
     # Get transfection map via mapping ID3 info
     raw_ids = [x.strip() for x in str(result.transfection_id).split(',')] if result.transfection_id else []
     mapped_t_ids = get_transfection_map(
         cell_layout_type=protocol.line_layout,
-        ligand_layout_type=protocol.ligand_layout,  # Pass the new field
+        ligand_layout_type=protocol.ligand_layout,
         t_ids=raw_ids,
         block_count=len(plate_blocks)
     )
@@ -258,12 +235,10 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # Ligand identity and conc map
     ligand_col_map = get_ligand_map(protocol, len(plate_blocks))
     conc_map_1 = built_conc_dic(protocol.ligand_conc)
-    # Only built if second ligand is defined
     conc_map_2 = built_conc_dic(protocol.ligand_2_conc) if protocol.ligand_2 else {}
 
     # Apply metadata on cols
     for i, block_cols in enumerate(plate_blocks):
-        # Get the ID assigned to this block
         t_id = mapped_t_ids[i]
 
         # Resolve ID to Name (using Protocol)
@@ -281,9 +256,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
             current_rep_id = str(rep_idx + 1)
             c_line = cl_map.get(col, "Unknown")
 
-            # Check the placeholder token ('L1' or 'L2')
             which_lig = ligand_col_map.get(col, 'L1')
-
             if which_lig == 'L2' and protocol.ligand_2:
                 current_ligand_name = str(protocol.ligand_2)
                 current_conc_map = conc_map_2
@@ -294,7 +267,6 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
             # In case of labeling correction, use last col in block as mock labeling control
             if is_labeling and rep_idx == (len(block_cols) - 1):
                 current_rep_id = "labeling control"
-                # current_conc_map = {r: 0.0 for r in "ABCDEFGH"}
 
             result.column_metadata[col] = PlateColMetadata(
                 cell_line=c_line,
@@ -306,145 +278,115 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                 replicate=current_rep_id
             )
 
-    # --- ASSIGNING EXCLUDED WELLS ---
-    # Get raw BRET ratio table and lum table
-    raw_df = result.raw_bret_ratio_df.copy()
-    lum_df = result.lum_df.copy()
 
-    if result.excluded_wells:
-        # Set entire columns to NaN
-        for well in result.excluded_wells:
-            if well in raw_df.columns: raw_df[well] = float('nan')
-            if well in lum_df.columns: lum_df[well] = float('nan')
-
-    # --- LUM COUNT CHECK ---
-    # Drop time col
+def check_luminescence(lum_df: pd.DataFrame,
+                       plate_blocks: list[range],
+                       column_metadata: dict,
+                       lum_threshold: int,
+                       date_str: str) -> list[dict]:
+    """
+    Checks mean luminescence of last 5 timepoints per replicate against threshold.
+    Returns list of warning dicts for conditions below threshold.
+    """
+    warnings = []
     lum_calc_df = lum_df.drop(columns=["Time (min)"], errors='ignore').apply(pd.to_numeric, errors='coerce')
-    # Use calculate_replicate_means to assign condition keys (and calc mean per row)
-    lum_mean_df = calculate_means_on_meta(lum_calc_df, plate_blocks, result.column_metadata, grouping_mode="column")
+    lum_mean_df = calculate_means_on_meta(lum_calc_df, plate_blocks, column_metadata, grouping_mode="column")
 
-    if not lum_mean_df.empty:
-        # Check last 5 rows (time points)
-        lum_end = lum_mean_df.iloc[-5:] if len(lum_mean_df) >= 5 else lum_mean_df
-        mean_lum_end = lum_end.mean() # Mean value per condition key
+    if lum_mean_df.empty:
+        return warnings
 
-        # Compare with threshold
-        low_lum_cond = mean_lum_end[mean_lum_end < lum_threshold]
+    lum_end = lum_mean_df.iloc[-5:] if len(lum_mean_df) >= 5 else lum_mean_df
+    mean_lum_end = lum_end.mean()
+    low_lum_cond = mean_lum_end[mean_lum_end < lum_threshold]
 
-        for key, val in low_lum_cond.items():
-            # Extract cond stats from key
-            try:
-                # "Cond_Name|Cell|Ligand"
-                parts = key.split("|")
-                if len(parts) < 4: continue # Safety check
-                cond_name, cell_line, lig_name, repl_num = parts[0], parts[1], parts[2], parts[3]
-                # Case for empty cols
-                if cond_name == "Empty": continue
-                warning_dict = create_warning_record(
-                    warn_type="Lum",
-                    exp_date=date_str,
-                    cond_name=cond_name,
-                    cell_line=cell_line,
-                    ligand=lig_name,
-                    value=float(val),
-                    replicate=str(repl_num)
-                )
-                if warning_dict not in result.low_lum_warnings:
-                    result.low_lum_warnings.append(warning_dict)
+    for key, val in low_lum_cond.items():
+        try:
+            # "Cond_Name|Cell|Ligand"
+            parts = key.split("|")
+            if len(parts) < 4: continue
+            cond_name, cell_line, lig_name, repl_num = parts[0], parts[1], parts[2], parts[3]
+            if cond_name == "Empty": continue
 
-            except Exception as e:
-                logger.warning(f"Error parsing lum key {key}: {e}")
+            warning_dict = create_warning_record(
+                warn_type="Lum",
+                exp_date=date_str,
+                cond_name=cond_name,
+                cell_line=cell_line,
+                ligand=lig_name,
+                value=float(val),
+                replicate=str(repl_num)
+            )
+            if warning_dict not in warnings:
+                warnings.append(warning_dict)
+        except Exception as e:
+            logger.warning(f"Error parsing lum key {key}: {e}")
 
-    # --- BUILT TIME VECTOR ---
-    time_col = "Time (min)"
-    if len(raw_df) < baseline_end_idx:
-        logger.warning(f"Data has fewer than {baseline_end_idx} rows.")
-        return result
+    return warnings
 
-    # Built time vector
-    time_vec = calculate_relative_time(raw_df["Time (min)"], baseline_end_idx)
-    if time_vec is None:
-        time_vec = range(len(raw_df))  # Fallback index
 
-    # Prepare the full dataframe for normalization (removing the time col)
-    data_df = raw_df.drop(columns=[time_col]).copy()
-
-    # --- OPTIONAL LABELING CORRECTION ---
-    labeling_corr_df = None
+def apply_labeling_correction(data_df: pd.DataFrame,
+                              plate_blocks: list[range],
+                              column_metadata: dict,
+                              excluded_wells: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Subtracts mock-labeling control background from each block.
+    Returns (labeling_corrected_df, wells_to_drop) where wells_to_drop are the
+    control wells that should be excluded from subsequent processing steps.
+    """
+    logger.info("Applying Labeling Correction (Background Subtraction)")
     wells_to_drop = []
-    if is_labeling:
-        logger.info("Applying Labeling Correction (Background Subtraction)")
-        for block in plate_blocks:
-            control_col = [
-                c for c in block
-                if result.column_metadata.get(c) and result.column_metadata[c].replicate == "labeling control"
-            ]
 
-            # Use entire col
-            control_wells = [f"{r}{control_col[0]}" for r in "ABCDEFGH"]
+    for block in plate_blocks:
+        control_col = [
+            c for c in block
+            if column_metadata.get(c) and column_metadata[c].replicate == "labeling control"
+        ]
 
-            valid_controls = [w for w in control_wells
-                              if w in data_df.columns and w not in result.excluded_wells]
+        control_wells = [f"{r}{control_col[0]}" for r in "ABCDEFGH"]
+        valid_controls = [w for w in control_wells if w in data_df.columns and w not in excluded_wells]
 
-            if not valid_controls:
-                logger.warning(
-                    f"No valid control wells found for labeling control in block {block}. Skipping.")
-                continue
+        if not valid_controls:
+            logger.warning(f"No valid control wells found for labeling control in block {block}. Skipping.")
+            continue
 
-            # axis=1 computes mean across the selected control wells for each row (time point)
-            mock_labeling = data_df[valid_controls].mean(axis=1)
+        mock_labeling = data_df[valid_controls].mean(axis=1)
 
-            # construct a list of all wells in the block (targets + controls)
-            block_wells = []
-            for col_idx in block:
-                block_wells.extend([f"{r}{col_idx}" for r in "ABCDEFGH"])
+        block_wells = []
+        for col_idx in block:
+            block_wells.extend([f"{r}{col_idx}" for r in "ABCDEFGH"])
+        valid_targets = [w for w in block_wells if w in data_df.columns]
 
-            # Only subtract from wells that exist in the dataframe
-            valid_targets = [w for w in block_wells if w in data_df.columns]
+        # .sub(bg_vector, axis=0) ensures alignment on the time index
+        data_df[valid_targets] = data_df[valid_targets].sub(mock_labeling, axis=0)
+        wells_to_drop.extend(control_wells)
 
-            # Perform subtraction in-place
-            # .sub(bg_vector, axis=0) ensures alignment on the time index
-            data_df[valid_targets] = data_df[valid_targets].sub(mock_labeling, axis=0)
-            labeling_corr_df = data_df.copy()
+    labeling_corr_df = data_df.copy()
+    return labeling_corr_df, wells_to_drop
 
-            # Collect labeling control wells to drop after using for correction
-            wells_to_drop.extend(control_wells)
-    else:
-        # Nan-filled df for non-labeling data
-        labeling_corr_df = pd.DataFrame(float('nan'), index=data_df.index, columns=data_df.columns)
 
-    # Remove labeling control columns from the dataframe
-    # Ensures they are ignored by Baseline Correction, Vehicle Norm, and AUC
-    if wells_to_drop:
-        data_df.drop(columns=wells_to_drop, inplace=True, errors='ignore')
-
-    # --- BASELINE CORRECTION ---
+def apply_baseline_correction(data_df: pd.DataFrame, baseline_end_idx: int) -> pd.DataFrame:
+    """
+    Divides each well by the mean of its baseline phase (first N reads).
+    Returns baseline-corrected DataFrame with infinities replaced by NaN.
+    """
     baseline_means = data_df.iloc[0:baseline_end_idx].mean()
     bl_corrected_df = data_df / baseline_means
-
-    # Handle columns where baseline_mean was 0 (to avoid infinity)
     bl_corrected_df = bl_corrected_df.replace([float('inf'), -float('inf')], float('nan')).infer_objects()
+    return bl_corrected_df
 
-    # --- AUC CALCULATION ---
-    # Use slicing to sum only the kinetic phase (after baseline)
-    if labeling_corr_df.isna().all().all():
-        labeling_corr_auc_df = pd.DataFrame(float('nan'), index=data_df.index, columns=data_df.columns)
-    else:
-        labeling_corr_auc_df = labeling_corr_df.iloc[baseline_end_idx:].sum().to_frame().T
 
-    bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum().to_frame().T
+def apply_vehicle_normalization(bl_corrected_df: pd.DataFrame,
+                                bl_corr_auc_df: pd.DataFrame,
+                                data_df: pd.DataFrame,
+                                plate_blocks: list[range],
+                                excluded_wells: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Normalises kinetic and AUC data to vehicle (row H) means per block.
+    Returns (kinetic_df, auc_df).
+    """
+    veh_means_kinetic = calculate_vehicle_means(bl_corrected_df, plate_blocks, excluded_wells)
+    veh_means_auc = calculate_vehicle_means(bl_corr_auc_df, plate_blocks, excluded_wells)
 
-    # --- VEHICLE CORRECTION ---
-    # Kinetics (df -> returns series of means over time)
-    veh_means_kinetic = calculate_vehicle_means(
-        bl_corrected_df, plate_blocks, result.excluded_wells
-    )
-    # For AUC (df with one row -> returns dictionary of scalars)
-    veh_means_auc = calculate_vehicle_means(
-        bl_corr_auc_df, plate_blocks, result.excluded_wells
-    )
-
-    # Apply Normalization (using dictionaries to avoid fragmentation/warnings for pd.Df)
     kinetic_norm_dict = {}
     auc_norm_dict = {}
 
@@ -465,27 +407,35 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
         else:
             auc_norm_dict[col] = float('nan')
 
-    # Create df from dict; index setting is required to handle excluded (nan) data
     kinetic_df = pd.DataFrame(kinetic_norm_dict, index=data_df.index)
     auc_df = pd.DataFrame(auc_norm_dict, index=[0])
+    return kinetic_df, auc_df
 
-    # --- VEHICLE CHECK ---
+
+def check_vehicle_wells(kinetic_df: pd.DataFrame,
+                        plate_blocks: list[range],
+                        column_metadata: dict,
+                        excluded_wells: list[str],
+                        acc_vehicle_range: float,
+                        date_str: str) -> list[dict]:
+    """
+    Checks vehicle wells (row H) for excessive deviation from 1 after normalisation.
+    Returns list of warning dicts for outlier vehicle wells.
+    """
     logger.debug("Starting vehicle check")
+    warnings = []
+
     for block in plate_blocks:
         for c_idx in block:
             well_id = f"H{c_idx}"
-
-            # Skip if well is already excluded or doesn't exist
-            if well_id in result.excluded_wells or well_id not in kinetic_df.columns:
+            if well_id in excluded_wells or well_id not in kinetic_df.columns:
                 continue
 
-            # Check mean of entire kinetic against 1
             val_to_check = kinetic_df[well_id].mean()
             deviation = abs(val_to_check - 1)
 
             if deviation > acc_vehicle_range:
-                meta = result.column_metadata.get(c_idx)
-                # Case for empty cols
+                meta = column_metadata.get(c_idx)
                 if meta.condition_name == "Empty": continue
 
                 warning_dict = create_warning_record(
@@ -496,39 +446,121 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
                     ligand=meta.ligand_identity,
                     value=float(val_to_check),
                     replicate=str(meta.replicate),
-                    row="H",  # Specific row
+                    row="H",
                     well_id=well_id
                 )
+                warnings.append(warning_dict)
 
-                result.vehicle_warnings.append(warning_dict)
+    return warnings
 
-    # --- MEAN OF REPLICATES ---
-    kinetic_mean_df = calculate_means_on_meta(
-        kinetic_df, plate_blocks, result.column_metadata
+
+# --- Main Processing Pipeline --- #
+
+def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: ProcessingConfig):
+    """
+    Full processing pipeline for a single plate reader measurement file.
+    Maps metadata, then runs: exclusions → lum check → labeling correction →
+    baseline correction → AUC → vehicle normalisation → vehicle check → replicate means.
+    """
+    if result.is_excluded:
+        result.kinetic_df = None
+        result.kinetic_mean_df = None
+        result.auc_df = None
+        result.auc_mean_df = None
+        result.vehicle_warnings = []
+        result.low_lum_warnings = []
+        return result
+
+    # Reset for re-run
+    result.vehicle_warnings = []
+    result.low_lum_warnings = []
+    result.low_lum_cond = {}
+    result.column_metadata = {}
+
+    # Unpack config
+    plate_blocks = config.plate_layout
+    baseline_end_idx = config.baseline_end_index
+    date_str = result.measurement_date.strftime('%d.%m.%y')
+
+    logger.debug(f"=== Processing File: {result.file_name} ===")
+
+    # 1. MAP METADATA onto plate columns
+    map_plate_metadata(result, protocol, config)
+
+    # 2. APPLY EXCLUSIONS to raw data
+    raw_df = result.raw_bret_ratio_df.copy()
+    lum_df = result.lum_df.copy()
+    if result.excluded_wells:
+        for well in result.excluded_wells:
+            if well in raw_df.columns: raw_df[well] = float('nan')
+            if well in lum_df.columns: lum_df[well] = float('nan')
+
+    # 3. CHECK LUMINESCENCE
+    result.low_lum_warnings = check_luminescence(
+        lum_df, plate_blocks, result.column_metadata, config.lum_threshold, date_str
     )
-    auc_mean_df = calculate_means_on_meta(
-        auc_df, plate_blocks, result.column_metadata
+
+    # 4. BUILD TIME VECTOR
+    time_col = "Time (min)"
+    if len(raw_df) < baseline_end_idx:
+        logger.warning(f"Data has fewer than {baseline_end_idx} rows.")
+        return result
+
+    time_vec = calculate_relative_time(raw_df[time_col], baseline_end_idx)
+    if time_vec is None:
+        time_vec = range(len(raw_df))
+
+    data_df = raw_df.drop(columns=[time_col]).copy()
+
+    # 5. LABELING CORRECTION (optional)
+    if config.labeling_correction:
+        labeling_corr_df, wells_to_drop = apply_labeling_correction(
+            data_df, plate_blocks, result.column_metadata, result.excluded_wells
+        )
+        if wells_to_drop:
+            data_df.drop(columns=wells_to_drop, inplace=True, errors='ignore')
+    else:
+        labeling_corr_df = pd.DataFrame(float('nan'), index=data_df.index, columns=data_df.columns)
+
+    # 6. BASELINE CORRECTION
+    bl_corrected_df = apply_baseline_correction(data_df, baseline_end_idx)
+
+    # 7. AUC CALCULATION
+    if labeling_corr_df.isna().all().all():
+        labeling_corr_auc_df = pd.DataFrame(float('nan'), index=data_df.index, columns=data_df.columns)
+    else:
+        labeling_corr_auc_df = labeling_corr_df.iloc[baseline_end_idx:].sum().to_frame().T
+    bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum().to_frame().T
+
+    # 8. VEHICLE NORMALISATION
+    kinetic_df, auc_df = apply_vehicle_normalization(
+        bl_corrected_df, bl_corr_auc_df, data_df, plate_blocks, result.excluded_wells
     )
 
-    # --- SAVE RESULTS ---
-    # Raw BRET ratio with applied exclusions
+    # 9. VEHICLE CHECK
+    result.vehicle_warnings = check_vehicle_wells(
+        kinetic_df, plate_blocks, result.column_metadata,
+        result.excluded_wells, config.vehicle_warning_threshold, date_str
+    )
+
+    # 10. MEAN OF REPLICATES
+    kinetic_mean_df = calculate_means_on_meta(kinetic_df, plate_blocks, result.column_metadata)
+    auc_mean_df = calculate_means_on_meta(auc_df, plate_blocks, result.column_metadata)
+
+    # 11. SAVE RESULTS
     result.raw_bret_ratio_cleaned = raw_df
-
-    # --- Kinetic data
     result.time_vector = time_vec
     result.labeling_corr_kinetic = labeling_corr_df
     result.bl_corr_kinetic = bl_corrected_df
     result.kinetic_df = kinetic_df
     result.kinetic_mean_df = kinetic_mean_df
 
-    # --- Last 3x TP data
     result.raw_bret_points_df = raw_df.iloc[-3:].mean().to_frame().T
     result.labeling_corr_lp_df = labeling_corr_df.iloc[-3:].mean().to_frame().T
     result.bl_corr_lp_df = bl_corrected_df.iloc[-3:].mean().to_frame().T
     result.lp_df = kinetic_df.iloc[-3:].mean().to_frame().T
     result.lp_mean_df = kinetic_mean_df.iloc[-3:].mean().to_frame().T
 
-    # --- AUC data (tidy for CRC)
     result.labeling_corr_auc_df = labeling_corr_auc_df
     result.bl_corr_auc_df = bl_corr_auc_df
     result.auc_df = auc_df
