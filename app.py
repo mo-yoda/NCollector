@@ -5,7 +5,7 @@ from tkinter import filedialog, ttk
 import pandas as pd
 from datetime import datetime, date
 
-from models import MeasurementFolder, ProcessingConfig
+from models import MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS, DATA_TYPE_MAP
 from parsing import extract_protocol_info, extract_measurement_data
 from processing import process_bret_measurement
 from export import apply_export_filters, build_row_info_str, generate_header_key, create_clean_pivot, ensure_master_csv_schema
@@ -17,8 +17,7 @@ logger = logging.getLogger("NCollector")
 class NCollectorApp:
     def __init__(self, main_window):
         self.main_gi = main_window
-        self.version = "N Collector v2.0 Beta"
-        main_window.title(self.version)
+        main_window.title(APP_VERSION)
         main_window.geometry("800x700")
 
         # --- Data Storage ---
@@ -36,15 +35,6 @@ class NCollectorApp:
         self.folder_path = tk.StringVar(value="No folder selected.")
         self.var_labeling_is_checked = tk.BooleanVar(value=False)
         self.var_lum_threshold = tk.IntVar(value=100)
-        self.var_lig = tk.StringVar(value="")
-        self.var_date = tk.StringVar(value="All")
-        self.var_cell = tk.StringVar(value="All")
-        self.var_cond = tk.StringVar(value="All")
-        self.var_repl = tk.StringVar(value="All")
-        self.var_row = tk.StringVar(value="All")
-        self.var_category = tk.StringVar(value="")
-        self.var_specific_type = tk.StringVar(value="")
-        self.var_group_by = tk.StringVar(value="Transfection")
 
         # --- GUI Widgets (Initialised to None) ---
         self.log_window = None
@@ -79,26 +69,6 @@ class NCollectorApp:
         self.combo_specific = None
         self.lb_kin_layout = None
         self.btn_run_plot_helper = None
-
-        # --- Constants ---
-        self.data_type_map = {
-            "kinetic": {
-                "raw BRET ratio": "Raw_BRET_kinetic",
-                "labeling-corrected BRET ratio": "Lab_BRET_kinetic",
-                "baseline-corrected BRET ratio": "Bl_Corrected_BRET",
-                "vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
-                "vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean"
-            },
-            "CRC": {
-                "last 3x timepoints: raw BRET": "Raw_BRET_CRC",
-                "last 3x timepoints: labeling-corrected BRET ratio": "Lab_LP",
-                "last 3x timepoints: baseline-corrected BRET ratio": "Bl_LP",
-                "last 3x tp: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_LP",
-                "last 3x tp: vehicle-normalised BRET ratio, mean of techn. replicates": "LP_Mean",
-                "AUC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
-                "AUC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
-            }
-        }
 
         # --- Setup GUI ---
         self.setup_logging()
@@ -269,8 +239,6 @@ class NCollectorApp:
         self.var_cond = tk.StringVar(value="All")
         self.var_repl = tk.StringVar(value="All")
         self.var_row = tk.StringVar(value="All")
-        # List to store rules
-        self.pending_exclusions = []
 
         # 1. Ligand Dropdown
         tk.Label(filter_frame, text="Ligand:").grid(row=0, column=0, padx=5, pady=5)
@@ -716,6 +684,7 @@ class NCollectorApp:
         type_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
         # Data Category Dropdown
+        self.var_category = tk.StringVar(value="")
         tk.Label(type_frame, text="Category:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
         self.combo_category = ttk.Combobox(type_frame, textvariable=self.var_category, state="readonly", width=10)
         self.combo_category.grid(row=0, column=1, padx=5, pady=5, sticky="w")
@@ -723,6 +692,7 @@ class NCollectorApp:
         self.combo_category.bind("<<ComboboxSelected>>", self.update_subtype_options)
 
         # Specific Data Type
+        self.var_specific_type = tk.StringVar(value="")
         tk.Label(type_frame, text="Subtype:").grid(row=1, column=0, padx=5, pady=2, sticky="w")
         self.combo_specific = ttk.Combobox(type_frame, textvariable=self.var_specific_type, state="readonly", width=60)
         self.combo_specific.grid(row=1, column=1, padx=5, pady=5, sticky="w")
@@ -766,7 +736,7 @@ class NCollectorApp:
         if self.master_df is None or self.master_df.empty: return
 
         selected_cat = self.var_category.get()  # "kinetic" or "CRC"
-        subtype_map = self.data_type_map.get(selected_cat, {})
+        subtype_map = DATA_TYPE_MAP.get(selected_cat, {})
 
         # Filter to find valid specific options in master_df
         valid_specifics = []
@@ -810,7 +780,7 @@ class NCollectorApp:
         available_categories = set()
 
         # Iterate over high-level keys ("kinetic", "CRC")
-        for cat, sub_map in self.data_type_map.items():
+        for cat, sub_map in DATA_TYPE_MAP.items():
             # Check if ANY column in this category exists in the dataframe
             for internal_col in sub_map.values():
                 # And at least one value is not NA
@@ -870,7 +840,7 @@ class NCollectorApp:
         specific_type = self.var_specific_type.get()
 
         if not category or not specific_type: return
-        internal_name = self.data_type_map.get(category, {}).get(specific_type)
+        internal_name = DATA_TYPE_MAP.get(category, {}).get(specific_type)
 
         if not internal_name:
             logger.error(f"Unknown data type selected: {category} - {specific_type}")
@@ -1419,7 +1389,7 @@ class NCollectorApp:
                 all_files_data.append(merged_df)
 
                 # --- ADD METADATA ---
-                merged_df["NCollector_version"] = self.version
+                merged_df["NCollector_version"] = APP_VERSION
                 merged_df["Path"] = self.directory
                 merged_df["File_Name"] = res.file_name
                 merged_df["Date"] = res.measurement_date
@@ -1466,16 +1436,7 @@ class NCollectorApp:
         # Combine all files
         master_df = pd.concat(all_files_data, ignore_index=True)
         # Cleanup columns
-        cols_order = [
-            "NCollector_version", "Path",
-            "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
-            "Transfection", "Cell_Line", "Ligand",
-            "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
-            "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
-            "Raw_BRET_CRC", "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
-            "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
-        ]
-        final_cols = [c for c in cols_order if c in master_df.columns]
+        final_cols = [c for c in MASTER_COLUMNS if c in master_df.columns]
         return master_df[final_cols]
 
     def export_master_csv(self):
@@ -1526,8 +1487,8 @@ class NCollectorApp:
             is_labeling = True if "labeling control" in df_subset["Replicate"].values else False
 
             # Definition which is kinetic and what is CRC
-            kinetic_types = list(self.data_type_map["kinetic"].values())
-            crc = list(self.data_type_map["CRC"].values())
+            kinetic_types = list(DATA_TYPE_MAP["kinetic"].values())
+            crc = list(DATA_TYPE_MAP["CRC"].values())
 
             with pd.ExcelWriter(file_path) as writer:
                 sheets_written = False

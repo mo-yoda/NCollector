@@ -2,6 +2,41 @@ import pandas as pd
 from datetime import date
 from dataclasses import dataclass, field
 
+# --- Application Constants --- #
+APP_VERSION = "N Collector v2.0 Beta"
+
+# Master DataFrame Column Schema
+# Column ordering for the master CSV. Referenced by compile_master_dataframe
+# for building the DF and ensure_master_csv_schema for importing older CSVs.
+MASTER_COLUMNS = [
+    "NCollector_version", "Path",
+    "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
+    "Transfection", "Cell_Line", "Ligand",
+    "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
+    "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
+    "Raw_BRET_CRC", "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
+    "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
+]
+
+# Dictionary defining which dropdown option corresponds to which column in Master df
+DATA_TYPE_MAP = {
+    "kinetic": {
+        "raw BRET ratio": "Raw_BRET_kinetic",
+        "labeling-corrected BRET ratio": "Lab_BRET_kinetic",
+        "baseline-corrected BRET ratio": "Bl_Corrected_BRET",
+        "vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_Kinetic",
+        "vehicle-normalised BRET ratio, mean of techn. replicates": "Kinetic_Mean"
+    },
+    "CRC": {
+        "last 3x timepoints: raw BRET": "Raw_BRET_CRC",
+        "last 3x timepoints: labeling-corrected BRET ratio": "Lab_LP",
+        "last 3x timepoints: baseline-corrected BRET ratio": "Bl_LP",
+        "last 3x tp: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_LP",
+        "last 3x tp: vehicle-normalised BRET ratio, mean of techn. replicates": "LP_Mean",
+        "AUC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
+        "AUC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
+    }
+}
 
 @dataclass
 class PlateColMetadata:
