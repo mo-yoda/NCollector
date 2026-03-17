@@ -10,9 +10,10 @@ APP_VERSION = "N Collector v2.0 Beta"
 # for building the DF and ensure_master_csv_schema for importing older CSVs.
 MASTER_COLUMNS = [
     "NCollector_version", "Path",
-    "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions",
+    "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions", "Is_Excluded",
     "Transfection", "Cell_Line", "Ligand",
     "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
+    "Donor_Raw_kinetic", "Acceptor_Raw_kinetic",
     "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
     "Raw_BRET_CRC", "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
     "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
@@ -59,7 +60,10 @@ class PrResult:
     cell_line: str # ID2
     transfection_id: str # ID3
     raw_bret_ratio_df: pd.DataFrame
-    lum_df: pd.DataFrame
+    donor_df: pd.DataFrame # Raw counts from donor channel (lower wavelength)
+    acceptor_df: pd.DataFrame # Raw counts from acceptor channel (higher wavelength)
+    donor_wavelength: int = 0
+    acceptor_wavelength: int = 0
 
     # --- Connection to protocol file ---
     # Key = Column Index (1-12), Value = WellMetadata object
