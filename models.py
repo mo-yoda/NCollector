@@ -59,7 +59,7 @@ class PrResult:
     measurement_date: date
     cell_line: str # ID2
     transfection_id: str # ID3
-    raw_bret_ratio_df: pd.DataFrame
+    raw_bret_ratio_df: pd.DataFrame # RET ratio as extracted, no exclusions applied
     donor_df: pd.DataFrame # Raw counts from donor channel (lower wavelength)
     acceptor_df: pd.DataFrame # Raw counts from acceptor channel (higher wavelength)
     donor_wavelength: int = 0
@@ -72,7 +72,7 @@ class PrResult:
     # --- Processed BRET data ---
     # Time column
     time_vector: list[float] = field(default_factory=list)
-    # Raw BRET ratio after with applied exclusions
+    # Raw BRET ratio with applied exclusions
     raw_bret_ratio_cleaned: pd.DataFrame | None = None
     # Labeling corrected kinetic data
     labeling_corr_kinetic: pd.DataFrame | None = None
