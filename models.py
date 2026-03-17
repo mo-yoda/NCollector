@@ -156,3 +156,6 @@ class ProcessingConfig:
         range(7, 10),  # Block 3: Cols 7-9
         range(10, 13)  # Block 4: Cols 10-12
     ])
+    # Optional callback for requesting user input (set by GUI layer).
+    # Signature: fn(title: str, message: str, input_type: str, default) -> value | None
+    user_input_fn: object = field(default=None, repr=False)
