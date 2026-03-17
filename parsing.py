@@ -323,6 +323,9 @@ def extract_bret_data(pr_export_df):
     df.iloc[:, 0] = df.iloc[:, 0].str.replace(r"([A-Za-z])0(\d)", r"\1\2", regex=True)
     df.iat[0, 0] = "Time (min)"
 
+    time_values = df.iloc[0, 2:].unique().astype(float)
+    logger.debug("Time values: {}".format(time_values))
+
     # --- Detect Raw Data column groups and extract wavelengths ---
     # Use positional indices to handle duplicate column names correctly
     wl_col_positions = {}  # {wavelength_int: [positional_indices]}
@@ -369,6 +372,7 @@ def extract_bret_data(pr_export_df):
     df_bret = df_bret.set_index(df_bret.columns[0]).T.reset_index(drop=True)
 
     return {
+        "time_min": time_values,
         "bret_ratio": df_bret,
         "donor": df_donor,
         "acceptor": df_acceptor,
@@ -402,6 +406,7 @@ def extract_measurement_data(xls_obj, file_name: str):
         measurement_date=metadata_dic['measurement_date'],
         cell_line=metadata_dic['cell_line'],
         transfection_id=metadata_dic['transfections'],
+        raw_time=bret_data["time_min"],
         raw_bret_ratio_df=bret_data["bret_ratio"],
         donor_df=bret_data["donor"],
         acceptor_df=bret_data["acceptor"],

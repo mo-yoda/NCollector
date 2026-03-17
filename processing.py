@@ -8,20 +8,44 @@ logger = logging.getLogger("NCollector")
 
 # --- Calculation Helpers --- #
 
-def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: int):
+def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: None):
     """
-    Calculates a relative time vector. Uses the measuring interval of the kinetic reading to
-    set first measurement after baseline (baseline_end_idx) to 0. Negative time for baseline reads.
+    Calculates a relative time vector. First measurement after baseline is set to 0. Negative time for baseline reads.
+
+    If no index for the number of baseline reads is provided, intervals are used to separate baseline and
+    kinetic readings (divergent interval is expected for manual ligand addition).
+    If all intervals are the same (e.g. ligand addition by injector) returns None.
     """
     # Clean and convert to numeric
     times = pd.Series(pd.to_numeric(raw_time_col, errors='coerce'))
-    kinetic_times = times.iloc[baseline_end_idx:].dropna()
 
-    if len(kinetic_times) < 2: return None  # Not enough data points
-
-    # Take the difference to filter out potential jitter
+    # Calculate interval
     # -> Rounding is important since otherwise 1.00 and 1.0 are not considered the same
-    interval = kinetic_times.diff().dropna().round(2).unique()[0]
+    intervals = times.diff().dropna().round(2)
+
+    if baseline_end_idx is None:
+        if len(intervals.unique()) < 2:
+            logger.debug(f"Could not detect baseline reads for {raw_time_col}")
+            return None
+            # TODO: Ask for user input on number of baseline reads
+
+        # Extract the one interval that is different from others (manual ligand addition)
+        unique_interval = intervals.drop_duplicates(keep=False)
+        if len(unique_interval) > 1:
+            logger.error(f"Multiple intervals found for baseline readings: {unique_interval}")
+            return None
+            # TODO: Raise Error for user to see
+
+        # Extract the index (baseline_end_idx)
+        baseline_end_idx = unique_interval.index[0]
+
+    if len(times) < baseline_end_idx:
+        logger.warning(f"Data has fewer than {baseline_end_idx} rows.")
+        return None
+        # TODO: Raise Error for user to see
+
+    # Define the plate reader read interval
+    read_interval = intervals.mode()[0]
 
     # Generate time vector for baseline and kinetic reading
     n_rows = len(raw_time_col)
@@ -29,7 +53,7 @@ def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: int):
 
     for i in range(n_rows):
         # (current_index - zero_index) * interval
-        t = (i - baseline_end_idx) * interval
+        t = (i - baseline_end_idx) * read_interval
         time_vector.append(t)
 
     return time_vector
@@ -507,13 +531,17 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
 
     # 4. BUILD TIME VECTOR
     time_col = "Time (min)"
-    if len(raw_df) < baseline_end_idx:
-        logger.warning(f"Data has fewer than {baseline_end_idx} rows.")
-        return result
 
     time_vec = calculate_relative_time(raw_df[time_col], baseline_end_idx)
     if time_vec is None:
         time_vec = range(len(raw_df))
+
+    # Update baseline_end_idx from built time_vec
+    baseline_end_idx = time_vec.index(0)
+
+    # Persist in config so subsequent files and re-runs reuse the same index
+    if config.baseline_end_index is None:
+        config.baseline_end_index = baseline_end_idx
 
     data_df = raw_df.drop(columns=[time_col]).copy()
 
