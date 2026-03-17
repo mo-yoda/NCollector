@@ -1315,8 +1315,8 @@ class NCollectorApp:
                 # Ignore time col in raw bret df
                 raw_clean = res.raw_bret_ratio_cleaned.drop(columns=["Time (min)"], errors='ignore')
 
-                df_og = melt_df(res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore'),
-                                "OG_BRET_ratio", t_vec)
+                # df_og = melt_df(res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore'),
+                #                "OG_BRET_ratio", t_vec)
                 df_donor = melt_df(res.donor_df.drop(columns=["Time (min)"], errors='ignore'),
                                 "Donor_Raw_kinetic", t_vec)
                 df_acceptor = melt_df(res.acceptor_df.drop(columns=["Time (min)"], errors='ignore'),
@@ -1327,10 +1327,9 @@ class NCollectorApp:
                 df_norm = melt_df(res.kinetic_df, "Veh_Norm_Kinetic", t_vec)
 
                 # Merge on [Time_(min), Well_ID]
-                merge_on = [df_og.columns[0], "Well_ID"]
+                merge_on = [df_donor.columns[0], "Well_ID"]
 
-                merged_df = df_og.merge(df_donor, on=merge_on, how="left") \
-                    .merge(df_acceptor, on=merge_on, how="left") \
+                merged_df = df_donor.merge(df_acceptor, on=merge_on, how="left") \
                     .merge(df_raw, on=merge_on, how="left") \
                     .merge(df_lab, on=merge_on, how="left") \
                     .merge(df_bl, on=merge_on, how="left") \
