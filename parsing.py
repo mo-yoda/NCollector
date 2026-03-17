@@ -324,7 +324,6 @@ def extract_bret_data(pr_export_df):
     df.iat[0, 0] = "Time (min)"
 
     time_values = df.iloc[0, 2:].unique().astype(float)
-    logger.debug("Time values: {}".format(time_values))
 
     # --- Detect Raw Data column groups and extract wavelengths ---
     # Use positional indices to handle duplicate column names correctly

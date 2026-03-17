@@ -9,6 +9,7 @@ from models import MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLU
 from parsing import extract_protocol_info, extract_measurement_data
 from processing import process_bret_measurement
 from export import apply_export_filters, build_row_info_str, generate_header_key, create_clean_pivot, ensure_master_csv_schema
+from dialogs import ask_user_parameter
 
 logger = logging.getLogger("NCollector")
 
@@ -1101,7 +1102,9 @@ class NCollectorApp:
         self.current_config = ProcessingConfig(
             lum_threshold=lum_threshold,
             labeling_correction=is_labeling,
-            plate_layout=selected_layout
+            plate_layout=selected_layout,
+            # Wrapping in a lamba: self.main_gi is always passed, so processing.py does not need tkinter
+            user_input_fn=lambda **kwargs: ask_user_parameter(self.main_gi, **kwargs)
         )
 
         # Reset exclusion state

@@ -27,14 +27,12 @@ def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: None):
         if len(intervals.unique()) < 2:
             logger.debug(f"Could not detect baseline reads for {raw_time_col}")
             return None
-            # TODO: Ask for user input on number of baseline reads
 
         # Extract the one interval that is different from others (manual ligand addition)
         unique_interval = intervals.drop_duplicates(keep=False)
         if len(unique_interval) > 1:
             logger.error(f"Multiple intervals found for baseline readings: {unique_interval}")
             return None
-            # TODO: Raise Error for user to see
 
         # Extract the index (baseline_end_idx)
         baseline_end_idx = unique_interval.index[0]
@@ -42,7 +40,6 @@ def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: None):
     if len(times) < baseline_end_idx:
         logger.warning(f"Data has fewer than {baseline_end_idx} rows.")
         return None
-        # TODO: Raise Error for user to see
 
     # Define the plate reader read interval
     read_interval = intervals.mode()[0]
@@ -533,7 +530,23 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     time_col = "Time (min)"
 
     time_vec = calculate_relative_time(raw_df[time_col], baseline_end_idx)
+
+    # If auto-detection failed and no manual index was set, ask user
+    if time_vec is None and baseline_end_idx is None and config.user_input_fn:
+        user_baseline = config.user_input_fn(
+            title="Baseline Detection Failed",
+            message=(f"Could not automatically detect baseline reads for "
+                     f"'{result.file_name}'.\n\n"
+                     f"Enter the number of baseline reads "
+                     f"(measurement cycles before ligand addition):"),
+            input_type="int"
+        )
+        if user_baseline is not None:
+            baseline_end_idx = user_baseline
+            time_vec = calculate_relative_time(raw_df[time_col], baseline_end_idx)
+
     if time_vec is None:
+        logger.warning(f"Time vector could not be built for {result.file_name}. Using raw index as fallback.")
         time_vec = range(len(raw_df))
 
     # Update baseline_end_idx from built time_vec
