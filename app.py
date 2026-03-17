@@ -1335,6 +1335,13 @@ class NCollectorApp:
                     .merge(df_bl, on=merge_on, how="left") \
                     .merge(df_norm, on=merge_on, how="left")
 
+                # --- MAP RAW PLATE READER TIME (file-specific, from res.raw_time) ---
+                if res.raw_time is not None and len(res.raw_time) == len(t_vec):
+                    raw_time_map = dict(zip(t_vec, res.raw_time))
+                    merged_df["PR_Time(min)"] = merged_df["Time_(min)"].map(raw_time_map)
+                else:
+                    merged_df["PR_Time(min)"] = float('nan')
+
                 # --- MAP DATA FOR CRC ---
                 # Last 3x points/AUC is 1 value per well, map data to Well_ID
                 # Last 3 time points (lp)

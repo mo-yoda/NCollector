@@ -12,7 +12,7 @@ MASTER_COLUMNS = [
     "NCollector_version", "Path",
     "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions", "Is_Excluded",
     "Transfection", "Cell_Line", "Ligand",
-    "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)",
+    "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)", "PR_Time(min)",
     "Donor_Raw_kinetic", "Acceptor_Raw_kinetic",
     "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
     "Raw_BRET_CRC", "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
@@ -59,6 +59,7 @@ class PrResult:
     measurement_date: date
     cell_line: str # ID2
     transfection_id: str # ID3
+    raw_time: list[float] # Time as extracted
     raw_bret_ratio_df: pd.DataFrame # RET ratio as extracted, no exclusions applied
     donor_df: pd.DataFrame # Raw counts from donor channel (lower wavelength)
     acceptor_df: pd.DataFrame # Raw counts from acceptor channel (higher wavelength)
@@ -145,9 +146,9 @@ class MeasurementFolder:
 class ProcessingConfig:
     """All user-defined processing settings"""
     labeling_correction: bool = field(default=False)
-    lum_threshold: int=100
+    lum_threshold: int = 100
     vehicle_warning_threshold: float = 0.2
-    baseline_end_index: int=5
+    baseline_end_index: int | None = None
     # Default to triplicates
     plate_layout: list[range] = field(default_factory=lambda: [
         range(1, 4),  # Block 1: Cols 1-3

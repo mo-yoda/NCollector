@@ -20,7 +20,7 @@ def ensure_master_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
             logger.info(f"'{col}' column missing. Assigned '{default_val}'.")
 
     # --- Fill missing raw donor and acceptor columns with NaN (added in v2+) ---
-    nan_defaults = ["Donor_Raw_kinetic", "Acceptor_Raw_kinetic"]
+    nan_defaults = ["Donor_Raw_kinetic", "Acceptor_Raw_kinetic", "PR_Time(min)"]
     for col in nan_defaults:
         if col not in df.columns:
             df[col] = float('nan')
