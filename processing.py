@@ -487,18 +487,23 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     # 1. MAP METADATA onto plate columns
     map_plate_metadata(result, protocol, config)
 
-    # 2. APPLY EXCLUSIONS to raw data
+    # 2. APPLY EXCLUSIONS to raw BRET ratio (donor/acceptor are kept original for traceability)
     raw_df = result.raw_bret_ratio_df.copy()
-    lum_df = result.lum_df.copy()
     if result.excluded_wells:
         for well in result.excluded_wells:
             if well in raw_df.columns: raw_df[well] = float('nan')
-            if well in lum_df.columns: lum_df[well] = float('nan')
 
-    # 3. CHECK LUMINESCENCE
-    result.low_lum_warnings = check_luminescence(
-        lum_df, plate_blocks, result.column_metadata, config.lum_threshold, date_str
-    )
+    # 3. CHECK LUMINESCENCE (only when donor channel is 475 nm)
+    if result.donor_wavelength == 475:
+        # Apply exclusions to a temporary copy for the lum check only
+        lum_check_df = result.donor_df.copy()
+        for well in result.excluded_wells:
+            if well in lum_check_df.columns: lum_check_df[well] = float('nan')
+        result.low_lum_warnings = check_luminescence(
+            lum_check_df, plate_blocks, result.column_metadata, config.lum_threshold, date_str
+        )
+    else:
+        logger.debug(f"Lum check skipped: donor wavelength is {result.donor_wavelength}, not 475.")
 
     # 4. BUILD TIME VECTOR
     time_col = "Time (min)"

@@ -19,12 +19,18 @@ def ensure_master_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = default_val
             logger.info(f"'{col}' column missing. Assigned '{default_val}'.")
 
+    # --- Fill missing raw donor and acceptor columns with NaN (added in v2+) ---
+    nan_defaults = ["Donor_Raw_kinetic", "Acceptor_Raw_kinetic"]
+    for col in nan_defaults:
+        if col not in df.columns:
+            df[col] = float('nan')
+
     # --- v1.0.0 legacy cleanup ---
     if "Empty/NoID" in df.get('Transfection', pd.Series()).values:
         logger.info("Removing legacy 'Empty/NoID' data...")
         df = df[df['Transfection'] != "Empty/NoID"].copy()
 
-    # --- Reconstruct Bl_LP if missing (pre-v2 CSVs only had Bl_Corrected_BRET) ---
+    # --- Reconstruct Bl_LP if missing (pre-v2 beta CSVs only had Bl_Corrected_BRET) ---
     if 'Bl_LP' not in df.columns and 'Bl_Corrected_BRET' in df.columns:
         logger.info("'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
         df_sorted = df.sort_values(by=['File_Name', 'Well_ID', 'Time_(min)'])
@@ -32,6 +38,21 @@ def ensure_master_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
         bl_lp_means = last_3.groupby(['File_Name', 'Well_ID'])['Bl_Corrected_BRET'].mean().reset_index()
         bl_lp_means.rename(columns={'Bl_Corrected_BRET': 'Bl_LP'}, inplace=True)
         df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
+
+    # --- Reconstruct Is_Excluded for pre-v2 CSVs ---
+    if 'Is_Excluded' not in df.columns:
+        has_exclusion_rules = (
+            'Applied_Exclusions' in df.columns
+            and (df['Applied_Exclusions'].astype(str) != "None").any()
+        )
+        if has_exclusion_rules and 'Raw_BRET_kinetic' in df.columns:
+            # Exclusion rules were applied: wells with NaN in raw BRET data were excluded
+            df['Is_Excluded'] = df['Raw_BRET_kinetic'].isna()
+            n_excluded = df['Is_Excluded'].sum()
+            logger.info(f"Reconstructed 'Is_Excluded' from NaN in Raw_BRET_kinetic ({n_excluded} excluded rows).")
+        else:
+            df['Is_Excluded'] = False
+            logger.info("'Is_Excluded' column missing and no exclusions were applied. Defaulting to False.")
 
     return df
 

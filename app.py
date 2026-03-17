@@ -1179,6 +1179,20 @@ class NCollectorApp:
 
         self.log(f"--- Loading Complete. Loaded {len(self.experiment)} folders. ---")
 
+        # Log detected wavelengths once (from the first measurement file found)
+        for folder in self.experiment:
+            for res in folder.results:
+                self.log(f"   [CHANNELS] Donor: {res.donor_wavelength} nm | "
+                         f"Acceptor: {res.acceptor_wavelength} nm")
+                if res.donor_wavelength == 475:
+                    self.log(f"   [CHANNELS] Luminescence check enabled (donor = 475 nm)")
+                else:
+                    self.log(f"   [CHANNELS] Luminescence check disabled (donor ≠ 475 nm)")
+                break
+            else:
+                continue
+            break
+
         # Call processing
         self.run_processing_pipeline()
 
@@ -1303,6 +1317,10 @@ class NCollectorApp:
 
                 df_og = melt_df(res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore'),
                                 "OG_BRET_ratio", t_vec)
+                df_donor = melt_df(res.donor_df.drop(columns=["Time (min)"], errors='ignore'),
+                                "Donor_Raw_kinetic", t_vec)
+                df_acceptor = melt_df(res.acceptor_df.drop(columns=["Time (min)"], errors='ignore'),
+                                "Acceptor_Raw_kinetic", t_vec)
                 df_raw = melt_df(raw_clean, "Raw_BRET_kinetic", t_vec)
                 df_lab = melt_df(res.labeling_corr_kinetic, "Lab_BRET_kinetic", t_vec)
                 df_bl = melt_df(res.bl_corr_kinetic, "Bl_Corrected_BRET", t_vec)
@@ -1311,7 +1329,9 @@ class NCollectorApp:
                 # Merge on [Time_(min), Well_ID]
                 merge_on = [df_og.columns[0], "Well_ID"]
 
-                merged_df = df_og.merge(df_raw, on=merge_on, how="left") \
+                merged_df = df_og.merge(df_donor, on=merge_on, how="left") \
+                    .merge(df_acceptor, on=merge_on, how="left") \
+                    .merge(df_raw, on=merge_on, how="left") \
                     .merge(df_lab, on=merge_on, how="left") \
                     .merge(df_bl, on=merge_on, how="left") \
                     .merge(df_norm, on=merge_on, how="left")
@@ -1400,6 +1420,10 @@ class NCollectorApp:
                 # Clean newlines for CSV compatibility
                 exclusion_text_clean = exclusion_text.replace("\n", " | ")
                 merged_df["Applied_Exclusions"] = exclusion_text_clean
+
+                # Mark excluded wells: True if this well was in the exclusion list
+                excluded_set = set(res.excluded_wells)
+                merged_df["Is_Excluded"] = merged_df["Well_ID"].isin(excluded_set)
 
                 # Meta Lookups (Optimization: Build dicts once per file)
                 meta_lookups = {'Transfection': {},

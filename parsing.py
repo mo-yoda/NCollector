@@ -1,5 +1,6 @@
 import logging
 import pandas as pd
+import re
 from datetime import datetime
 
 from models import ProtocolData, PrResult
@@ -310,32 +311,70 @@ def extract_metadata(pr_export_df):
 
 def extract_bret_data(pr_export_df):
     """
-    Uses df from the 'Table All Cycles' sheet of the PR export and extracts raw bret ratio table.
-    Reformats df to header Time, wells.
+    Extracts BRET ratio and both raw data channels from the 'Table All Cycles' sheet.
+    Auto-detects wavelengths from column headers (e.g. 'Raw Data (475-30 B)').
+    Assigns lower wavelength as donor, higher as acceptor.
+    Returns dict with keys: bret_ratio, donor, acceptor, donor_wavelength, acceptor_wavelength.
     """
+
+    # Extract entire table from plate reader export
     df = slice_table(pr_export_df, "Well", row_end_threshold=2)
     # Clean up well names from "A01" to "A1"
-    # "([A-Za-z])0(\d)" matching what to replace, () groups parts -> r"\1\2" replace with group1 and 2
     df.iloc[:, 0] = df.iloc[:, 0].str.replace(r"([A-Za-z])0(\d)", r"\1\2", regex=True)
     df.iat[0, 0] = "Time (min)"
 
-    # --- Split in Lum count and BRET ratio ---
-    cols_to_keep_lum = [c for c in df.columns if str(c).strip().startswith("Raw Data (475")]
-    cols_to_keep_lum.append("Well")
-    df_lum = df.loc[:, cols_to_keep_lum].copy()
+    # --- Detect Raw Data column groups and extract wavelengths ---
+    # Use positional indices to handle duplicate column names correctly
+    wl_col_positions = {}  # {wavelength_int: [positional_indices]}
+    ratio_positions = []
+    well_pos = None # "Well" columns as positional anchor
+    content_pos = None
 
-    cols_to_drop_bret = [c for c in df.columns if str(c).strip().startswith("Raw")]
-    cols_to_drop_bret.append("Content")
-    df_bret = df.drop(columns=cols_to_drop_bret).copy()
+    for i, col_name in enumerate(df.columns):
+        c_str = str(col_name).strip()
+        if c_str == "Well":
+            well_pos = i
+        elif c_str == "Content":
+            content_pos = i
+        elif c_str.startswith("Raw Data ("):
+            match = re.search(r"Raw Data \((\d+)", c_str)
+            if match:
+                wl = int(match.group(1))
+                wl_col_positions.setdefault(wl, []).append(i)
+        elif c_str.startswith("Ratio"):
+            ratio_positions.append(i)
 
-    # Transpose
-    df_bret = df_bret.set_index("Well").T
-    df_bret = df_bret.reset_index(drop=True)  # Make sure index is clean
+    # Sort wavelengths: lower = donor, higher = acceptor
+    sorted_wls = sorted(wl_col_positions.keys())
+    if len(sorted_wls) < 2:
+        logger.warning(f"Expected 2 raw data channels, found {len(sorted_wls)}: {sorted_wls}")
 
-    df_lum = df_lum.set_index("Well").T
-    df_lum = df_lum.reset_index(drop=True)
+    donor_wl = sorted_wls[0] if len(sorted_wls) >= 1 else 0
+    acceptor_wl = sorted_wls[1] if len(sorted_wls) >= 2 else 0
 
-    return df_bret, df_lum
+    # --- Extract each channel by positional index, transpose to Time x Wells ---
+    def extract_channel_by_pos(positions):
+        """Selects columns by position, transposes to Time x Wells format."""
+        col_indices = [well_pos] + positions
+        df_ch = df.iloc[:, col_indices].copy()
+        df_ch = df_ch.set_index(df_ch.columns[0]).T.reset_index(drop=True)
+        return df_ch
+
+    df_donor = extract_channel_by_pos(wl_col_positions[donor_wl]) if donor_wl else pd.DataFrame()
+    df_acceptor = extract_channel_by_pos(wl_col_positions[acceptor_wl]) if acceptor_wl else pd.DataFrame()
+
+    # --- Extract BRET ratio by positional index ---
+    ratio_col_indices = [well_pos] + ratio_positions
+    df_bret = df.iloc[:, ratio_col_indices].copy()
+    df_bret = df_bret.set_index(df_bret.columns[0]).T.reset_index(drop=True)
+
+    return {
+        "bret_ratio": df_bret,
+        "donor": df_donor,
+        "acceptor": df_acceptor,
+        "donor_wavelength": donor_wl,
+        "acceptor_wavelength": acceptor_wl,
+    }
 
 
 def extract_measurement_data(xls_obj, file_name: str):
@@ -356,14 +395,17 @@ def extract_measurement_data(xls_obj, file_name: str):
         return None
 
     metadata_dic = extract_metadata(pr_export_df)
-    bret_ratio_df , lum_df= extract_bret_data(pr_export_df)
+    bret_data = extract_bret_data(pr_export_df)
 
     result_obj = PrResult(
         file_name=file_name,
         measurement_date=metadata_dic['measurement_date'],
         cell_line=metadata_dic['cell_line'],
         transfection_id=metadata_dic['transfections'],
-        raw_bret_ratio_df=bret_ratio_df,
-        lum_df=lum_df
+        raw_bret_ratio_df=bret_data["bret_ratio"],
+        donor_df=bret_data["donor"],
+        acceptor_df=bret_data["acceptor"],
+        donor_wavelength=bret_data["donor_wavelength"],
+        acceptor_wavelength=bret_data["acceptor_wavelength"],
     )
     return result_obj
