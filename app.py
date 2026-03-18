@@ -797,7 +797,7 @@ class NCollectorApp:
         if sorted_cats:
             self.update_subtype_options()
 
-        # Enable kinetic layout to populate list box
+        # Temporarily enable kinetic layout to populate list box
         self.lb_kin_layout.config(state="normal")
 
         # Clear
@@ -827,6 +827,10 @@ class NCollectorApp:
         self.kinetic_row_lookup = build_row_info(df)
         for r in self.kinetic_row_lookup: self.lb_kin_layout.insert(tk.END, r)
         self.lb_kin_layout.select_set(0, tk.END)  # Default to all
+
+        # Disable kinetic layout if CRC is currently selected
+        if self.var_category.get() != "kinetic":
+            self.lb_kin_layout.config(state="disabled")
 
     def run_plot_helper(self):
         """Collects GUI selections and calls the core export engine."""
