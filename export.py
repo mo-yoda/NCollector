@@ -4,11 +4,16 @@ import pandas as pd
 logger = logging.getLogger("NCollector")
 
 
-def ensure_master_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
     """
     Fills in missing columns and cleans legacy data for Master CSVs from older NCollector versions.
     Add new columns to the defaults dict as the schema evolves.
     """
+    def _log(msg):
+        logger.info(msg)
+        if log_fn:
+            log_fn(f"   [CSV BUG FIX] {msg}")
+
     # --- Fill missing columns with defaults ---
     defaults = {
         "NCollector_version": "< v2",
@@ -71,6 +76,28 @@ def ensure_master_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df['Is_Excluded'] = False
             logger.info("'Is_Excluded' column missing and no exclusions were applied. Defaulting to False.")
+
+    # --- Fix legacy AUC bug: excluded wells had 0.0 instead of NaN (sum of all-NaN) ---
+    if 'Is_Excluded' in df.columns and df['Is_Excluded'].any():
+        excluded_mask = df['Is_Excluded'].astype(bool)
+        auc_cols = ['Lab_AUC', 'Bl_AUC', 'Veh_Norm_AUC']
+        fixed_cols = []
+        for col in auc_cols:
+            if col in df.columns:
+                bad_zeros = excluded_mask & (df[col] == 0.0)
+                if bad_zeros.any():
+                    df.loc[bad_zeros, col] = float('nan')
+                    fixed_cols.append(col)
+        if fixed_cols:
+            logger.info(f"Fixed legacy AUC bug: set 0.0 -> NaN for excluded wells in {', '.join(fixed_cols)}.")
+
+        # Recalculate AUC_Mean from corrected Veh_Norm_AUC (mean included bogus 0.0 values)
+        if 'Veh_Norm_AUC' in fixed_cols and 'AUC_Mean' in df.columns:
+            group_keys = ['File_Name', 'Transfection', 'Cell_Line', 'Ligand', 'Plate_Row']
+            available_keys = [k for k in group_keys if k in df.columns]
+            recalc = df.groupby(available_keys)['Veh_Norm_AUC'].transform('mean')
+            df['AUC_Mean'] = recalc
+            _log("Recalculated 'AUC_Mean' from corrected 'Veh_Norm_AUC'.")
 
     return df
 

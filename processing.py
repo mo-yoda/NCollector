@@ -572,11 +572,12 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
     bl_corrected_df = apply_baseline_correction(data_df, baseline_end_idx)
 
     # 7. AUC CALCULATION
+    # min_count=1 for at least 1 value needed, otherwise return nan -> ensures excluded wells with all-NaN stay NaN
     if labeling_corr_df.isna().all().all():
         labeling_corr_auc_df = pd.DataFrame(float('nan'), index=data_df.index, columns=data_df.columns)
     else:
-        labeling_corr_auc_df = labeling_corr_df.iloc[baseline_end_idx:].sum().to_frame().T
-    bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum().to_frame().T
+        labeling_corr_auc_df = labeling_corr_df.iloc[baseline_end_idx:].sum(min_count=1).to_frame().T
+    bl_corr_auc_df = bl_corrected_df.iloc[baseline_end_idx:].sum(min_count=1).to_frame().T
 
     # 8. VEHICLE NORMALISATION
     kinetic_df, auc_df = apply_vehicle_normalization(
