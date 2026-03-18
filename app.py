@@ -890,7 +890,7 @@ class NCollectorApp:
                 return
 
             # Backward compatibility: fill missing columns and clean legacy data
-            df = ensure_master_csv_schema(df)
+            df = ensure_master_csv_schema(df, log_fn=self.log)
 
             # Store in the unified variable
             self.master_df = df
