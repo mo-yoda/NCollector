@@ -39,6 +39,24 @@ def ensure_master_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
         bl_lp_means.rename(columns={'Bl_Corrected_BRET': 'Bl_LP'}, inplace=True)
         df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
 
+    # --- Reconstruct Is_Vehicle for older CSVs ---
+    if 'Is_Vehicle' not in df.columns:
+        if 'Plate_Row' in df.columns and 'Ligand_Conc' in df.columns:
+            df['Is_Vehicle'] = (df['Plate_Row'] == 'H') & (df['Ligand_Conc'] == 0.0)
+            logger.info("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H' & Ligand_Conc == 0.0.")
+        elif 'Plate_Row' in df.columns:
+            df['Is_Vehicle'] = df['Plate_Row'] == 'H'
+            logger.info("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H'.")
+        else:
+            df['Is_Vehicle'] = False
+
+    # --- Clean up legacy vehicle concentration (pre-v2 CSVs stored 0.0 for vehicle) ---
+    if 'Ligand_Conc' in df.columns:
+        legacy_vehicle = df['Is_Vehicle'] & (df['Ligand_Conc'] == 0.0)
+        if legacy_vehicle.any():
+            df.loc[legacy_vehicle, 'Ligand_Conc'] = float('nan')
+            logger.info(f"Cleaned {legacy_vehicle.sum()} vehicle rows: Ligand_Conc 0.0 -> NaN.")
+
     # --- Reconstruct Is_Excluded for pre-v2 CSVs ---
     if 'Is_Excluded' not in df.columns:
         has_exclusion_rules = (
@@ -75,22 +93,45 @@ def apply_export_filters(df, config):
             df_subset = df_subset[df_subset[df_col].isin(targets)]
     return df_subset
 
-def build_row_info_str(df):
+def build_row_info(df):
     """
-    Creates the standardized list of row info strings:  'Row A: -9.0 log(M) Ligand'
-    Used for both GUI population and default export logic.
+    Creates a lookup dict mapping display strings to their filter criteria.
+    Display: 'Row A: -9.0 log(M) Ligand' or 'Row H: Vehicle Ligand'
+    Value: dict with keys 'row', 'ligand', 'is_vehicle', and optionally 'conc'
+    Used for GUI population and export filtering.
     """
     if df is None or df.empty:
-        return []
+        return {}
 
-    row_series = (
-            "Row " + df['Plate_Row'].astype(str) + ": " +
-            df['Ligand_Conc'].astype(str) + " log(M) " +
-            df['Ligand'].astype(str)
-    )
+    lookup = {}
+    # Get unique combinations of row info
+    group_cols = ['Plate_Row', 'Ligand', 'Is_Vehicle', 'Ligand_Conc']
+    available = [c for c in group_cols if c in df.columns]
+    unique_rows = df[available].drop_duplicates()
 
-    # Return unique, sorted values
-    return sorted(row_series.unique().tolist())
+    for _, row in unique_rows.iterrows():
+        plate_row = str(row['Plate_Row'])
+        ligand = str(row['Ligand'])
+        is_vehicle = bool(row['Is_Vehicle'])
+
+        if is_vehicle:
+            display = f"Row {plate_row}: Vehicle {ligand}"
+        else:
+            conc = row['Ligand_Conc']
+            display = f"Row {plate_row}: {conc} log(M) {ligand}"
+
+        criteria = {
+            'row': plate_row,
+            'ligand': ligand,
+            'is_vehicle': is_vehicle,
+        }
+        if not is_vehicle:
+            criteria['conc'] = str(row['Ligand_Conc'])
+
+        lookup[display] = criteria
+
+    # Return sorted by key
+    return dict(sorted(lookup.items()))
 
 def generate_header_key(df, group_by=None):
     """Creates the 'Header_Key' column for exporting data."""
@@ -107,7 +148,11 @@ def generate_header_key(df, group_by=None):
     # Check whether this is AUC data
     is_kinetic = df["Time_(min)"].nunique() > 1
     if is_kinetic:
-        parts.append(df["Ligand_Conc"].astype(str))
+        conc_display = df["Ligand_Conc"].astype(str)
+        # Where Is_Vehicle is False, keep Ligand_Conc, otherwise assign Vehicle
+        # pandas where - replace if cond is false (~ is logical NOT in pd)
+        conc_display = conc_display.where(~df['Is_Vehicle'].astype(bool), "Vehicle")
+        parts.append(conc_display)
 
     if parts:
         # Start with the first column

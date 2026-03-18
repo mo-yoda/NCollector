@@ -8,7 +8,7 @@ from datetime import datetime, date
 from models import MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS, DATA_TYPE_MAP
 from parsing import extract_protocol_info, extract_measurement_data
 from processing import process_bret_measurement
-from export import apply_export_filters, build_row_info_str, generate_header_key, create_clean_pivot, ensure_master_csv_schema
+from export import apply_export_filters, build_row_info, generate_header_key, create_clean_pivot, ensure_master_csv_schema
 from dialogs import ask_user_parameter
 
 logger = logging.getLogger("NCollector")
@@ -31,6 +31,7 @@ class NCollectorApp:
         self.master_df = pd.DataFrame()  # Used for master csv file storage (by generation or import)
         self.ignored_warnings = set()
         self.current_config = None
+        self.kinetic_row_lookup = {}  # Maps display strings to filter criteria for kinetic layout
 
         # --- GUI Variables ---
         self.folder_path = tk.StringVar(value="No folder selected.")
@@ -823,8 +824,8 @@ class NCollectorApp:
         self.lb_exp_trans.select_set(0, tk.END)  # Default to all
 
         # Populate Kinetic Layout
-        rows = build_row_info_str(df)
-        for r in rows: self.lb_kin_layout.insert(tk.END, r)
+        self.kinetic_row_lookup = build_row_info(df)
+        for r in self.kinetic_row_lookup: self.lb_kin_layout.insert(tk.END, r)
         self.lb_kin_layout.select_set(0, tk.END)  # Default to all
 
     def run_plot_helper(self):
@@ -836,6 +837,8 @@ class NCollectorApp:
         transfections = [self.lb_exp_trans.get(i) for i in self.lb_exp_trans.curselection()]
         ligands = [self.lb_ligands.get(i) for i in self.lb_ligands.curselection()]
         rows = [self.lb_kin_layout.get(i) for i in self.lb_kin_layout.curselection()]
+        # Resolve display strings to structured filter criteria
+        kinetic_filters = [self.kinetic_row_lookup[r] for r in rows if r in self.kinetic_row_lookup]
 
         category = self.var_category.get()
         specific_type = self.var_specific_type.get()
@@ -853,7 +856,7 @@ class NCollectorApp:
             'ligands': ligands,
             'data_types': [internal_name], # As list for engine compatibility with default export
             'group_by': self.var_group_by.get(),
-            'kinetic_mode': rows
+            'kinetic_mode': kinetic_filters
         }
 
         file_path = filedialog.asksaveasfilename(
@@ -1451,7 +1454,8 @@ class NCollectorApp:
                             meta_lookups['Transfection'][well_id] = meta.condition_name
                             meta_lookups['Cell_Line'][well_id] = meta.cell_line
                             meta_lookups['Ligand'][well_id] = meta.ligand_identity
-                            meta_lookups['Ligand_Conc'][well_id] = meta.ligand_conc.get(row_char, 0.0)
+                            meta_lookups['Ligand_Conc'][well_id] = meta.ligand_conc.get(
+                                row_char, float('nan'))
                             meta_lookups['Plate_Row'][well_id] = row_char
                             meta_lookups['Replicate'][well_id] = meta.replicate
                     except: pass
@@ -1462,6 +1466,9 @@ class NCollectorApp:
                 merged_df['Ligand_Conc'] = merged_df['Well_ID'].map(meta_lookups['Ligand_Conc'])
                 merged_df['Plate_Row'] = merged_df['Well_ID'].map(meta_lookups['Plate_Row'])
                 merged_df['Replicate'] = merged_df['Well_ID'].map(meta_lookups['Replicate'])
+                merged_df['Is_Vehicle'] = (
+                    (merged_df['Plate_Row'] == 'H') & (merged_df['Ligand_Conc'].isna())
+                )
 
         if not all_files_data:
             return pd.DataFrame()
@@ -1542,7 +1549,11 @@ class NCollectorApp:
                     "Source Files Count": [len(file_names)],
                     "Source Files List": [", ".join(file_names)],
                     "Data Type": [", ".join(config.get('data_types', []))],
-                    "Kinetic Layout": [config.get('kinetic_mode')],
+                    "Kinetic Layout": [", ".join(
+                        f"Row {c['row']}: Vehicle {c['ligand']}" if c.get('is_vehicle')
+                        else f"Row {c['row']}: {c['conc']} log(M) {c['ligand']}"
+                        for c in config.get('kinetic_mode', [])
+                    )],
                     "Filter: Ligands": [", ".join(config.get('ligands'))],
                     "Filter: Cells": [", ".join(config.get('cells'))],
                     "Filter: Conditions": [", ".join(config.get('transfections'))],
@@ -1572,19 +1583,17 @@ class NCollectorApp:
                                 continue
 
                             filtered_rows = []
-                            for row_info in k_layout:
-                                row_letter = row_info.split(":")[0].replace("Row ", "").strip()
-                                ligand_conc = row_info.split(":")[1].split("log(M)")[0].strip()
-                                ligand_name = row_info.split("log(M)")[1].strip()
+                            for criteria in k_layout:
+                                mask = (
+                                    (df_group["Plate_Row"] == criteria['row']) &
+                                    (df_group["Ligand"] == criteria['ligand'])
+                                )
+                                if criteria.get('is_vehicle'):
+                                    mask = mask & (df_group["Is_Vehicle"].astype(bool))
+                                else:
+                                    mask = mask & (df_group["Ligand_Conc"].astype(str) == criteria['conc'])
 
-                                # Filter row
-                                row_df = df_group[
-                                    (df_group["Plate_Row"] == row_letter) &
-                                    (df_group["Ligand_Conc"].astype(str) == ligand_conc) &
-                                    (df_group["Ligand"] == ligand_name)
-                                    ].copy()
-
-                                filtered_rows.append(row_df)
+                                filtered_rows.append(df_group[mask].copy())
 
                             if filtered_rows:
                                 df_kin = pd.concat(filtered_rows).drop_duplicates()
@@ -1623,7 +1632,11 @@ class NCollectorApp:
 
                             # Display ligand conc instead of plate row if there is one ligand
                             if df_crc['Ligand'].nunique() == 1:
-                                row_map = df_crc.drop_duplicates("Plate_Row").set_index("Plate_Row")["Ligand_Conc"]
+                                deduplicated = df_crc.drop_duplicates("Plate_Row").set_index("Plate_Row")
+                                row_map = deduplicated["Ligand_Conc"].copy().astype(object)
+                                # astype(object) to handle float and str (vehicle)
+                                vehicle_rows = deduplicated["Is_Vehicle"].astype(bool)
+                                row_map[vehicle_rows] = "Vehicle"
                                 crc_pivot.index = crc_pivot.index.map(row_map)
                                 crc_pivot.rename(columns={"Plate_Row": "Concentration (logM)"}, inplace=True)
 
@@ -1659,7 +1672,8 @@ class NCollectorApp:
 
         # Built kinetic_mode selection
         df_row_a = self.master_df[self.master_df['Plate_Row'] == 'A']
-        kinetic_rows = build_row_info_str(df_row_a)
+        kinetic_lookup = build_row_info(df_row_a)
+        kinetic_filters = list(kinetic_lookup.values())
 
         # Define Standard Config
         default_config = {
@@ -1668,7 +1682,7 @@ class NCollectorApp:
             'ligands': 'All',
             'data_types': ['Kinetic_Mean', 'AUC_Mean'],
             'group_by': 'Transfection',
-            'kinetic_mode': kinetic_rows
+            'kinetic_mode': kinetic_filters
         }
         self.write_excel_export(file_path, self.master_df, default_config)
 

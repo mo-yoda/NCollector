@@ -10,7 +10,7 @@ APP_VERSION = "N Collector v2.0 Beta"
 # for building the DF and ensure_master_csv_schema for importing older CSVs.
 MASTER_COLUMNS = [
     "NCollector_version", "Path",
-    "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions", "Is_Excluded",
+    "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions", "Is_Excluded", "Is_Vehicle",
     "Transfection", "Cell_Line", "Ligand",
     "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)", "PR_Time(min)",
     "Donor_Raw_kinetic", "Acceptor_Raw_kinetic",
