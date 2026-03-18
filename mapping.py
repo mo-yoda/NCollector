@@ -73,11 +73,14 @@ def built_conc_dic(df_conc: pd.DataFrame):
         vals = pd.to_numeric(df_conc.iloc[:, 0], errors='coerce').tolist()
 
         for i, row_char in enumerate(rows):
-            if i < len(vals):
-                # Store float if valid, else 0.0 (or None if preferred)
-                conc_dic[row_char] = float(vals[i]) if not pd.isna(vals[i]) else 0.0
+            if row_char == "H":
+                # Vehicle row: no ligand, concentration is not meaningful
+                conc_dic[row_char] = float('nan')
+            elif i < len(vals):
+                # Store float if valid, else NaN (value missing in protocol)
+                conc_dic[row_char] = float(vals[i]) if not pd.isna(vals[i]) else float('nan')
             else:
-                conc_dic[row_char] = 0.0 # For vehicle row
+                conc_dic[row_char] = float('nan')
     except Exception as e:
         logger.warning(f"Error parsing concentration table: {e}")
 
