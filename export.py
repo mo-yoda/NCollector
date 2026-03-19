@@ -8,10 +8,11 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
     """
     Fills in missing columns and cleans legacy data for Master CSVs from older NCollector versions.
     Add new columns to the defaults dict as the schema evolves.
-    Returns (df, was_modified).
+    Returns (df, was_modified, was_fixed).
     Bug fixes are logged.
     """
     was_modified = False
+    was_fixed = False
 
     def _log(msg):
         logger.info(msg)
@@ -117,11 +118,13 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
             _bug_fix("Recalculated 'AUC_Mean' from corrected 'Veh_Norm_AUC'.")
 
     was_modified = len(modified) > 0
+    was_fixed = len(bugs_fixed) > 0
+
     if bugs_fixed and log_fn:
         for msg in bugs_fixed:
             log_fn(f"   [CSV FIX] {msg}")
 
-    return df, was_modified
+    return df, was_modified, was_fixed
 
 
 def apply_export_filters(df, config):
