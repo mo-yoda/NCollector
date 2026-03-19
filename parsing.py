@@ -1,9 +1,10 @@
+import os
 import logging
 import pandas as pd
 import re
 from datetime import datetime
 
-from models import ProtocolData, PrResult
+from models import ProtocolData, PrResult, MeasurementFolder
 
 logger = logging.getLogger("NCollector")
 
@@ -413,3 +414,84 @@ def extract_measurement_data(xls_obj, file_name: str):
         acceptor_wavelength=bret_data["acceptor_wavelength"],
     )
     return result_obj
+
+
+# --- Folder Scanning --- #
+
+def scan_and_load_folders(folder_paths: list[str], log_fn=None) -> list[MeasurementFolder]:
+    """
+    Scans folder paths for xlsx/xlsm files, classifies them as protocol or measurement,
+    and returns a list of MeasurementFolder objects with matched protocol + results.
+
+    Args:
+        folder_paths: List of directory paths to scan.
+        log_fn: Optional callback for user-facing log messages.
+                If None, only logger.debug is used.
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+        else:
+            logger.debug(msg)
+
+    loaded_folders = []
+
+    for folder_path in folder_paths:
+        folder_name = os.path.basename(folder_path)
+
+        # Parse date from folder name (YYMMDD_...)
+        try:
+            folder_date = datetime.strptime(folder_name.split("_")[0], '%y%m%d').date()
+        except ValueError:
+            _log(f"   [SKIP] Folder '{folder_name}': invalid date format. Expected YYMMDD.")
+            continue
+
+        folder_data = MeasurementFolder(
+            folder_name=folder_name,
+            folder_path=folder_path,
+            measurement_date=folder_date
+        )
+
+        files = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsm'))]
+        for file_name in files:
+            file_path = os.path.join(folder_path, file_name)
+            is_imported = False
+
+            try:
+                xls = pd.ExcelFile(file_path)
+                sheet_names = xls.sheet_names
+
+                # Protocol file
+                if "Protocol" in sheet_names:
+                    protocol = extract_protocol_info(xls, file_name)
+                    if protocol and protocol.exp_date == folder_date:
+                        folder_data.protocol = protocol
+                        _log(f"   [PROTOCOL] loaded: {file_name}")
+                        is_imported = True
+                    elif protocol:
+                        _log(f"   [MISMATCH] Protocol {protocol.exp_date} != Folder {folder_date}")
+
+                # Measurement file
+                elif "Table All Cycles" in sheet_names and set(sheet_names).issubset(
+                        {"Table All Cycles", "Protocol Information"}):
+                    result = extract_measurement_data(xls, file_name)
+                    if result and result.measurement_date == folder_date:
+                        folder_data.results.append(result)
+                        _log(f"   [MEASUREMENT] loaded: {file_name}")
+                        is_imported = True
+                    elif result:
+                        _log(f"   [MISMATCH] Analysis {result.measurement_date} != Folder {folder_date}")
+
+                if not is_imported:
+                    folder_data.skipped_files.append(file_name)
+
+            except Exception as e:
+                _log(f"   [ERROR] Could not read {file_name}: {e}")
+                folder_data.skipped_files.append(file_name)
+
+        loaded_folders.append(folder_data)
+        logger.debug(f"Folder '{folder_name}': {len(folder_data.results)} results, "
+                     f"protocol={'yes' if folder_data.protocol else 'no'}, "
+                     f"skipped={len(folder_data.skipped_files)}")
+
+    return loaded_folders

@@ -5,6 +5,17 @@ from dataclasses import dataclass, field
 # --- Application Constants --- #
 APP_VERSION = "N Collector v2.0 Beta"
 
+# Plate column layouts
+TRIPLICATE_LAYOUT = [range(1, 4), # Block 1: Cols 1-3
+                     range(4, 7), # Block 2: Cols 4-6
+                     range(7, 10), # Block 3: Cols 7-9
+                     range(10, 13)] # Block 4: Cols 10-12
+QUADRUPLICATE_LAYOUT = [range(1, 5), range(5, 9), range(9, 13)]
+
+def build_plate_layout(is_labeling: bool) -> list[range]:
+    """Returns the plate column layout. Quadruplicates for labeling correction, triplicates otherwise."""
+    return QUADRUPLICATE_LAYOUT if is_labeling else TRIPLICATE_LAYOUT
+
 # Master DataFrame Column Schema
 # Column ordering for the master CSV. Referenced by compile_master_dataframe
 # for building the DF and ensure_master_csv_schema for importing older CSVs.
@@ -150,12 +161,7 @@ class ProcessingConfig:
     vehicle_warning_threshold: float = 0.2
     baseline_end_index: int | None = None
     # Default to triplicates
-    plate_layout: list[range] = field(default_factory=lambda: [
-        range(1, 4),  # Block 1: Cols 1-3
-        range(4, 7),  # Block 2: Cols 4-6
-        range(7, 10),  # Block 3: Cols 7-9
-        range(10, 13)  # Block 4: Cols 10-12
-    ])
+    plate_layout: list[range] = field(default_factory=lambda: TRIPLICATE_LAYOUT)
     # Optional callback for requesting user input (set by GUI layer).
     # Signature: fn(title: str, message: str, input_type: str, default) -> value | None
     user_input_fn: object = field(default=None, repr=False)
