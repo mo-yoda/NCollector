@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, date
 
-from models import MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS, DATA_TYPE_MAP
-from parsing import extract_protocol_info, extract_measurement_data
+from models import MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS, DATA_TYPE_MAP, build_plate_layout
+from parsing import extract_protocol_info, extract_measurement_data, scan_and_load_folders
 from processing import process_bret_measurement, calculate_relative_time, map_plate_metadata
 from export import apply_export_filters, build_row_info, generate_header_key, create_clean_pivot, ensure_master_csv_schema
 from dialogs import ask_user_parameter
@@ -911,6 +911,7 @@ class NCollectorApp:
                 self.show_csv_updated_dialog()
 
             self.log(f"Loaded Master CSV: {os.path.basename(file_path)}")
+            # TODO: if updated Master is saved -> update this file name
 
         except Exception as e:
             self.log(f"[ERROR] CSV Load Failed: {e}")
@@ -1000,53 +1001,23 @@ class NCollectorApp:
 
         # Determine plate layout from old master (check for labeling control)
         is_labeling = "labeling control" in df_old.get("Replicate", pd.Series()).astype(str).values
-        if is_labeling:
-            plate_layout = [range(1, 5), range(5, 9), range(9, 13)]
-        else:
-            plate_layout = [range(1, 4), range(4, 7), range(7, 10), range(10, 13)]
 
         enrich_config = ProcessingConfig(
-            plate_layout=plate_layout,
+            plate_layout=build_plate_layout(is_labeling),
             labeling_correction=is_labeling
         )
 
-        loaded_folders = []
+        # Get folder paths containing xlsx/xlsm files
+        folder_paths = []
         for root, dirs, files in os.walk(source_dir):
-            xlsx_files = [f for f in files if f.endswith(('.xlsx', '.xlsm'))]
-            if not xlsx_files:
-                continue
+            if any(f.endswith(('.xlsx', '.xlsm')) for f in files):
+                folder_paths.append(root)
 
-            folder_name = os.path.basename(root)
-            try:
-                folder_date = datetime.strptime(folder_name.split("_")[0], '%y%m%d').date()
-            except ValueError:
-                continue
+        # Scan and load (debug-level logging — no per-file output to user)
+        all_folders = scan_and_load_folders(folder_paths)
 
-            folder_data = MeasurementFolder(
-                folder_name=folder_name, folder_path=root, measurement_date=folder_date
-            )
-            # TODO: create helper that can be used by collect_files as well
-            for file_name in xlsx_files:
-                file_path = os.path.join(root, file_name)
-                try:
-                    xls = pd.ExcelFile(file_path)
-                    sheets = xls.sheet_names
-
-                    if "Protocol" in sheets:
-                        protocol = extract_protocol_info(xls, file_name)
-                        if protocol and protocol.exp_date == folder_date:
-                            folder_data.protocol = protocol
-
-                    elif "Table All Cycles" in sheets and set(sheets).issubset(
-                            {"Table All Cycles", "Protocol Information"}):
-                        result = extract_measurement_data(xls, file_name)
-                        if result and result.measurement_date == folder_date:
-                            folder_data.results.append(result)
-                except Exception as e:
-                    logger.debug(f"Enrichment: skipped {file_name}: {e}")
-
-            if folder_data.protocol and folder_data.results:
-                loaded_folders.append(folder_data)
+        # Only keep folders with both protocol and results
+        loaded_folders = [f for f in all_folders if f.protocol and f.results]
 
         if not loaded_folders:
             self.log("[ENRICH] ERROR: No valid protocol + measurement pairs found in selected folder.")
@@ -1449,27 +1420,10 @@ class NCollectorApp:
             is_labeling = False
             lum_threshold = 100
 
-        if is_labeling:
-            # Quadruplicates
-            selected_layout = [
-                range(1, 5),  # Block 1: Cols 1-4
-                range(5, 9),  # Block 2: Cols 5-8
-                range(9, 13)   # Block 3: Cols 9-12
-            ]
-        else:
-            # Standard triplicate Layout
-            selected_layout = [
-                range(1, 4),  # Block 1: Cols 1-3
-                range(4, 7),  # Block 2: Cols 4-6
-                range(7, 10),  # Block 3: Cols 7-9
-                range(10, 13)  # Block 4: Cols 10-12
-            ]
-
         self.current_config = ProcessingConfig(
             lum_threshold=lum_threshold,
             labeling_correction=is_labeling,
-            plate_layout=selected_layout,
-            # Wrapping in a lamba: self.main_gi is always passed, so processing.py does not need tkinter
+            plate_layout=build_plate_layout(is_labeling),
             user_input_fn=lambda **kwargs: ask_user_parameter(self.main_gi, **kwargs)
         )
 
@@ -1481,70 +1435,10 @@ class NCollectorApp:
 
         self.log("\n--- Starting Data Collection ---")
 
-        # Collect all subfolder info (experiment repeats) in this list
-        self.experiment = []
-
-        # Iterate over subfolders
-        for folder_path in self.subfolder_paths_with_files:
-            folder_name = os.path.basename(folder_path)
-            self.log(f"\n--- Processing Folder: {folder_name} ---")
-
-            # Use date in folder name for validation
-            try:
-                # Transform date str to date obj (YYMMDD)
-                folder_date_obj = datetime.strptime(folder_name.split("_")[0], '%y%m%d').date()
-            except ValueError:
-                self.log(f"   [ERROR] Folder '{folder_name}' invalid date format. Expected YYMMDD. Skipping.")
-                continue
-
-            # Create MeasurementFolder object to collect protocol and results
-            folder_data = MeasurementFolder(folder_name=folder_name,
-                                            folder_path=folder_path,
-                                            measurement_date=folder_date_obj)
-
-            files_in_folder = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsm'))]
-            for file_name in files_in_folder:
-                file_path = os.path.join(folder_path, file_name)
-                # Logical variable to keep track of skipped files
-                is_imported = False
-
-                try:
-                    # Use ExcelFile to check sheet names
-                    xls = pd.ExcelFile(file_path) # fast reading of multiple sheet xls files
-                    sheet_names = xls.sheet_names
-
-                    # Identify Protocol File
-                    if "Protocol" in sheet_names:
-                        protocol_info = extract_protocol_info(xls, file_name)
-
-                        if protocol_info and protocol_info.exp_date == folder_date_obj:
-                            folder_data.protocol = protocol_info
-                            self.log(f"   [PROTOCOL] loaded: {file_name}")
-                            is_imported = True
-                        elif protocol_info:
-                            self.log(f"   [MISMATCH] Protocol {protocol_info.exp_date} != Folder {folder_date_obj}")
-
-                    # Identify PR export
-                    # Must have "Table All Cycles", and the only allowed other sheet is "Protocol Information"
-                    elif "Table All Cycles" in sheet_names and set(sheet_names).issubset({"Table All Cycles", "Protocol Information"}):
-                        meas_data = extract_measurement_data(xls, file_name)
-
-                        if meas_data and meas_data.measurement_date == folder_date_obj:
-                            folder_data.results.append(meas_data)
-                            self.log(f"   [MEASUREMENT] loaded {file_name}")
-                            is_imported = True
-                        else:
-                            self.log(f"   [MISMATCH] Analysis {meas_data.measurement_date} != Folder {folder_date_obj}")
-
-                    # Files not matching criteria are skipped
-                    if not is_imported:
-                        folder_data.skipped_files.append(file_name)
-                except Exception as e:
-                    self.log(f"   [ERROR] Could not read {file_name}: {e}")
-
-            # Store the collected data for this experiment
-            self.experiment.append(folder_data)
-            logger.debug(f"Skipped files: {folder_data.skipped_files}")
+        # Scan and load all folders
+        self.experiment = scan_and_load_folders(
+            self.subfolder_paths_with_files, log_fn=self.log
+        )
 
         self.log(f"--- Loading Complete. Loaded {len(self.experiment)} folders. ---")
 
