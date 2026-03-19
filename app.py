@@ -910,9 +910,6 @@ class NCollectorApp:
                 self.log(f"[MASTER UPDATED] Master was updated to current version.")
                 self.show_csv_updated_dialog()
 
-            self.log(f"Loaded Master CSV: {os.path.basename(file_path)}")
-            # TODO: if updated Master is saved -> update this file name
-
         except Exception as e:
             self.log(f"[ERROR] CSV Load Failed: {e}")
 
@@ -1790,7 +1787,9 @@ class NCollectorApp:
 
         try:
             self.master_df.to_csv(file_path, index=False)
-            self.log(f"   [SUCCESS] Saved {'updated ' if is_updated else ''}Master CSV: {os.path.basename(file_path)}")
+            csv_name = os.path.basename(file_path)
+            self.log(f"   [SUCCESS] Saved {'updated ' if is_updated else ''}Master CSV: {csv_name}")
+            self.lbl_data_source.config(text=f"CSV: {csv_name}")
         except Exception as e:
             self.log(f"   [ERROR] Failed to save CSV: {e}")
 
