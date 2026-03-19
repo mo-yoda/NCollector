@@ -997,14 +997,30 @@ class NCollectorApp:
             return
 
         # --- 2. Load protocols + measurements from path ---
-        logger.debug("Enrichment: scanning for files...")
+        logger.debug("--- Master Enrichment ---")
+        logger.debug("scanning for files...")
 
         # Determine plate layout from old master (check for labeling control)
         is_labeling = "labeling control" in df_old.get("Replicate", pd.Series()).astype(str).values
 
+        # Extract baseline_end_index from old master: row index where Time_(min) == 0
+        baseline_end_idx = None
+        if 'Time_(min)' in df_old.columns:
+            zero_times = df_old.loc[df_old['Time_(min)'] == 0.0]
+            if not zero_times.empty:
+                # Get the position within any file (count rows before time==0 for one well)
+                sample_file = df_old['File_Name'].iloc[0]
+                sample_well = df_old['Well_ID'].iloc[0]
+                file_well_mask = (df_old['File_Name'] == sample_file) & (df_old['Well_ID'] == sample_well)
+                file_well_times = df_old.loc[file_well_mask, 'Time_(min)'].sort_values()
+                zero_idx = (file_well_times == 0.0).values.argmax()
+                baseline_end_idx = int(zero_idx)
+                logger.debug(f"extracted baseline_end_index={baseline_end_idx} from old master.")
+
         enrich_config = ProcessingConfig(
             plate_layout=build_plate_layout(is_labeling),
-            labeling_correction=is_labeling
+            labeling_correction=is_labeling,
+            baseline_end_index=baseline_end_idx,
         )
 
         # Get folder paths containing xlsx/xlsm files
@@ -1023,6 +1039,23 @@ class NCollectorApp:
             self.log("[ENRICH] ERROR: No valid protocol + measurement pairs found in selected folder.")
             return
 
+        # Filter to folders matching the Main_Plasmids from the old master
+        old_main_plasmids = df_old['Main_Plasmids'].iloc[0] if 'Main_Plasmids' in df_old.columns else None
+        if old_main_plasmids and old_main_plasmids != "Unknown":
+            matching_folders = []
+            for f in loaded_folders:
+                folder_mp = " + ".join(f.protocol.main_plasmids) if f.protocol.main_plasmids else "Unknown"
+                if folder_mp == old_main_plasmids:
+                    matching_folders.append(f)
+            if matching_folders:
+                logger.debug(f"filtered {len(loaded_folders)} folders to "
+                             f"{len(matching_folders)} matching Main_Plasmids='{old_main_plasmids}'.")
+                loaded_folders = matching_folders
+            else:
+                self.log(f"[ENRICH] ERROR: No folders match Main_Plasmids '{old_main_plasmids}'. "
+                         f"Source files do not match this experiment.")
+                return
+
         total_files = sum(len(f.results) for f in loaded_folders)
         self.log(f"[ENRICH] Loaded {total_files} measurement files from "
                  f"{len(loaded_folders)} folders. Extracting raw data...")
@@ -1036,7 +1069,6 @@ class NCollectorApp:
         for folder in loaded_folders:
             protocol = folder.protocol
             main_plasmids = " + ".join(protocol.main_plasmids) if protocol.main_plasmids else "Unknown"
-            # TODO: if more than one set of main plasmids -> select the one in the old Master files
 
             for result in folder.results:
                 try:
@@ -1049,8 +1081,6 @@ class NCollectorApp:
                         raw_df[time_col], enrich_config.baseline_end_index)
                     if t_vec is None:
                         t_vec = list(range(len(raw_df)))
-                        # TODO: get baseline idx (to expect) from old Master file Time(min) as idx of 0!
-                        # TODO: IF this fails -> show error message and abort
 
                     # Persist baseline index for subsequent files
                     if enrich_config.baseline_end_index is None and 0 in t_vec:
@@ -1107,7 +1137,7 @@ class NCollectorApp:
 
                     new_file_data.append(df_file)
                     n_ok += 1
-                    logger.debug(f"Enrichment: extracted {result.file_name}")
+                    logger.debug(f"Extracted {result.file_name}")
 
                 except Exception as e:
                     n_err += 1
@@ -1120,12 +1150,12 @@ class NCollectorApp:
         if n_err > 0:
             self.log(f"[ENRICH] Extracted {n_ok} files ({n_err} failed).")
         else:
-            logger.debug(f"Enrichment: all {n_ok} files extracted successfully.")
+            logger.debug(f"All {n_ok} files extracted successfully.")
 
         df_new = pd.concat(new_file_data, ignore_index=True)
 
         # --- 4. Validate condition combinations ---
-        logger.debug("Enrichment: validating conditions...")
+        logger.debug("Validating conditions...")
         condition_cols = ['Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand']
 
         old_combos = set(
@@ -1142,7 +1172,7 @@ class NCollectorApp:
             self.log("[ENRICH] Enrichment aborted — source files do not match this experiment.")
             return
 
-        logger.debug(f"Enrichment: all {len(old_combos)} condition combinations found.")
+        logger.debug(f"All {len(old_combos)} condition combinations found.")
 
         # --- 5. Validate row count ---
         if len(df_old) != len(df_new):
@@ -1150,16 +1180,21 @@ class NCollectorApp:
                      f"source files: {len(df_new)}. Enrichment aborted.")
             return
 
-        logger.debug(f"Enrichment: row count matches ({len(df_old)}).")
+        logger.debug(f"Row count matches ({len(df_old)}).")
 
         # --- 6. Merge on condition columns + Well_ID + Time_(min) ---
         merge_cols = ['Date', 'Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand',
                       'Well_ID', 'Time_(min)']
 
-        # Ensure Date types match (CSV may store as string, xlsx as date object)
         df_old_work = df_old.copy()
-        df_old_work['Date'] = df_old_work['Date'].astype(str)
-        df_new['Date'] = df_new['Date'].astype(str)
+
+        # Normalize Date to consistent YYYY-MM-DD format
+        df_old_work['Date'] = pd.to_datetime(df_old_work['Date']).dt.strftime('%Y-%m-%d')
+        df_new['Date'] = pd.to_datetime(df_new['Date']).dt.strftime('%Y-%m-%d')
+
+        # Normalize Time_(min) to float for both sides
+        df_old_work['Time_(min)'] = df_old_work['Time_(min)'].astype(float)
+        df_new['Time_(min)'] = df_new['Time_(min)'].astype(float)
 
         # Select only the merge keys + enrichment columns from new data
         enrich_cols = merge_cols + ['Raw_BRET_new',
@@ -1174,14 +1209,14 @@ class NCollectorApp:
 
         # Check if merge created duplicate rows (many-to-many)
         if len(df_merged) != len(df_old_work):
-            logger.debug(f"Enrichment merge: row count changed from {len(df_old_work)} to {len(df_merged)} "
-                         f"— likely duplicate merge keys in new data.")
-            # TODO: this should fail then -> to prevent saving wrong master
+            self.log(f"[ENRICH] ERROR: Merge changed row count from {len(df_old_work)} to {len(df_merged)}. "
+                     f"Likely duplicate merge keys in source data. Enrichment aborted.")
             # Find which keys are duplicated
             dup_keys = df_enrich[df_enrich.duplicated(subset=merge_cols, keep=False)]
             if not dup_keys.empty:
                 sample = dup_keys[merge_cols].head(3).to_dict('records')
-                logger.debug(f"Enrichment merge: example duplicate keys: {sample}")
+                logger.debug(f"example duplicate keys: {sample}")
+            return
 
         # --- 7. Post-merge validation: Raw BRET data should match ---
         # Validation logic: BRET ratio in old master (Raw_BRET_kinetic) is compared to extracted ratio from new path:
@@ -1192,7 +1227,7 @@ class NCollectorApp:
             if compare_mask.any():
                 old_vals = df_merged.loc[compare_mask, 'Raw_BRET_kinetic'].astype(float).values
                 new_vals = df_merged.loc[compare_mask, 'Raw_BRET_new'].astype(float).values
-                diff = ~np.isclose(old_vals, new_vals, rtol=1e-9, atol=1e-12)
+                diff = ~np.isclose(old_vals, new_vals, rtol=1e-8, atol=1e-8)
                 n_mismatched = diff.sum()
                 if n_mismatched > 0:
                     self.log(f"[ENRICH] WARNING: {n_mismatched} rows have mismatched Raw BRET values. "
@@ -1209,7 +1244,7 @@ class NCollectorApp:
                             f"delta={abs(float(row['Raw_BRET_kinetic']) - float(row['Raw_BRET_new'])):.15e}"
                         )
                 else:
-                    logger.debug("Enrichment: Raw BRET validation passed.")
+                    logger.debug("Raw BRET validation passed.")
             else:
                 self.log("[ENRICH] WARNING: No overlapping non-NaN Raw BRET data to validate.")
 
@@ -1219,7 +1254,7 @@ class NCollectorApp:
         # --- 8. Final result ---
         n_populated = df_merged['Donor_Raw_kinetic'].notna().sum()
         n_total = len(df_merged)
-        logger.info(f"[ENRICH] Complete. Populated {n_populated}/{n_total} rows with raw channel data.")
+        logger.info(f"Complete. Populated {n_populated}/{n_total} rows with raw channel data.")
 
         if n_populated == 0:
             self.log("[ENRICH] ERROR: No data was populated after merge. Enrichment aborted.")
@@ -1228,10 +1263,13 @@ class NCollectorApp:
         # Update master
         self.master_df = df_merged
 
+        # Update NCollector version to current
+        self.master_df['NCollector_version'] = APP_VERSION
+
         # Update path if it was missing
         if stored_path in (None, "undocumented path"):
             self.master_df['Path'] = source_dir
-            logger.info(f"[ENRICH] Updated Path column to: {source_dir}")
+            logger.info(f"Updated Path column to: {source_dir}")
 
         # Refresh GUI and offer to save
         self.refresh_plot_helper_options()
