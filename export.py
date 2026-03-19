@@ -1,5 +1,6 @@
 import logging
 import pandas as pd
+from models import LEGACY_COLUMN_DEFAULTS
 
 logger = logging.getLogger("NCollector")
 
@@ -32,21 +33,19 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         bugs_fixed.append(msg)
         logger.info(msg)
 
-    # --- Fill missing columns with defaults ---
-    defaults = {
-        "NCollector_version": "< v2",
-        "Path": "undocumented path",
-    }
-    for col, default_val in defaults.items():
-        if col not in df.columns:
-            df[col] = default_val
-            _modified(f"'{col}' column missing. Assigned '{default_val}'.")
+    # --- Fill all missing columns with defaults ---
+    missing_cols = set(LEGACY_COLUMN_DEFAULTS.keys()) - set(df.columns)
 
-    # --- Fill missing raw donor and acceptor columns with NaN (added in v2+) ---
-    nan_defaults = ["Donor_Raw_kinetic", "Acceptor_Raw_kinetic", "PR_Time(min)"]
-    for col in nan_defaults:
-        if col not in df.columns:
-            df[col] = float('nan')
+    deferred_log_cols = {'Is_Vehicle', 'Is_Excluded'}
+
+    for col in missing_cols:
+        config = LEGACY_COLUMN_DEFAULTS[col]
+        default_val = config["default"]
+        df[col] = default_val
+
+        # Only log if values are not reconstructable from available data
+        if not config["reconstructable"]:
+            _modified(f"'{col}' column missing. Assigned default: '{default_val}'.")
 
     # --- v1.0.0 legacy cleanup ---
     if "Empty/NoID" in df.get('Transfection', pd.Series()).values:
@@ -63,7 +62,7 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
 
     # --- Reconstruct Is_Vehicle for older CSVs ---
-    if 'Is_Vehicle' not in df.columns:
+    if 'Is_Vehicle' in missing_cols:
         if 'Plate_Row' in df.columns and 'Ligand_Conc' in df.columns:
             df['Is_Vehicle'] = (df['Plate_Row'] == 'H') & (df['Ligand_Conc'] == 0.0)
             _modified("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H' & Ligand_Conc == 0.0.")
@@ -71,7 +70,9 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
             df['Is_Vehicle'] = df['Plate_Row'] == 'H'
             _modified("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H'.")
         else:
-            df['Is_Vehicle'] = False
+            # Fallback to default
+            default_val = LEGACY_COLUMN_DEFAULTS['Is_Vehicle']['default']
+            _modified(f"'Is_Vehicle' column could not be reconstructed. Defaulting to '{default_val}'.")
 
     # --- Clean up legacy vehicle concentration (pre-v2 CSVs stored 0.0 for vehicle) ---
     if 'Ligand_Conc' in df.columns:
@@ -81,10 +82,10 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
             _modified(f"Cleaned {legacy_vehicle.sum()} vehicle rows: Ligand_Conc 0.0 -> NaN.")
 
     # --- Reconstruct Is_Excluded for pre-v2 CSVs ---
-    if 'Is_Excluded' not in df.columns:
+    if 'Is_Excluded' in missing_cols:
         has_exclusion_rules = (
             'Applied_Exclusions' in df.columns
-            and (df['Applied_Exclusions'].astype(str) != "None").any()
+            and df['Applied_Exclusions'].dropna().astype(str).ne("None").any()
         )
         if has_exclusion_rules and 'Raw_BRET_kinetic' in df.columns:
             # Exclusion rules were applied: wells with NaN in raw BRET data were excluded
@@ -92,8 +93,8 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
             n_excluded = df['Is_Excluded'].sum()
             _modified(f"Reconstructed 'Is_Excluded' from NaN in Raw_BRET_kinetic ({n_excluded} excluded rows).")
         else:
-            df['Is_Excluded'] = False
-            _modified("'Is_Excluded' column missing and no exclusions were applied. Defaulting to False.")
+            default_val = LEGACY_COLUMN_DEFAULTS['Is_Excluded']['default']
+            _modified(f"'Is_Excluded' column missing and no exclusions were applied. Defaulting to '{default_val}'.")
 
     # --- Fix legacy AUC bug: excluded wells had 0.0 instead of NaN (sum of all-NaN) ---
     if 'Is_Excluded' in df.columns and df['Is_Excluded'].any():

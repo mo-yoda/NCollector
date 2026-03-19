@@ -30,6 +30,20 @@ MASTER_COLUMNS = [
     "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
 ]
 
+
+# Columns added after v1
+# with their default values for legacy CSVs and whether they are reconstructable without loading original files again
+LEGACY_COLUMN_DEFAULTS = {
+    "NCollector_version": {"default": "< v2", "reconstructable": False},
+    "Path": {"default": "undocumented path", "reconstructable": False},
+    "Donor_Raw_kinetic": {"default": float('nan'), "reconstructable": False},
+    "Acceptor_Raw_kinetic": {"default": float('nan'), "reconstructable": False},
+    "PR_Time(min)": {"default": float('nan'), "reconstructable": False},
+    "Is_Vehicle": {"default": False, "reconstructable": True},
+    "Is_Excluded": {"default": False, "reconstructable": True},
+}
+
+
 # Dictionary defining which dropdown option corresponds to which column in Master df
 DATA_TYPE_MAP = {
     "kinetic": {
