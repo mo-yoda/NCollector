@@ -2,12 +2,13 @@ import os
 import logging
 import tkinter as tk
 from tkinter import filedialog, ttk
+import numpy as np
 import pandas as pd
 from datetime import datetime, date
 
 from models import MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS, DATA_TYPE_MAP
 from parsing import extract_protocol_info, extract_measurement_data
-from processing import process_bret_measurement
+from processing import process_bret_measurement, calculate_relative_time, map_plate_metadata
 from export import apply_export_filters, build_row_info, generate_header_key, create_clean_pivot, ensure_master_csv_schema
 from dialogs import ask_user_parameter
 
@@ -889,8 +890,9 @@ class NCollectorApp:
                 self.log("[ERROR] Invalid CSV format. Columns missing.")
                 return
 
+            self.log(f"Loading Master CSV: {os.path.basename(file_path)}")
             # Backward compatibility: fill missing columns and clean legacy data
-            df = ensure_master_csv_schema(df, log_fn=self.log)
+            df, was_modified = ensure_master_csv_schema(df, log_fn=self.log)
 
             # Store in the unified variable
             self.master_df = df
@@ -902,10 +904,367 @@ class NCollectorApp:
             # Update GUI
             self.lbl_data_source.config(text=f"CSV: {os.path.basename(file_path)}")
             self.refresh_plot_helper_options()
+
+            # If schema was updated, offer to save and optionally enrich
+            if was_modified:
+                self.log(f"[MASTER UPDATED] Master was updated to current version.")
+                self.show_csv_updated_dialog()
+
             self.log(f"Loaded Master CSV: {os.path.basename(file_path)}")
 
         except Exception as e:
             self.log(f"[ERROR] CSV Load Failed: {e}")
+
+    def show_csv_updated_dialog(self):
+        """
+        Shows a dialog after importing CSV that was updated to current app version state,
+        offering to save and/or enrich from source files.
+        """
+        dialog = tk.Toplevel(self.main_gi)
+        dialog.title("Master CSV Updated")
+        dialog.geometry("520x220")
+        dialog.transient(self.main_gi)
+        dialog.grab_set()
+
+        txt_frame = tk.Frame(dialog)
+        txt_frame.pack(pady=10, fill="both", padx=5, expand=True)
+
+        tk.Label(txt_frame,
+                 text="Imported Master CSV was Updated",
+                 wraplength=480, justify="left", font=("Arial", 10, "bold")).pack(side="top")
+
+        # Check if raw data columns are missing (all NaN)
+        has_raw_data = (
+                'Donor_Raw_kinetic' in self.master_df.columns
+                and self.master_df['Donor_Raw_kinetic'].notna().any()
+        )
+        if not has_raw_data:
+            tk.Label(txt_frame,
+                     text="Raw data columns (Donor, Acceptor, PR Time) are empty.\n"
+                          "You can enrich this CSV by pointing to the original source files.",
+                     wraplength=480, justify="left", font=("Arial", 9),
+                     fg="black").pack(pady=(0, 10), padx=5)
+
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=10, fill="x", padx=5)
+
+        def on_save():
+            dialog.destroy()
+            self.export_master_csv(is_updated=True)
+
+        def on_enrich():
+            dialog.destroy()
+            self.enrich_master_from_source_files()
+
+        def on_skip():
+            dialog.destroy()
+
+        tk.Button(btn_frame, text="Save Updated CSV",
+                  command=on_save).pack(side="left", fill="x", expand=True, padx=3)
+        if not has_raw_data:
+            tk.Button(btn_frame, text="Enrich from Source Files",
+                      command=on_enrich).pack(side="left", fill="x", expand=True, padx=3)
+        tk.Button(btn_frame, text="Skip",
+                  command=on_skip).pack(side="left", fill="x", expand=True, padx=3)
+
+        self.main_gi.wait_window(dialog)
+
+    def enrich_master_from_source_files(self):
+        """
+        Enriches a legacy Master CSV by reloading source xlsx files to populate
+        Donor_Raw_kinetic, Acceptor_Raw_kinetic, and PR_Time(min).
+        Validates by matching experimental conditions and Raw_BRET_kinetic data.
+        Raw channel data is stored without exclusions for full traceability.
+        """
+        df_old = self.master_df
+        if df_old is None or df_old.empty:
+            return
+
+        # --- 1. Resolve source path ---
+        stored_path = df_old['Path'].iloc[0] if 'Path' in df_old.columns else None
+        source_dir = None
+
+        if stored_path and stored_path != "undocumented path" and os.path.isdir(stored_path):
+            source_dir = stored_path
+            self.log(f"[ENRICH] Using stored path: {source_dir}")
+        else:
+            self.log("[ENRICH] Original path unavailable. Please select the experiment folder.")
+            source_dir = filedialog.askdirectory(title="Select folder containing source xlsx files")
+
+        if not source_dir:
+            self.log("[ENRICH] Cancelled — no folder selected.")
+            return
+
+        # --- 2. Load protocols + measurements from path ---
+        logger.debug("Enrichment: scanning for files...")
+
+        # Determine plate layout from old master (check for labeling control)
+        is_labeling = "labeling control" in df_old.get("Replicate", pd.Series()).astype(str).values
+        if is_labeling:
+            plate_layout = [range(1, 5), range(5, 9), range(9, 13)]
+        else:
+            plate_layout = [range(1, 4), range(4, 7), range(7, 10), range(10, 13)]
+
+        enrich_config = ProcessingConfig(
+            plate_layout=plate_layout,
+            labeling_correction=is_labeling
+        )
+
+        loaded_folders = []
+        for root, dirs, files in os.walk(source_dir):
+            xlsx_files = [f for f in files if f.endswith(('.xlsx', '.xlsm'))]
+            if not xlsx_files:
+                continue
+
+            folder_name = os.path.basename(root)
+            try:
+                folder_date = datetime.strptime(folder_name.split("_")[0], '%y%m%d').date()
+            except ValueError:
+                continue
+
+            folder_data = MeasurementFolder(
+                folder_name=folder_name, folder_path=root, measurement_date=folder_date
+            )
+            # TODO: create helper that can be used by collect_files as well
+            for file_name in xlsx_files:
+                file_path = os.path.join(root, file_name)
+                try:
+                    xls = pd.ExcelFile(file_path)
+                    sheets = xls.sheet_names
+
+                    if "Protocol" in sheets:
+                        protocol = extract_protocol_info(xls, file_name)
+                        if protocol and protocol.exp_date == folder_date:
+                            folder_data.protocol = protocol
+
+                    elif "Table All Cycles" in sheets and set(sheets).issubset(
+                            {"Table All Cycles", "Protocol Information"}):
+                        result = extract_measurement_data(xls, file_name)
+                        if result and result.measurement_date == folder_date:
+                            folder_data.results.append(result)
+                except Exception as e:
+                    logger.debug(f"Enrichment: skipped {file_name}: {e}")
+
+            if folder_data.protocol and folder_data.results:
+                loaded_folders.append(folder_data)
+
+        if not loaded_folders:
+            self.log("[ENRICH] ERROR: No valid protocol + measurement pairs found in selected folder.")
+            return
+
+        total_files = sum(len(f.results) for f in loaded_folders)
+        self.log(f"[ENRICH] Loaded {total_files} measurement files from "
+                 f"{len(loaded_folders)} folders. Extracting raw data...")
+
+        # --- 3. Map metadata and extract raw data per file ---
+        new_file_data = []
+        time_col = "Time (min)"
+        n_ok = 0
+        n_err = 0
+
+        for folder in loaded_folders:
+            protocol = folder.protocol
+            main_plasmids = " + ".join(protocol.main_plasmids) if protocol.main_plasmids else "Unknown"
+            # TODO: if more than one set of main plasmids -> select the one in the old Master files
+
+            for result in folder.results:
+                try:
+                    # Map conditions onto plate columns
+                    map_plate_metadata(result, protocol, enrich_config)
+
+                    # Calculate relative time vector for this file
+                    raw_df = result.raw_bret_ratio_df.copy()
+                    t_vec = calculate_relative_time(
+                        raw_df[time_col], enrich_config.baseline_end_index)
+                    if t_vec is None:
+                        t_vec = list(range(len(raw_df)))
+                        # TODO: get baseline idx (to expect) from old Master file Time(min) as idx of 0!
+                        # TODO: IF this fails -> show error message and abort
+
+                    # Persist baseline index for subsequent files
+                    if enrich_config.baseline_end_index is None and 0 in t_vec:
+                        enrich_config.baseline_end_index = t_vec.index(0)
+
+                    # PR Time: raw plate reader time mapped by relative time
+                    raw_time_list = (list(result.raw_time)
+                                     if result.raw_time is not None and len(result.raw_time) > 0 else [])
+                    pr_time_map = (dict(zip(t_vec, raw_time_list))
+                                   if len(raw_time_list) == len(t_vec) else {})
+
+                    # Melt helper — uses calculated Time_(min)
+                    def melt_df(df_in, val_name):
+                        work = df_in.drop(columns=[time_col], errors='ignore').copy()
+                        if len(work) == len(t_vec):
+                            work.index = t_vec
+                        work.index.name = "Time_(min)"
+                        return work.reset_index().melt(
+                            id_vars="Time_(min)", var_name="Well_ID", value_name=val_name)
+
+                    # Raw BRET (for post-merge validation — no exclusions)
+                    df_raw = melt_df(raw_df, "Raw_BRET_new")
+                    # Donor and Acceptor (raw, no exclusions — for traceability)
+                    df_donor = melt_df(result.donor_df, "Donor_Raw_kinetic")
+                    df_acceptor = melt_df(result.acceptor_df, "Acceptor_Raw_kinetic")
+
+                    merge_on = ["Time_(min)", "Well_ID"]
+                    df_file = df_raw.merge(df_donor, on=merge_on, how="left") \
+                                    .merge(df_acceptor, on=merge_on, how="left")
+
+                    # PR Time
+                    df_file["PR_Time(min)"] = (df_file["Time_(min)"].map(pr_time_map)
+                                               if pr_time_map else float('nan'))
+
+                    # Add condition metadata for merge
+                    df_file["Date"] = result.measurement_date
+                    df_file["Main_Plasmids"] = main_plasmids
+
+                    meta_maps = {k: {} for k in
+                                 ['Transfection', 'Cell_Line', 'Ligand']}
+                    for well_id in df_file['Well_ID'].unique():
+                        try:
+                            c_idx = int(well_id[1:])
+                            meta = result.column_metadata.get(c_idx)
+                            if meta:
+                                meta_maps['Transfection'][well_id] = meta.condition_name
+                                meta_maps['Cell_Line'][well_id] = meta.cell_line
+                                meta_maps['Ligand'][well_id] = meta.ligand_identity
+                        except:
+                            pass
+
+                    for col_name, mapping in meta_maps.items():
+                        df_file[col_name] = df_file['Well_ID'].map(mapping)
+
+                    new_file_data.append(df_file)
+                    n_ok += 1
+                    logger.debug(f"Enrichment: extracted {result.file_name}")
+
+                except Exception as e:
+                    n_err += 1
+                    self.log(f"   [ERROR] Failed to extract {result.file_name}: {e}")
+
+        if not new_file_data:
+            self.log("[ENRICH] ERROR: No data could be extracted. Enrichment aborted.")
+            return
+
+        if n_err > 0:
+            self.log(f"[ENRICH] Extracted {n_ok} files ({n_err} failed).")
+        else:
+            logger.debug(f"Enrichment: all {n_ok} files extracted successfully.")
+
+        df_new = pd.concat(new_file_data, ignore_index=True)
+
+        # --- 4. Validate condition combinations ---
+        logger.debug("Enrichment: validating conditions...")
+        condition_cols = ['Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand']
+
+        old_combos = set(
+            df_old[condition_cols].drop_duplicates().itertuples(index=False, name=None))
+        new_combos = set(
+            df_new[condition_cols].drop_duplicates().itertuples(index=False, name=None))
+
+        missing_combos = old_combos - new_combos
+        if missing_combos:
+            self.log(f"[ENRICH] ERROR: {len(missing_combos)} condition(s) from master CSV "
+                     f"not found in source files:")
+            for combo in list(missing_combos)[:5]:
+                self.log(f"   Missing: {dict(zip(condition_cols, combo))}")
+            self.log("[ENRICH] Enrichment aborted — source files do not match this experiment.")
+            return
+
+        logger.debug(f"Enrichment: all {len(old_combos)} condition combinations found.")
+
+        # --- 5. Validate row count ---
+        if len(df_old) != len(df_new):
+            self.log(f"[ENRICH] ERROR: Row count mismatch — master CSV: {len(df_old)}, "
+                     f"source files: {len(df_new)}. Enrichment aborted.")
+            return
+
+        logger.debug(f"Enrichment: row count matches ({len(df_old)}).")
+
+        # --- 6. Merge on condition columns + Well_ID + Time_(min) ---
+        merge_cols = ['Date', 'Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand',
+                      'Well_ID', 'Time_(min)']
+
+        # Ensure Date types match (CSV may store as string, xlsx as date object)
+        df_old_work = df_old.copy()
+        df_old_work['Date'] = df_old_work['Date'].astype(str)
+        df_new['Date'] = df_new['Date'].astype(str)
+
+        # Select only the merge keys + enrichment columns from new data
+        enrich_cols = merge_cols + ['Raw_BRET_new',
+                       'Donor_Raw_kinetic', 'Acceptor_Raw_kinetic', 'PR_Time(min)']
+        df_enrich = df_new[enrich_cols].copy()
+
+        # Drop old empty columns before merge
+        df_old_work.drop(columns=['Donor_Raw_kinetic', 'Acceptor_Raw_kinetic', 'PR_Time(min)'],
+                         inplace=True, errors='ignore')
+
+        df_merged = df_old_work.merge(df_enrich, on=merge_cols, how='left')
+
+        # Check if merge created duplicate rows (many-to-many)
+        if len(df_merged) != len(df_old_work):
+            logger.debug(f"Enrichment merge: row count changed from {len(df_old_work)} to {len(df_merged)} "
+                         f"— likely duplicate merge keys in new data.")
+            # TODO: this should fail then -> to prevent saving wrong master
+            # Find which keys are duplicated
+            dup_keys = df_enrich[df_enrich.duplicated(subset=merge_cols, keep=False)]
+            if not dup_keys.empty:
+                sample = dup_keys[merge_cols].head(3).to_dict('records')
+                logger.debug(f"Enrichment merge: example duplicate keys: {sample}")
+
+        # --- 7. Post-merge validation: Raw BRET data should match ---
+        # Validation logic: BRET ratio in old master (Raw_BRET_kinetic) is compared to extracted ratio from new path:
+        # Difference of the two should be 0 (np.isclose defines decimal tolerance). NAs (excluded values) are ignored.
+        if 'Raw_BRET_kinetic' in df_merged.columns and 'Raw_BRET_new' in df_merged.columns:
+            # Compare only non-excluded rows (old master has NaN for excluded wells)
+            compare_mask = df_merged['Raw_BRET_kinetic'].notna() & df_merged['Raw_BRET_new'].notna()
+            if compare_mask.any():
+                old_vals = df_merged.loc[compare_mask, 'Raw_BRET_kinetic'].astype(float).values
+                new_vals = df_merged.loc[compare_mask, 'Raw_BRET_new'].astype(float).values
+                diff = ~np.isclose(old_vals, new_vals, rtol=1e-9, atol=1e-12)
+                n_mismatched = diff.sum()
+                if n_mismatched > 0:
+                    self.log(f"[ENRICH] WARNING: {n_mismatched} rows have mismatched Raw BRET values. "
+                             f"Source files may not be the originals.")
+                    # Debug: show mismatched rows
+                    mismatch_positions = compare_mask[compare_mask].index[diff]
+                    for idx in mismatch_positions[:5]:
+                        row = df_merged.loc[idx]
+                        logger.debug(
+                            f"Mismatch row {idx}: "
+                            f"Well={row.get('Well_ID')} Time={row.get('Time_(min)')} "
+                            f"Date={row.get('Date')} Transf={row.get('Transfection')} "
+                            f"old={row['Raw_BRET_kinetic']!r} new={row['Raw_BRET_new']!r} "
+                            f"delta={abs(float(row['Raw_BRET_kinetic']) - float(row['Raw_BRET_new'])):.15e}"
+                        )
+                else:
+                    logger.debug("Enrichment: Raw BRET validation passed.")
+            else:
+                self.log("[ENRICH] WARNING: No overlapping non-NaN Raw BRET data to validate.")
+
+        # Drop the temporary validation column
+        df_merged.drop(columns=['Raw_BRET_new'], inplace=True, errors='ignore')
+
+        # --- 8. Final result ---
+        n_populated = df_merged['Donor_Raw_kinetic'].notna().sum()
+        n_total = len(df_merged)
+        logger.info(f"[ENRICH] Complete. Populated {n_populated}/{n_total} rows with raw channel data.")
+
+        if n_populated == 0:
+            self.log("[ENRICH] ERROR: No data was populated after merge. Enrichment aborted.")
+            return
+
+        # Update master
+        self.master_df = df_merged
+
+        # Update path if it was missing
+        if stored_path in (None, "undocumented path"):
+            self.master_df['Path'] = source_dir
+            logger.info(f"[ENRICH] Updated Path column to: {source_dir}")
+
+        # Refresh GUI and offer to save
+        self.refresh_plot_helper_options()
+        self.export_master_csv(is_updated=True)
 
     def select_folder(self):
             """Opens dialog to select folder to search for xlsx files in"""
@@ -1483,7 +1842,7 @@ class NCollectorApp:
         final_cols = [c for c in MASTER_COLUMNS if c in master_df.columns]
         return master_df[final_cols]
 
-    def export_master_csv(self):
+    def export_master_csv(self, is_updated = False):
         """Saves compiled master df to csv"""
         if self.master_df is None or self.master_df.empty:
             self.log("No data to export.")
@@ -1493,13 +1852,13 @@ class NCollectorApp:
         file_path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV File", "*.csv")],
-            title="Save Master CSV"
+            title=f"Save {'updated ' if is_updated else ''}Master CSV"
         )
         if not file_path: return
 
         try:
             self.master_df.to_csv(file_path, index=False)
-            self.log(f"   [SUCCESS] Saved Master CSV: {os.path.basename(file_path)}")
+            self.log(f"   [SUCCESS] Saved {'updated ' if is_updated else ''}Master CSV: {os.path.basename(file_path)}")
         except Exception as e:
             self.log(f"   [ERROR] Failed to save CSV: {e}")
 

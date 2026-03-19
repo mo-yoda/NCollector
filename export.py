@@ -4,15 +4,32 @@ import pandas as pd
 logger = logging.getLogger("NCollector")
 
 
-def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
+def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFrame, bool]:
     """
     Fills in missing columns and cleans legacy data for Master CSVs from older NCollector versions.
     Add new columns to the defaults dict as the schema evolves.
+    Returns (df, was_modified).
+    Bug fixes are logged.
     """
+    was_modified = False
+
     def _log(msg):
         logger.info(msg)
         if log_fn:
+            # Use log msg for important bug fixes e.g. Mean AUC bug (fixed in v2.0)
             log_fn(f"   [CSV BUG FIX] {msg}")
+
+    modified = []
+    bugs_fixed = []
+
+    def _modified(msg):
+        modified.append(msg)
+        logger.info(msg)
+
+    def _bug_fix(msg):
+        modified.append(msg)
+        bugs_fixed.append(msg)
+        logger.info(msg)
 
     # --- Fill missing columns with defaults ---
     defaults = {
@@ -22,7 +39,7 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
     for col, default_val in defaults.items():
         if col not in df.columns:
             df[col] = default_val
-            logger.info(f"'{col}' column missing. Assigned '{default_val}'.")
+            _modified(f"'{col}' column missing. Assigned '{default_val}'.")
 
     # --- Fill missing raw donor and acceptor columns with NaN (added in v2+) ---
     nan_defaults = ["Donor_Raw_kinetic", "Acceptor_Raw_kinetic", "PR_Time(min)"]
@@ -32,12 +49,12 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
 
     # --- v1.0.0 legacy cleanup ---
     if "Empty/NoID" in df.get('Transfection', pd.Series()).values:
-        logger.info("Removing legacy 'Empty/NoID' data...")
+        _modified("Removing legacy 'Empty/NoID' data...")
         df = df[df['Transfection'] != "Empty/NoID"].copy()
 
     # --- Reconstruct Bl_LP if missing (pre-v2 beta CSVs only had Bl_Corrected_BRET) ---
     if 'Bl_LP' not in df.columns and 'Bl_Corrected_BRET' in df.columns:
-        logger.info("'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
+        _modified("'Bl_LP' missing in CSV. Reconstructing from 'Bl_Corrected_BRET'...")
         df_sorted = df.sort_values(by=['File_Name', 'Well_ID', 'Time_(min)'])
         last_3 = df_sorted.groupby(['File_Name', 'Well_ID']).tail(3)
         bl_lp_means = last_3.groupby(['File_Name', 'Well_ID'])['Bl_Corrected_BRET'].mean().reset_index()
@@ -48,10 +65,10 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
     if 'Is_Vehicle' not in df.columns:
         if 'Plate_Row' in df.columns and 'Ligand_Conc' in df.columns:
             df['Is_Vehicle'] = (df['Plate_Row'] == 'H') & (df['Ligand_Conc'] == 0.0)
-            logger.info("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H' & Ligand_Conc == 0.0.")
+            _modified("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H' & Ligand_Conc == 0.0.")
         elif 'Plate_Row' in df.columns:
             df['Is_Vehicle'] = df['Plate_Row'] == 'H'
-            logger.info("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H'.")
+            _modified("'Is_Vehicle' column missing. Reconstructed from Plate_Row == 'H'.")
         else:
             df['Is_Vehicle'] = False
 
@@ -60,7 +77,7 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
         legacy_vehicle = df['Is_Vehicle'] & (df['Ligand_Conc'] == 0.0)
         if legacy_vehicle.any():
             df.loc[legacy_vehicle, 'Ligand_Conc'] = float('nan')
-            logger.info(f"Cleaned {legacy_vehicle.sum()} vehicle rows: Ligand_Conc 0.0 -> NaN.")
+            _modified(f"Cleaned {legacy_vehicle.sum()} vehicle rows: Ligand_Conc 0.0 -> NaN.")
 
     # --- Reconstruct Is_Excluded for pre-v2 CSVs ---
     if 'Is_Excluded' not in df.columns:
@@ -72,10 +89,10 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
             # Exclusion rules were applied: wells with NaN in raw BRET data were excluded
             df['Is_Excluded'] = df['Raw_BRET_kinetic'].isna()
             n_excluded = df['Is_Excluded'].sum()
-            logger.info(f"Reconstructed 'Is_Excluded' from NaN in Raw_BRET_kinetic ({n_excluded} excluded rows).")
+            _modified(f"Reconstructed 'Is_Excluded' from NaN in Raw_BRET_kinetic ({n_excluded} excluded rows).")
         else:
             df['Is_Excluded'] = False
-            logger.info("'Is_Excluded' column missing and no exclusions were applied. Defaulting to False.")
+            _modified("'Is_Excluded' column missing and no exclusions were applied. Defaulting to False.")
 
     # --- Fix legacy AUC bug: excluded wells had 0.0 instead of NaN (sum of all-NaN) ---
     if 'Is_Excluded' in df.columns and df['Is_Excluded'].any():
@@ -89,7 +106,7 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
                     df.loc[bad_zeros, col] = float('nan')
                     fixed_cols.append(col)
         if fixed_cols:
-            logger.info(f"Fixed legacy AUC bug: set 0.0 -> NaN for excluded wells in {', '.join(fixed_cols)}.")
+            _bug_fix(f"Fixed legacy AUC bug: set 0.0 -> NaN for excluded wells in {', '.join(fixed_cols)}.")
 
         # Recalculate AUC_Mean from corrected Veh_Norm_AUC (mean included bogus 0.0 values)
         if 'Veh_Norm_AUC' in fixed_cols and 'AUC_Mean' in df.columns:
@@ -97,9 +114,14 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> pd.DataFrame:
             available_keys = [k for k in group_keys if k in df.columns]
             recalc = df.groupby(available_keys)['Veh_Norm_AUC'].transform('mean')
             df['AUC_Mean'] = recalc
-            _log("Recalculated 'AUC_Mean' from corrected 'Veh_Norm_AUC'.")
+            _bug_fix("Recalculated 'AUC_Mean' from corrected 'Veh_Norm_AUC'.")
 
-    return df
+    was_modified = len(modified) > 0
+    if bugs_fixed and log_fn:
+        for msg in bugs_fixed:
+            log_fn(f"   [CSV FIX] {msg}")
+
+    return df, was_modified
 
 
 def apply_export_filters(df, config):
