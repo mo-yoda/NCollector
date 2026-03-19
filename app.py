@@ -892,7 +892,7 @@ class NCollectorApp:
 
             self.log(f"Loading Master CSV: {os.path.basename(file_path)}")
             # Backward compatibility: fill missing columns and clean legacy data
-            df, was_modified = ensure_master_csv_schema(df, log_fn=self.log)
+            df, was_modified, was_fixed = ensure_master_csv_schema(df, log_fn=self.log)
 
             # Store in the unified variable
             self.master_df = df
@@ -908,12 +908,12 @@ class NCollectorApp:
             # If schema was updated, offer to save and optionally enrich
             if was_modified:
                 self.log(f"[MASTER UPDATED] Master was updated to current version.")
-                self.show_csv_updated_dialog()
+                self.show_csv_updated_dialog(was_fixed)
 
         except Exception as e:
             self.log(f"[ERROR] CSV Load Failed: {e}")
 
-    def show_csv_updated_dialog(self):
+    def show_csv_updated_dialog(self, was_fixed = False):
         """
         Shows a dialog after importing CSV that was updated to current app version state,
         offering to save and/or enrich from source files.
@@ -940,8 +940,13 @@ class NCollectorApp:
             tk.Label(txt_frame,
                      text="Raw data columns (Donor, Acceptor, PR Time) are empty.\n"
                           "You can enrich this CSV by pointing to the original source files.",
-                     wraplength=480, justify="left", font=("Arial", 9),
-                     fg="black").pack(pady=(0, 10), padx=5)
+                     wraplength=480, justify="left", font=("Arial", 9)).pack(pady=(0, 10), padx=5)
+
+        if was_fixed:
+            tk.Label(txt_frame,
+                     text="Bugs were fixed. Please save updated Master.",
+                     wraplength=480, justify="left", font=("Arial", 9, "bold"),
+                     fg="red").pack(side="bottom")
 
         btn_frame = tk.Frame(dialog)
         btn_frame.pack(pady=10, fill="x", padx=5)
