@@ -5,21 +5,13 @@ from models import LEGACY_COLUMN_DEFAULTS
 logger = logging.getLogger("NCollector")
 
 
-def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFrame, bool]:
+def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFrame, bool, bool]:
     """
     Fills in missing columns and cleans legacy data for Master CSVs from older NCollector versions.
     Add new columns to the defaults dict as the schema evolves.
     Returns (df, was_modified, was_fixed).
     Bug fixes are logged.
     """
-    was_modified = False
-    was_fixed = False
-
-    def _log(msg):
-        logger.info(msg)
-        if log_fn:
-            # Use log msg for important bug fixes e.g. Mean AUC bug (fixed in v2.0)
-            log_fn(f"   [CSV BUG FIX] {msg}")
 
     modified = []
     bugs_fixed = []
@@ -35,8 +27,6 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
 
     # --- Fill all missing columns with defaults ---
     missing_cols = set(LEGACY_COLUMN_DEFAULTS.keys()) - set(df.columns)
-
-    deferred_log_cols = {'Is_Vehicle', 'Is_Excluded'}
 
     for col in missing_cols:
         config = LEGACY_COLUMN_DEFAULTS[col]
@@ -123,7 +113,7 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
 
     if bugs_fixed and log_fn:
         for msg in bugs_fixed:
-            log_fn(f"   [CSV FIX] {msg}")
+            log_fn(f"   [CSV BUG FIX] {msg}")
 
     return df, was_modified, was_fixed
 
