@@ -416,6 +416,48 @@ def extract_measurement_data(xls_obj, file_name: str):
     return result_obj
 
 
+def extract_info_sheet_data(xls_obj) -> dict:
+    """
+    Extracts key-value pairs from the 'Protocol Information' sheet in a plate reader xlsx.
+    Returns a dict of extracted info, or empty dict if the sheet is missing or unreadable.
+    """
+    worksheet = "Protocol Information"
+    try:
+        # Read the first two columns of this sheet
+        info_sheet_df = pd.read_excel(xls_obj,
+                                     sheet_name=worksheet,
+                                     header=None)
+    except ValueError:
+        return {}
+
+    # Extract any info as dict, value is either in col a or b
+    info_dict = {}
+    for index, row in info_sheet_df.iterrows():
+        col_a = row[0]
+        col_b = row[1] if len(row) > 1 else None
+
+        if pd.isna(col_a):
+            continue # Skip rows where the first column is empty
+
+        # Convert to str only for splitting to ensure NAs are captured correctly
+        col_a_str = str(col_a)
+
+        # Check if the string contains our key-value separator
+        if ":" in col_a_str:
+            # Split by the FIRST colon only (important for Path key)
+            key, val_in_col1 = col_a_str.split(":", 1)
+            key = key.strip()
+            val_in_col1 = val_in_col1.strip()
+
+            if val_in_col1:
+                info_dict[key] = val_in_col1
+
+            elif pd.notna(col_b):
+                info_dict[key] = col_b.strip() if isinstance(col_b, str) else col_b
+
+    return info_dict
+
+
 # --- Folder Scanning --- #
 
 def scan_and_load_folders(folder_paths: list[str], log_fn=None) -> list[MeasurementFolder]:
@@ -476,6 +518,10 @@ def scan_and_load_folders(folder_paths: list[str], log_fn=None) -> list[Measurem
                         {"Table All Cycles", "Protocol Information"}):
                     result = extract_measurement_data(xls, file_name)
                     if result and result.measurement_date == folder_date:
+                        # Extract optional Protocol Information sheet
+                        if "Protocol Information" in sheet_names:
+                            result.info_sheet = extract_info_sheet_data(xls)
+
                         folder_data.results.append(result)
                         _log(f"   [MEASUREMENT] loaded: {file_name}")
                         is_imported = True

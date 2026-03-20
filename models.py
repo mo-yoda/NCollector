@@ -20,7 +20,7 @@ def build_plate_layout(is_labeling: bool) -> list[range]:
 # Column ordering for the master CSV. Referenced by compile_master_dataframe
 # for building the DF and ensure_master_csv_schema for importing older CSVs.
 MASTER_COLUMNS = [
-    "NCollector_version", "Path",
+    "NCollector_version", "Path", "Info_Sheet",
     "File_Name", "Date", "Main_Plasmids", "Applied_Exclusions", "Is_Excluded", "Is_Vehicle",
     "Transfection", "Cell_Line", "Ligand",
     "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)", "PR_Time(min)",
@@ -33,15 +33,20 @@ MASTER_COLUMNS = [
 
 # Columns added after v1
 # with their default values for legacy CSVs and whether they are reconstructable without loading original files again
+# enrichable: True if the column can be populated by reloading source xlsx files
 LEGACY_COLUMN_DEFAULTS = {
-    "NCollector_version": {"default": "< v2", "reconstructable": False},
-    "Path": {"default": "undocumented path", "reconstructable": False},
-    "Donor_Raw_kinetic": {"default": float('nan'), "reconstructable": False},
-    "Acceptor_Raw_kinetic": {"default": float('nan'), "reconstructable": False},
-    "PR_Time(min)": {"default": float('nan'), "reconstructable": False},
-    "Is_Vehicle": {"default": False, "reconstructable": True},
-    "Is_Excluded": {"default": False, "reconstructable": True},
+    "NCollector_version": {"default": "< v2", "reconstructable": False, "enrichable": False},
+    "Path":               {"default": "undocumented path", "reconstructable": False, "enrichable": False},
+    "Info_Sheet":         {"default": "", "reconstructable": False, "enrichable": True},
+    "Donor_Raw_kinetic":  {"default": float('nan'), "reconstructable": False, "enrichable": True},
+    "Acceptor_Raw_kinetic": {"default": float('nan'), "reconstructable": False, "enrichable": True},
+    "PR_Time(min)":       {"default": float('nan'), "reconstructable": False, "enrichable": True},
+    "Is_Vehicle":         {"default": False, "reconstructable": True, "enrichable": False},
+    "Is_Excluded":        {"default": False, "reconstructable": True, "enrichable": False},
 }
+
+# Columns that can be populated by reloading source xlsx files (derived from LEGACY_COLUMN_DEFAULTS)
+ENRICHABLE_COLS = [col for col, cfg in LEGACY_COLUMN_DEFAULTS.items() if cfg["enrichable"]]
 
 
 # Dictionary defining which dropdown option corresponds to which column in Master df
@@ -90,6 +95,9 @@ class PrResult:
     acceptor_df: pd.DataFrame # Raw counts from acceptor channel (higher wavelength)
     donor_wavelength: int = 0
     acceptor_wavelength: int = 0
+
+    # --- Optional metadata from "Protocol Information" sheet in analysis xlsx ---
+    info_sheet: dict = field(default_factory=dict)
 
     # --- Connection to protocol file ---
     # Key = Column Index (1-12), Value = WellMetadata object
