@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, date
 
-from models import MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS, DATA_TYPE_MAP, build_plate_layout
+from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS,
+                    DATA_TYPE_MAP, build_plate_layout, ENRICHABLE_COLS, LEGACY_COLUMN_DEFAULTS)
 from parsing import extract_protocol_info, extract_measurement_data, scan_and_load_folders
 from processing import process_bret_measurement, calculate_relative_time, map_plate_metadata
 from export import apply_export_filters, build_row_info, generate_header_key, create_clean_pivot, ensure_master_csv_schema
@@ -1120,6 +1121,7 @@ class NCollectorApp:
                     # Add condition metadata for merge
                     df_file["Date"] = result.measurement_date
                     df_file["Main_Plasmids"] = main_plasmids
+                    df_file["Info_Sheet"] = str(result.info_sheet) if result.info_sheet else ""
 
                     meta_maps = {k: {} for k in
                                  ['Transfection', 'Cell_Line', 'Ligand']}
@@ -1198,14 +1200,18 @@ class NCollectorApp:
         df_old_work['Time_(min)'] = df_old_work['Time_(min)'].astype(float)
         df_new['Time_(min)'] = df_new['Time_(min)'].astype(float)
 
-        # Select only the merge keys + enrichment columns from new data
-        enrich_cols = merge_cols + ['Raw_BRET_new',
-                       'Donor_Raw_kinetic', 'Acceptor_Raw_kinetic', 'PR_Time(min)']
+        # Ensure enrichable columns exist in new data (safety fallback)
+        for col in ENRICHABLE_COLS:
+            if col not in df_new.columns:
+                df_new[col] = LEGACY_COLUMN_DEFAULTS[col]["default"]
+
+        # Select merge keys + enrichable columns + validation column from new data
+        validation_col = 'Raw_BRET_new'
+        enrich_cols = merge_cols + [validation_col] + ENRICHABLE_COLS
         df_enrich = df_new[enrich_cols].copy()
 
         # Drop old empty columns before merge
-        df_old_work.drop(columns=['Donor_Raw_kinetic', 'Acceptor_Raw_kinetic', 'PR_Time(min)'],
-                         inplace=True, errors='ignore')
+        df_old_work.drop(columns=ENRICHABLE_COLS, inplace=True, errors='ignore')
 
         df_merged = df_old_work.merge(df_enrich, on=merge_cols, how='left')
 
@@ -1223,12 +1229,12 @@ class NCollectorApp:
         # --- 7. Post-merge validation: Raw BRET data should match ---
         # Validation logic: BRET ratio in old master (Raw_BRET_kinetic) is compared to extracted ratio from new path:
         # Difference of the two should be 0 (np.isclose defines decimal tolerance). NAs (excluded values) are ignored.
-        if 'Raw_BRET_kinetic' in df_merged.columns and 'Raw_BRET_new' in df_merged.columns:
+        if 'Raw_BRET_kinetic' in df_merged.columns and validation_col in df_merged.columns:
             # Compare only non-excluded rows (old master has NaN for excluded wells)
-            compare_mask = df_merged['Raw_BRET_kinetic'].notna() & df_merged['Raw_BRET_new'].notna()
+            compare_mask = df_merged['Raw_BRET_kinetic'].notna() & df_merged[validation_col].notna()
             if compare_mask.any():
                 old_vals = df_merged.loc[compare_mask, 'Raw_BRET_kinetic'].astype(float).values
-                new_vals = df_merged.loc[compare_mask, 'Raw_BRET_new'].astype(float).values
+                new_vals = df_merged.loc[compare_mask, validation_col].astype(float).values
                 diff = ~np.isclose(old_vals, new_vals, rtol=1e-8, atol=1e-8)
                 n_mismatched = diff.sum()
                 if n_mismatched > 0:
@@ -1242,8 +1248,8 @@ class NCollectorApp:
                             f"Mismatch row {idx}: "
                             f"Well={row.get('Well_ID')} Time={row.get('Time_(min)')} "
                             f"Date={row.get('Date')} Transf={row.get('Transfection')} "
-                            f"old={row['Raw_BRET_kinetic']!r} new={row['Raw_BRET_new']!r} "
-                            f"delta={abs(float(row['Raw_BRET_kinetic']) - float(row['Raw_BRET_new'])):.15e}"
+                            f"old={row['Raw_BRET_kinetic']!r} new={row[validation_col]!r} "
+                            f"delta={abs(float(row['Raw_BRET_kinetic']) - float(row[validation_col])):.15e}"
                         )
                 else:
                     logger.debug("Raw BRET validation passed.")
@@ -1251,7 +1257,7 @@ class NCollectorApp:
                 self.log("[ENRICH] WARNING: No overlapping non-NaN Raw BRET data to validate.")
 
         # Drop the temporary validation column
-        df_merged.drop(columns=['Raw_BRET_new'], inplace=True, errors='ignore')
+        df_merged.drop(columns=[validation_col], inplace=True, errors='ignore')
 
         # --- 8. Final result ---
         n_populated = df_merged['Donor_Raw_kinetic'].notna().sum()
@@ -1720,6 +1726,7 @@ class NCollectorApp:
                 # --- ADD METADATA ---
                 merged_df["NCollector_version"] = APP_VERSION
                 merged_df["Path"] = self.directory
+                merged_df["Info_Sheet"] = str(res.info_sheet) if res.info_sheet else ""
                 merged_df["File_Name"] = res.file_name
                 merged_df["Date"] = res.measurement_date
                 merged_df["Main_Plasmids"] = main_plasmids
