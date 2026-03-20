@@ -66,8 +66,20 @@ DATA_TYPE_MAP = {
         "last 3x tp: vehicle-normalised BRET ratio, mean of techn. replicates": "LP_Mean",
         "AUC: vehicle-normalised BRET ratio, techn. replicates": "Veh_Norm_AUC",
         "AUC: vehicle-normalised BRET ratio, mean of techn. replicates": "AUC_Mean"
+    },
+    "bargraph": {
+        "vehicle-normalised AUC, techn. replicates": "Veh_Norm_AUC",
+        "vehicle-normalised AUC, mean of techn. replicates": "AUC_Mean"
+    },
+    "heatmap": {
+        "vehicle-normalised AUC, mean of techn. replicates": "AUC_Mean"
     }
 }
+
+# Categories that require exactly one concentration selection
+SINGLE_CONC_CATEGORIES = {"bargraph", "heatmap"}
+# Categories that require a group_by selection (no "None" option)
+REQUIRES_GROUP_BY = {"heatmap"}
 
 @dataclass
 class PlateColMetadata:
