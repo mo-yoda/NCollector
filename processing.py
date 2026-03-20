@@ -335,7 +335,8 @@ def check_luminescence(lum_df: pd.DataFrame,
                 cell_line=cell_line,
                 ligand=lig_name,
                 value=float(val),
-                replicate=str(repl_num)
+                replicate=str(repl_num),
+                row = "All"
             )
             if warning_dict not in warnings:
                 warnings.append(warning_dict)
