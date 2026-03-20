@@ -8,7 +8,7 @@ from datetime import datetime, date
 
 from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS,
                     DATA_TYPE_MAP, build_plate_layout, ENRICHABLE_COLS, LEGACY_COLUMN_DEFAULTS)
-from parsing import extract_protocol_info, extract_measurement_data, scan_and_load_folders
+from parsing import scan_and_load_folders
 from processing import process_bret_measurement, calculate_relative_time, map_plate_metadata
 from export import apply_export_filters, build_row_info, generate_header_key, create_clean_pivot, ensure_master_csv_schema
 from dialogs import ask_user_parameter
@@ -33,7 +33,7 @@ class NCollectorApp:
         self.master_df = pd.DataFrame()  # Used for master csv file storage (by generation or import)
         self.ignored_warnings = set()
         self.current_config = None
-        self.kinetic_row_lookup = {}  # Maps display strings to filter criteria for kinetic layout
+        self.conc_row_lookup = {}  # Maps display strings to filter criteria for conc layout
 
         # --- GUI Variables ---
         self.folder_path = tk.StringVar(value="No folder selected.")
@@ -71,7 +71,7 @@ class NCollectorApp:
         self.lb_exp_trans = None
         self.combo_category = None
         self.combo_specific = None
-        self.lb_kin_layout = None
+        self.lb_conc_layout = None
         self.btn_run_plot_helper = None
 
         # --- Setup GUI ---
@@ -709,13 +709,13 @@ class NCollectorApp:
         combo_group['values'] = ["None", "Cell Line", "Transfection"]
         combo_group.grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
-        # Kinetic Layout (Only applies if a Kinetic type is chosen)
-        tk.Label(type_frame, text="Kinetic Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
-        self.lb_kin_layout = tk.Listbox(type_frame, selectmode="multiple", height=6, exportselection=False)
-        self.lb_kin_layout.grid(row=0, column=3, rowspan = 2, padx=3, pady=5, sticky="nsew")
-        tk.Button(type_frame, text="Select All Rows", command=lambda: self.lb_kin_layout.select_set(0, tk.END)).grid(
+        # Conc layout (Only applies if a Kinetic or Bargraph type is chosen)
+        tk.Label(type_frame, text="Conc. Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
+        self.lb_conc_layout = tk.Listbox(type_frame, selectmode="multiple", height=6, exportselection=False)
+        self.lb_conc_layout.grid(row=0, column=3, rowspan = 2, padx=3, pady=5, sticky="nsew")
+        tk.Button(type_frame, text="Select All Rows", command=lambda: self.lb_conc_layout.select_set(0, tk.END)).grid(
             row=2, column=3, pady=5, sticky="nsew")
-        tk.Button(type_frame, text="Deselect All Rows", command=lambda: self.lb_kin_layout.selection_clear(0, tk.END)).grid(
+        tk.Button(type_frame, text="Deselect All Rows", command=lambda: self.lb_conc_layout.selection_clear(0, tk.END)).grid(
             row=3, column=3, pady=5, sticky="nsew")
 
         type_frame.columnconfigure(1, weight=1)
@@ -735,7 +735,7 @@ class NCollectorApp:
         """
         Triggered when Data type Category changes.
         Populates specific type dropdown based on category and availability in master_df.
-        Toggles Kinetic Layout listbox visibility.
+        Toggles Conc. Layout listbox visibility.
         """
         if self.master_df is None or self.master_df.empty: return
 
@@ -758,11 +758,11 @@ class NCollectorApp:
         else:
             self.var_specific_type.set("")
 
-        # Toggle Kinetic Layout Listbox
+        # Toggle Conc. Layout Listbox
         if selected_cat == "kinetic":
-            self.lb_kin_layout.config(state="normal")
+            self.lb_conc_layout.config(state="normal")
         else:
-            self.lb_kin_layout.config(state="disabled")
+            self.lb_conc_layout.config(state="disabled")
 
     def refresh_plot_helper_options(self):
         """Populates the list boxes in the plot helper from master df (opt. imported csv file)."""
@@ -799,14 +799,14 @@ class NCollectorApp:
         if sorted_cats:
             self.update_subtype_options()
 
-        # Temporarily enable kinetic layout to populate list box
-        self.lb_kin_layout.config(state="normal")
+        # Temporarily enable conc layout to populate list box
+        self.lb_conc_layout.config(state="normal")
 
         # Clear
         self.lb_ligands.delete(0, tk.END)
         self.lb_exp_cells.delete(0, tk.END)
         self.lb_exp_trans.delete(0, tk.END)
-        self.lb_kin_layout.delete(0, tk.END)
+        self.lb_conc_layout.delete(0, tk.END)
 
         df = self.master_df
 
@@ -825,14 +825,14 @@ class NCollectorApp:
         for t in trans: self.lb_exp_trans.insert(tk.END, t)
         self.lb_exp_trans.select_set(0, tk.END)  # Default to all
 
-        # Populate Kinetic Layout
-        self.kinetic_row_lookup = build_row_info(df)
-        for r in self.kinetic_row_lookup: self.lb_kin_layout.insert(tk.END, r)
-        self.lb_kin_layout.select_set(0, tk.END)  # Default to all
+        # Populate Conc. Layout
+        self.conc_row_lookup = build_row_info(df)
+        for r in self.conc_row_lookup: self.lb_conc_layout.insert(tk.END, r)
+        self.lb_conc_layout.select_set(0, tk.END)  # Default to all
 
-        # Disable kinetic layout if CRC is currently selected
+        # Disable Conc. layout if CRC is currently selected
         if self.var_category.get() != "kinetic":
-            self.lb_kin_layout.config(state="disabled")
+            self.lb_conc_layout.config(state="disabled")
 
     def run_plot_helper(self):
         """Collects GUI selections and calls the core export engine."""
@@ -842,9 +842,9 @@ class NCollectorApp:
         cells = [self.lb_exp_cells.get(i) for i in self.lb_exp_cells.curselection()]
         transfections = [self.lb_exp_trans.get(i) for i in self.lb_exp_trans.curselection()]
         ligands = [self.lb_ligands.get(i) for i in self.lb_ligands.curselection()]
-        rows = [self.lb_kin_layout.get(i) for i in self.lb_kin_layout.curselection()]
+        rows = [self.lb_conc_layout.get(i) for i in self.lb_conc_layout.curselection()]
         # Resolve display strings to structured filter criteria
-        kinetic_filters = [self.kinetic_row_lookup[r] for r in rows if r in self.kinetic_row_lookup]
+        conc_filters = [self.conc_row_lookup[r] for r in rows if r in self.conc_row_lookup]
 
         category = self.var_category.get()
         specific_type = self.var_specific_type.get()
@@ -862,7 +862,7 @@ class NCollectorApp:
             'ligands': ligands,
             'data_types': [internal_name], # As list for engine compatibility with default export
             'group_by': self.var_group_by.get(),
-            'kinetic_mode': kinetic_filters
+            'conc_mode': conc_filters
         }
 
         file_path = filedialog.asksaveasfilename(
@@ -1855,10 +1855,10 @@ class NCollectorApp:
                     "Source Files Count": [len(file_names)],
                     "Source Files List": [", ".join(file_names)],
                     "Data Type": [", ".join(config.get('data_types', []))],
-                    "Kinetic Layout": [", ".join(
+                    "Conc. Selection": [", ".join(
                         f"Row {c['row']}: Vehicle {c['ligand']}" if c.get('is_vehicle')
                         else f"Row {c['row']}: {c['conc']} log(M) {c['ligand']}"
-                        for c in config.get('kinetic_mode', [])
+                        for c in config.get('conc_mode', [])
                     )],
                     "Filter: Ligands": [", ".join(config.get('ligands'))],
                     "Filter: Cells": [", ".join(config.get('cells'))],
@@ -1884,7 +1884,7 @@ class NCollectorApp:
                             drop_labeling_col = True
 
                         if dtype in kinetic_types:
-                            k_layout = config.get('kinetic_mode', [])
+                            k_layout = config.get('conc_select', [])
                             if not k_layout:
                                 continue
 
@@ -1976,10 +1976,10 @@ class NCollectorApp:
         )
         if not file_path: return
 
-        # Built kinetic_mode selection
+        # Built conc_select selection
         df_row_a = self.master_df[self.master_df['Plate_Row'] == 'A']
-        kinetic_lookup = build_row_info(df_row_a)
-        kinetic_filters = list(kinetic_lookup.values())
+        conc_lookup = build_row_info(df_row_a)
+        conc_filters = list(conc_lookup.values())
 
         # Define Standard Config
         default_config = {
@@ -1988,7 +1988,7 @@ class NCollectorApp:
             'ligands': 'All',
             'data_types': ['Kinetic_Mean', 'AUC_Mean'],
             'group_by': 'Transfection',
-            'kinetic_mode': kinetic_filters
+            'conc_select': conc_filters
         }
         self.write_excel_export(file_path, self.master_df, default_config)
 
