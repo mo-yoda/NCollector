@@ -7,10 +7,13 @@ import pandas as pd
 from datetime import datetime, date
 
 from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS,
-                    DATA_TYPE_MAP, build_plate_layout, ENRICHABLE_COLS, LEGACY_COLUMN_DEFAULTS)
+                    DATA_TYPE_MAP, build_plate_layout, ENRICHABLE_COLS, LEGACY_COLUMN_DEFAULTS,
+                    SINGLE_CONC_CATEGORIES, REQUIRES_GROUP_BY)
 from parsing import scan_and_load_folders
 from processing import process_bret_measurement, calculate_relative_time, map_plate_metadata
-from export import apply_export_filters, build_row_info, generate_header_key, create_clean_pivot, ensure_master_csv_schema
+from export import (apply_export_filters, build_row_info, generate_header_key,
+                    create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
+                    ensure_master_csv_schema)
 from dialogs import ask_user_parameter
 
 logger = logging.getLogger("NCollector")
@@ -705,9 +708,9 @@ class NCollectorApp:
         # Groupy by
         tk.Label(type_frame, text="Group By:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
         self.var_group_by = tk.StringVar(value="None")
-        combo_group = ttk.Combobox(type_frame, textvariable=self.var_group_by, state="readonly", width=15)
-        combo_group['values'] = ["None", "Cell Line", "Transfection"]
-        combo_group.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        self.combo_group = ttk.Combobox(type_frame, textvariable=self.var_group_by, state="readonly", width=15)
+        self.combo_group['values'] = ["None", "Cell Line", "Transfection"]
+        self.combo_group.grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
         # Conc layout (Only applies if a Kinetic or Bargraph type is chosen)
         tk.Label(type_frame, text="Conc. Layout:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
@@ -735,11 +738,11 @@ class NCollectorApp:
         """
         Triggered when Data type Category changes.
         Populates specific type dropdown based on category and availability in master_df.
-        Toggles Conc. Layout listbox visibility.
+        Toggles Conc. Layout listbox mode and Group By options based on category.
         """
         if self.master_df is None or self.master_df.empty: return
 
-        selected_cat = self.var_category.get()  # "kinetic" or "CRC"
+        selected_cat = self.var_category.get()  # e.g. "CRC"
         subtype_map = DATA_TYPE_MAP.get(selected_cat, {})
 
         # Filter to find valid specific options in master_df
@@ -758,11 +761,27 @@ class NCollectorApp:
         else:
             self.var_specific_type.set("")
 
-        # Toggle Conc. Layout Listbox
-        if selected_cat == "kinetic":
+        # --- Toggle Conc. Layout Listbox ---
+        if selected_cat in ("kinetic", "bargraph", "heatmap"):
             self.lb_conc_layout.config(state="normal")
+            # Single select for bargraph and heatmap
+            if selected_cat in SINGLE_CONC_CATEGORIES:
+                self.lb_conc_layout.config(selectmode="browse")  # Single selection
+                # Auto-select first if nothing selected
+                if not self.lb_conc_layout.curselection() and self.lb_conc_layout.size() > 0:
+                    self.lb_conc_layout.select_set(0)
+            else:
+                self.lb_conc_layout.config(selectmode="multiple")
         else:
             self.lb_conc_layout.config(state="disabled")
+
+        # --- Toggle Group By options ---
+        if selected_cat in REQUIRES_GROUP_BY:
+            self.combo_group['values'] = ["Cell Line", "Transfection"]
+            if self.var_group_by.get() == "None":
+                self.var_group_by.set("Cell Line")
+        else:
+            self.combo_group['values'] = ["None", "Cell Line", "Transfection"]
 
     def refresh_plot_helper_options(self):
         """Populates the list boxes in the plot helper from master df (opt. imported csv file)."""
@@ -848,8 +867,20 @@ class NCollectorApp:
 
         category = self.var_category.get()
         specific_type = self.var_specific_type.get()
+        group_by = self.var_group_by.get()
 
         if not category or not specific_type: return
+
+        # Validate: heatmap requires group_by
+        if category in REQUIRES_GROUP_BY and group_by == "None":
+            self.log("[ERROR] Heatmap export requires a 'Group By' selection.")
+            return
+
+        # Validate: bargraph/heatmap require exactly one conc selection
+        if category in SINGLE_CONC_CATEGORIES and len(conc_filters) != 1:
+            self.log(f"[ERROR] {category.capitalize()} export requires exactly one concentration selection.")
+            return
+
         internal_name = DATA_TYPE_MAP.get(category, {}).get(specific_type)
 
         if not internal_name:
@@ -857,11 +888,12 @@ class NCollectorApp:
             return
 
         config = {
+            'category': category,
             'cells': cells,
             'transfections': transfections,
             'ligands': ligands,
             'data_types': [internal_name], # As list for engine compatibility with default export
-            'group_by': self.var_group_by.get(),
+            'group_by': group_by,
             'conc_mode': conc_filters
         }
 
@@ -1832,9 +1864,10 @@ class NCollectorApp:
             # Check whether labeling control was applied
             is_labeling = True if "labeling control" in df_subset["Replicate"].values else False
 
-            # Definition which is kinetic and what is CRC
+            # Category from config (set by plot helper), or detect from column membership for default export
+            export_category = config.get('category', None)
             kinetic_types = list(DATA_TYPE_MAP["kinetic"].values())
-            crc = list(DATA_TYPE_MAP["CRC"].values())
+            crc_types = list(DATA_TYPE_MAP["CRC"].values())
 
             with pd.ExcelWriter(file_path) as writer:
                 sheets_written = False
@@ -1875,41 +1908,34 @@ class NCollectorApp:
                     # This handles both Single Selection (Plot Helper) and Default Report (List of 2)
                     selected_types = config.get('data_types', [])
 
-                    # --- KINETIC DATA ---
                     for dtype in selected_types:
-                        # Only keep the labeling control column if raw BRET ratio is exported
+                        # Determine labeling column handling
                         if dtype in ["Raw_BRET_kinetic", "Raw_BRET_CRC"] and is_labeling:
                             drop_labeling_col = False
                         else:
                             drop_labeling_col = True
 
-                        if dtype in kinetic_types:
-                            k_layout = config.get('conc_select', [])
+                        # Determine which category this dtype belongs to
+                        if export_category:
+                            cat = export_category
+                        elif dtype in kinetic_types:
+                            cat = "kinetic"
+                        elif dtype in crc_types:
+                            cat = "CRC"
+                        else:
+                            cat = "unknown"
+
+                        # --- KINETIC ---
+                        if cat == "kinetic":
+                            k_layout = config.get('conc_mode', [])
                             if not k_layout:
                                 continue
 
-                            filtered_rows = []
-                            for criteria in k_layout:
-                                mask = (
-                                    (df_group["Plate_Row"] == criteria['row']) &
-                                    (df_group["Ligand"] == criteria['ligand'])
-                                )
-                                if criteria.get('is_vehicle'):
-                                    mask = mask & (df_group["Is_Vehicle"].astype(bool))
-                                else:
-                                    mask = mask & (df_group["Ligand_Conc"].astype(str) == criteria['conc'])
-
-                                filtered_rows.append(df_group[mask].copy())
-
-                            if filtered_rows:
-                                df_kin = pd.concat(filtered_rows).drop_duplicates()
-                            else:
-                                continue
-
+                            df_kin = filter_by_conc(df_group, k_layout)
                             if df_kin.empty:
                                 continue
 
-                            df_kin = generate_header_key(df_kin, group_by)
+                            df_kin = generate_header_key(df_kin, group_by, include_conc=True)
                             kin_pivot = create_clean_pivot(df_kin, "Time_(min)",
                                                            dtype, "Mean" in dtype,
                                                            drop_labeling_col)
@@ -1917,13 +1943,11 @@ class NCollectorApp:
 
                             # Sheet Name with group_prefix (Max 31 chars)
                             base = f"{group_name}_{dtype}" if group_name else f"{dtype}"
-                            sheet_name = base[:31]
-                            # Save
-                            kin_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
+                            kin_pivot.to_excel(writer, sheet_name=base[:31], index=True)
                             sheets_written = True
 
-                    # --- CRC DATA ---
-                        elif dtype in crc:
+                        # --- CRC ---
+                        elif cat == "CRC":
                             df_crc = df_group.drop_duplicates(
                                 subset=["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]).copy()
                             if df_crc.empty: continue
@@ -1944,15 +1968,61 @@ class NCollectorApp:
                                 vehicle_rows = deduplicated["Is_Vehicle"].astype(bool)
                                 row_map[vehicle_rows] = "Vehicle"
                                 crc_pivot.index = crc_pivot.index.map(row_map)
-                                crc_pivot.rename(columns={"Plate_Row": "Concentration (logM)"}, inplace=True)
+                                crc_pivot.index.name = f"{df_crc['Ligand'].iloc[0]} (logM)"
 
                             else:
                                 crc_pivot.index.name = "Plate Row"
 
                             base = f"{group_name}_AUC" if group_name else f"AUC_{dtype}"
-                            sheet_name = base[:31]
-                            crc_pivot.to_excel(writer, sheet_name=sheet_name, index=True)
+                            crc_pivot.to_excel(writer, sheet_name=base[:31], index=True)
                             sheets_written = True
+
+                        # --- BARGRAPH ---
+                        elif cat == "bargraph":
+                            conc_criteria = config.get('conc_mode', [])
+                            if not conc_criteria:
+                                continue
+
+                            df_bar = filter_by_conc(df_group, conc_criteria)
+                            if df_bar.empty:
+                                continue
+
+                            df_bar = generate_header_key(df_bar, group_by)
+
+                            bar_table = create_bargraph_table(df_bar, dtype, group_by,
+                                                              drop_labeling_control=drop_labeling_col)
+                            if bar_table.empty:
+                                continue
+
+                            base = f"{group_name}_bargraph" if group_name else "Bargraph"
+                            bar_table.to_excel(writer, sheet_name=base[:31], index=False)
+                            sheets_written = True
+
+                        # --- HEATMAP ---
+                        elif cat == "heatmap":
+                            conc_criteria = config.get('conc_mode', [])
+                            if not conc_criteria:
+                                continue
+
+                            # Use df_subset (full dataset), NOT df_group (already split by group_by)
+                            df_hm = filter_by_conc(df_subset, conc_criteria)
+                            if df_hm.empty:
+                                continue
+
+                            hm_table = create_heatmap_table(df_hm, dtype, group_by,
+                                                            drop_labeling_control=drop_labeling_col)
+                            if hm_table.empty:
+                                continue
+
+                            base = "Heatmap"
+                            hm_table.to_excel(writer, sheet_name=base[:31], index=True)
+                            sheets_written = True
+                            break  # Heatmap handles grouping internally, skip other groups
+
+                    # If heatmap was written, break out of data_groups loop too
+                    if export_category == "heatmap" and sheets_written:
+                        break
+
             if not sheets_written:
                 pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name="Empty")
 
@@ -1976,7 +2046,7 @@ class NCollectorApp:
         )
         if not file_path: return
 
-        # Built conc_select selection
+        # Build conc_mode selection for default export (highest concentration: row A)
         df_row_a = self.master_df[self.master_df['Plate_Row'] == 'A']
         conc_lookup = build_row_info(df_row_a)
         conc_filters = list(conc_lookup.values())
@@ -1988,7 +2058,7 @@ class NCollectorApp:
             'ligands': 'All',
             'data_types': ['Kinetic_Mean', 'AUC_Mean'],
             'group_by': 'Transfection',
-            'conc_select': conc_filters
+            'conc_mode': conc_filters
         }
         self.write_excel_export(file_path, self.master_df, default_config)
 

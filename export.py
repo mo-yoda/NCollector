@@ -176,8 +176,11 @@ def build_row_info(df):
     # Return sorted by key
     return dict(sorted(lookup.items()))
 
-def generate_header_key(df, group_by=None):
-    """Creates the 'Header_Key' column for exporting data."""
+def generate_header_key(df, group_by=None, include_conc=False):
+    """
+    Creates the 'Header_Key' column for exporting data.
+    include_conc: If True, appends concentration (or 'Vehicle') to the key (used for kinetic exports).
+    """
     mapping = {"Cell Line": "Cell_Line", "Transfection": "Transfection"}
     exclude_col = mapping.get(group_by)
 
@@ -188,12 +191,8 @@ def generate_header_key(df, group_by=None):
     # Only add ligand, if there is more than one
     if df['Ligand'].nunique() > 1: parts.append(df["Ligand"])
 
-    # Check whether this is AUC data
-    is_kinetic = df["Time_(min)"].nunique() > 1
-    if is_kinetic:
+    if include_conc:
         conc_display = df["Ligand_Conc"].astype(str)
-        # Where Is_Vehicle is False, keep Ligand_Conc, otherwise assign Vehicle
-        # pandas where - replace if cond is false (~ is logical NOT in pd)
         conc_display = conc_display.where(~df['Is_Vehicle'].astype(bool), "Vehicle")
         parts.append(conc_display)
 
@@ -262,4 +261,122 @@ def create_clean_pivot(df_input, index_col, value_col, disregard_well_id, drop_l
     # Flatten Header (Drop the Replicate Number)
     pivot.columns = pivot.columns.droplevel(1)
     pivot.reset_index(drop=True)
+    return pivot
+
+
+def filter_by_conc(df_in, criteria_list):
+    """Filters a DataFrame to rows matching the given concentration criteria."""
+    filtered = []
+    for criteria in criteria_list:
+        mask = (
+                (df_in["Plate_Row"] == criteria['row']) &
+                (df_in["Ligand"] == criteria['ligand'])
+        )
+        if criteria.get('is_vehicle'):
+            mask = mask & (df_in["Is_Vehicle"].astype(bool))
+        else:
+            mask = mask & (df_in["Ligand_Conc"].astype(str) == criteria['conc'])
+        filtered.append(df_in[mask].copy())
+    if filtered:
+        return pd.concat(filtered).drop_duplicates()
+    return pd.DataFrame()
+
+
+def create_bargraph_table(df_input, value_col, group_by=None, drop_labeling_control=True):
+    """
+    Creates a table for Prism-style bar charts.
+    Columns = conditions (from Header_Key), rows = individual data points (replicates/files).
+    Each column lists all replicate values vertically — Prism reads this as grouped bar data.
+
+    Expected input: filtered to a single concentration/row.
+    """
+    if drop_labeling_control:
+        df = df_input[df_input["Replicate"] != "labeling control"].copy()
+    else:
+        df = df_input.copy()
+
+    # Deduplicate: AUC values are repeated per timepoint in the master
+    # For mean data: one value per condition per file (biological replicate)
+    # For replicate data: one value per well per file (technical replicate)
+    is_mean = "Mean" in value_col
+    if is_mean:
+        dedup_cols = ["File_Name", "Transfection", "Cell_Line", "Ligand"]
+    else:
+        dedup_cols = ["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]
+    available = [c for c in dedup_cols if c in df.columns]
+    df = df.drop_duplicates(subset=available).copy()
+
+    if value_col not in df.columns:
+        return pd.DataFrame()
+
+    # For each Header_Key, collect all values into a list
+    groups = {}
+    for key in sorted(df["Header_Key"].unique()):
+        vals = df.loc[df["Header_Key"] == key, value_col].dropna().tolist()
+        groups[key] = vals
+
+    # Pad to same length (Prism expects rectangular tables)
+    max_len = max((len(v) for v in groups.values()), default=0)
+    for key in groups:
+        groups[key] += [float("nan")] * (max_len - len(groups[key]))
+
+    return pd.DataFrame(groups)
+
+
+def create_heatmap_table(df_input, value_col, group_by, drop_labeling_control=True):
+    """
+    Creates a table for Prism-style heatmaps.
+    Columns = group_by factor (e.g. Cell Line values).
+    Rows = merged remaining factors (e.g. "Transfection - Ligand").
+
+    Expected input: filtered to a single concentration/row, mean data.
+    The group_by parameter must be "Cell Line" or "Transfection" (not "None").
+    """
+    if drop_labeling_control:
+        df = df_input[df_input["Replicate"] != "labeling control"].copy()
+    else:
+        df = df_input.copy()
+
+    # Deduplicate: AUC values are repeated per timepoint in the master
+    # For mean data: one value per condition per file
+    # For replicate data: one value per well per file
+    is_mean = "Mean" in value_col
+    if is_mean:
+        dedup_cols = ["File_Name", "Transfection", "Cell_Line", "Ligand"]
+    else:
+        dedup_cols = ["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]
+    available = [c for c in dedup_cols if c in df.columns]
+    df = df.drop_duplicates(subset=available).copy()
+
+    if value_col not in df.columns:
+        return pd.DataFrame()
+
+    # Map group_by display name to column
+    group_col_map = {"Cell Line": "Cell_Line", "Transfection": "Transfection"}
+    group_col = group_col_map.get(group_by)
+    if not group_col or group_col not in df.columns:
+        return pd.DataFrame()
+
+    # Build the row factor from remaining factors
+    row_parts = []
+    if group_col != "Transfection" and "Transfection" in df.columns:
+        row_parts.append("Transfection")
+    if group_col != "Cell_Line" and "Cell_Line" in df.columns:
+        row_parts.append("Cell_Line")
+    if df["Ligand"].nunique() > 1 and "Ligand" in df.columns:
+        row_parts.append("Ligand")
+
+    if row_parts:
+        df["Row_Factor"] = df[row_parts[0]].astype(str)
+        for p in row_parts[1:]:
+            df["Row_Factor"] = df["Row_Factor"] + " - " + df[p].astype(str)
+    else:
+        df["Row_Factor"] = "Data"
+
+    # Aggregate: mean per (Row_Factor, group_col) across files
+    pivot = df.groupby(["Row_Factor", group_col])[value_col].mean().reset_index()
+    pivot = pivot.pivot(index="Row_Factor", columns=group_col, values=value_col)
+    pivot.index.name = None
+    pivot.columns.name = None
+
     return pivot
