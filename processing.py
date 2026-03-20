@@ -30,7 +30,7 @@ def calculate_relative_time(raw_time_col: pd.Series, baseline_end_idx: None):
 
         # Extract the one interval that is different from others (manual ligand addition)
         unique_interval = intervals.drop_duplicates(keep=False)
-        if len(unique_interval) > 1:
+        if len(unique_interval) != 1:
             logger.error(f"Multiple intervals found for baseline readings: {unique_interval}")
             return None
 
