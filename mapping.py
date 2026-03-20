@@ -159,8 +159,8 @@ def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, 
         if len(t_ids) == block_count / 2:
             return t_ids * 2
 
-        # Fallback for uneven lengths
-        return (safe_ids[:block_count // 2] * 2)[:block_count]
+        # Fallback: pad with N/A when IDs don't evenly divide into blocks
+        return safe_ids[:block_count]
 
     def _elem_repeat():
         """Repeat elements (e.g. 1, 1, 2, 2)"""
