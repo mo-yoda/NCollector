@@ -14,7 +14,7 @@ from processing import process_bret_measurement, calculate_relative_time, map_pl
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
                     ensure_master_csv_schema)
-from dialogs import ask_user_parameter
+from dialogs import ask_user_parameter, ask_ligand_choice, ask_ligand_layout
 
 logger = logging.getLogger("NCollector")
 
@@ -1502,7 +1502,9 @@ class NCollectorApp:
             lum_threshold=lum_threshold,
             labeling_correction=is_labeling,
             plate_layout=build_plate_layout(is_labeling),
-            user_input_fn=lambda **kwargs: ask_user_parameter(self.main_gi, **kwargs)
+            user_input_fn=lambda **kwargs: ask_user_parameter(self.main_gi, **kwargs),
+            ligand_choice_fn=lambda l1, l2, info: ask_ligand_choice(self.main_gi, l1, l2, info),
+            ligand_layout_fn=lambda l1, l2, proto: ask_ligand_layout(self.main_gi, l1, l2, proto)
         )
 
         # Reset exclusion state

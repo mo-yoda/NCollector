@@ -1,7 +1,7 @@
 import logging
 import pandas as pd
 
-from models import ProtocolData
+from models import ProtocolData, ProcessingConfig
 
 logger = logging.getLogger("NCollector")
 
@@ -86,7 +86,8 @@ def built_conc_dic(df_conc: pd.DataFrame):
 
     return conc_dic
 
-def get_ligand_map(protocol: ProtocolData, block_count: int = 4):
+def get_ligand_map(protocol: ProtocolData, block_count: int = 4,
+                   config: ProcessingConfig | None = None, plate_info: str = ""):
     """
     Determines which columns contain Ligand 1 and which contain Ligand 2.
     Returns dic of col idx and ligands.
@@ -96,11 +97,26 @@ def get_ligand_map(protocol: ProtocolData, block_count: int = 4):
     if not protocol.ligand_2:
         return generate_col_mapping("one", 'L1', 'L2', block_count)
 
+    # Unselected ligand_layout will be float('nan'); unfound ligand layout (old prtl) returns None
+    # Normalize NaN to None
+    if protocol.ligand_layout is not None and str(protocol.ligand_layout).lower() == "nan":
+        protocol.ligand_layout = None
+
     # If a specific Ligand Layout is provided (v1.03+)
     if protocol.ligand_layout:
         l_layout = str(protocol.ligand_layout).lower()
         if "one ligand" in l_layout:
-            pass  # TODO: create pop up to ask which ligand was used for each plate
+            chosen = None
+            if config and config.ligand_choice_fn:
+                chosen = config.ligand_choice_fn(
+                    protocol.ligand or "Ligand 1",
+                    protocol.ligand_2 or "Ligand 2",
+                    plate_info)
+            if chosen == "L2":
+                return generate_col_mapping("one", 'L2', 'L1', block_count)
+            if chosen is None and config and config.ligand_choice_fn:
+                logger.warning(f"Ligand selection skipped for '{plate_info}'. Defaulting to Ligand 1 ({protocol.ligand}).")
+            return generate_col_mapping("one", 'L1', 'L2', block_count)
         return generate_col_mapping(l_layout, 'L1', 'L2', block_count)
 
     # Fallback for older protocols (Inferred from Cell Layout)
@@ -109,8 +125,24 @@ def get_ligand_map(protocol: ProtocolData, block_count: int = 4):
     if "one line" in c_layout:
         logger.error(f"Protocol '{protocol.file_name}' lists 2 ligands but uses 'One Line' "
               f"cell layout without specifying ligand layout.")
-        # TODO: create pop up to ask which ligand was used for each plate
-        return generate_col_mapping("one", 'L1', 'L2', block_count)
+
+        # Ask user to choose a ligand layout, stored on protocol so subsequent plates reuse it
+        layout_choice = None
+        if config and config.ligand_layout_fn:
+            layout_choice = config.ligand_layout_fn(
+                protocol.ligand or "Ligand 1",
+                protocol.ligand_2 or "Ligand 2",
+                protocol.file_name)
+        if layout_choice is None:
+            logger.warning(f"Ligand layout selection skipped for protocol '{protocol.file_name}'. "
+                           f"Defaulting to all Ligand 1 ({protocol.ligand}).")
+            protocol.ligand_layout = "one ligand"
+        else:
+            logger.info(f"User selected ligand layout '{layout_choice}' for protocol '{protocol.file_name}'.")
+            protocol.ligand_layout = layout_choice
+
+        # Once protocol.ligand_layout is set, re-enter the function
+        return get_ligand_map(protocol, block_count, config, plate_info)
 
     elif "half" in c_layout:
         # If Cells are Half, Ligands are Alternating
