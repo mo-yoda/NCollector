@@ -243,6 +243,11 @@ def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: Process
     # Get cell line map
     cl_map = get_cell_line_map(protocol, result.cell_line, len(plate_blocks))
 
+    # Ligand identity and conc map (before transfection map, as it may set protocol.ligand_layout)
+    ligand_col_map = get_ligand_map(protocol, len(plate_blocks), config=config, plate_info=result.file_name)
+    conc_map_1 = built_conc_dic(protocol.ligand_conc)
+    conc_map_2 = built_conc_dic(protocol.ligand_2_conc) if protocol.ligand_2 else {}
+
     # Get transfection map via mapping ID3 info
     raw_ids = [x.strip() for x in str(result.transfection_id).split(',')] if result.transfection_id else []
     mapped_t_ids = get_transfection_map(
@@ -252,11 +257,6 @@ def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: Process
         block_count=len(plate_blocks)
     )
     logger.debug(f"Mapped Block Sequence: {mapped_t_ids}")
-
-    # Ligand identity and conc map
-    ligand_col_map = get_ligand_map(protocol, len(plate_blocks))
-    conc_map_1 = built_conc_dic(protocol.ligand_conc)
-    conc_map_2 = built_conc_dic(protocol.ligand_2_conc) if protocol.ligand_2 else {}
 
     # Apply metadata on cols
     for i, block_cols in enumerate(plate_blocks):

@@ -196,6 +196,11 @@ class ProcessingConfig:
     baseline_end_index: int | None = None
     # Default to triplicates
     plate_layout: list[range] = field(default_factory=lambda: TRIPLICATE_LAYOUT)
-    # Optional callback for requesting user input (set by GUI layer).
+
+    # Optional callback for requesting user input (set by GUI layer)
     # Signature: fn(title: str, message: str, input_type: str, default) -> value | None
     user_input_fn: object = field(default=None, repr=False)
+    # Signature: fn(ligand_1_name: str, ligand_2_name: str, plate_info: str) -> "L1" | "L2" | None
+    ligand_choice_fn: object = field(default=None, repr=False)
+    # Signature: fn(ligand_1_name: str, ligand_2_name: str, protocol_name: str) -> "half" | "alternating" | "one ligand" | None
+    ligand_layout_fn: object = field(default=None, repr=False)
