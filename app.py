@@ -11,6 +11,7 @@ from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COL
                     SINGLE_CONC_CATEGORIES, REQUIRES_GROUP_BY)
 from parsing import scan_and_load_folders
 from processing import process_bret_measurement, calculate_relative_time, map_plate_metadata
+from mapping import infer_ligand_info_from_master
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
                     ensure_master_csv_schema)
@@ -1056,6 +1057,8 @@ class NCollectorApp:
             plate_layout=build_plate_layout(is_labeling),
             labeling_correction=is_labeling,
             baseline_end_index=baseline_end_idx,
+            ligand_choice_fn=self._ask_ligand_choice_logged,
+            ligand_layout_fn=self._ask_ligand_layout_logged
         )
 
         # Get folder paths containing xlsx/xlsm files
@@ -1094,6 +1097,42 @@ class NCollectorApp:
         total_files = sum(len(f.results) for f in loaded_folders)
         self.log(f"[ENRICH] Loaded {total_files} measurement files from "
                  f"{len(loaded_folders)} folders. Extracting raw data...")
+
+        # For cases master was created with user-input specified ligand layout:
+        # --- 2b. Infer ligand layout and per-plate ligand choices from old master ---
+        all_ligand_choices = {}  # file_name -> "L1" or "L2"
+
+        for folder in loaded_folders:
+            protocol = folder.protocol
+            if not protocol or not protocol.ligand_2:
+                continue
+
+            layout, choices = infer_ligand_info_from_master(
+                df_old, protocol, len(enrich_config.plate_layout))
+
+            if layout:
+                protocol.ligand_layout = layout
+                self.log(f"   [ENRICH] Inferred ligand layout '{layout}' for "
+                         f"protocol '{protocol.file_name}' from existing master")
+
+            if choices:
+                all_ligand_choices.update(choices)
+                for fname, choice in choices.items():
+                    lig_name = (str(protocol.ligand_2) if choice == "L2"
+                                else str(protocol.ligand))
+                    self.log(f"   [ENRICH] Inferred ligand '{lig_name}' for plate '{fname}' "
+                             f"from existing master")
+
+        # Build a ligand_choice_fn that looks up from inferred data,
+        # falling back to the dialog for files not found in the old master
+        def _enrich_ligand_choice(l1_name, l2_name, plate_info):
+            if plate_info in all_ligand_choices:
+                return all_ligand_choices[plate_info]
+            self.log(f"   [ENRICH] Plate '{plate_info}' not found in master — asking user")
+            return self._ask_ligand_choice_logged(l1_name, l2_name, plate_info)
+
+        enrich_config.ligand_choice_fn = _enrich_ligand_choice
+        # ligand_layout_fn remains as dialog fallback for protocols not in old master
 
         # --- 3. Map metadata and extract raw data per file ---
         new_file_data = []

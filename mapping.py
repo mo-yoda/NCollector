@@ -244,3 +244,117 @@ def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, 
         # Fallback
     logger.warning(f"Unhandled layout combination: {cell_layout} + {ligand_layout}")
     return _unique()
+
+
+# --- Ligand Info Inference from Master CSV --- #
+
+def infer_ligand_info_from_master(df_master: pd.DataFrame, protocol: ProtocolData, block_count: int = 4):
+    """
+    Infers ligand layout and per-plate ligand choices from an existing master CSV.
+    Used during enrichment to avoid re-prompting the user for information that was
+    already decided when the master was originally created.
+
+    Returns:
+        inferred_layout: "half", "alternating", or "one ligand" (or None if not inferrable)
+        file_ligand_choices: dict mapping file_name -> "L1" or "L2" (for one-ligand-per-plate cases)
+    """
+    if not protocol.ligand_2:
+        return None, {}
+
+    required_cols = {'File_Name', 'Well_ID', 'Ligand'}
+    if not required_cols.issubset(df_master.columns):
+        logger.warning("Master CSV missing columns needed for ligand inference. "
+                       f"Required: {required_cols}")
+        return None, {}
+
+    # Only consider rows that have ligand info
+    df = df_master[df_master['Ligand'].notna() & (df_master['Ligand'] != "")].copy()
+    if df.empty:
+        return None, {}
+
+    # Extract column index from Well_ID
+    df = df.copy()
+    df['_col_idx'] = df['Well_ID'].str[1:].astype(int)
+
+    file_ligand_choices = {}
+    inferred_layout = None
+
+    for fname in df['File_Name'].unique():
+        file_rows = df[df['File_Name'] == fname]
+
+        # Build col_idx -> ligand_name mapping (use first occurrence per column)
+        col_ligand = {}
+        for _, row in file_rows.drop_duplicates(subset=['_col_idx']).iterrows():
+            col_ligand[row['_col_idx']] = row['Ligand']
+
+        if not col_ligand:
+            continue
+
+        unique_ligands = set(col_ligand.values())
+
+        if len(unique_ligands) == 1:
+            # Single ligand on this plate — record which one
+            lig_name = unique_ligands.pop() # pop returns arbitrary element of py set
+            if lig_name == str(protocol.ligand_2):
+                file_ligand_choices[fname] = "L2"
+            else:
+                file_ligand_choices[fname] = "L1"
+
+            if inferred_layout is None:
+                inferred_layout = "one ligand"
+
+        elif len(unique_ligands) == 2 and inferred_layout is None:
+            # Two ligands — determine the spatial layout
+            try:
+                inferred_layout = _detect_two_ligand_layout(col_ligand, protocol, block_count)
+            except ValueError as e:
+                logger.error(str(e))
+                # If layout cannot be inferred, fallback to dialog prompt
+
+    return inferred_layout, file_ligand_choices
+
+
+def _detect_two_ligand_layout(col_ligand: dict, protocol: ProtocolData, block_count: int) -> str:
+    """
+    Detects whether columns follow a 'half' or 'alternating' ligand layout
+    based on observed col->ligand assignments.
+    Returns:
+        "half" or "alternating" (or empty str if pattern is unclear).
+    """
+    # Map ligand names to L1/L2 labels
+    col_labels = {}
+    for col_idx, lig_name in col_ligand.items():
+        if lig_name == str(protocol.ligand_2):
+            col_labels[col_idx] = "L2"
+        else:
+            col_labels[col_idx] = "L1"
+
+    # Check "half" pattern: cols 1-6 = L1, cols 7-12 = L2
+    left_labels = {col_labels.get(c) for c in range(1, 7) if c in col_labels}
+    right_labels = {col_labels.get(c) for c in range(7, 13) if c in col_labels}
+
+    if left_labels == {"L1"} and right_labels == {"L2"}:
+        return "half"
+
+    # Check "alternating" pattern: blocks alternate between L1 and L2
+    block_size = 12 // block_count
+    block_labels = []
+    for i in range(block_count):
+        start = (i * block_size) + 1
+        end = start + block_size
+        labels_in_block = {col_labels.get(c) for c in range(start, end) if c in col_labels}
+        if len(labels_in_block) == 1:
+            block_labels.append(labels_in_block.pop())
+        else:
+            # Mixed block — doesn't fit either pattern cleanly
+            raise ValueError(
+                f"Cannot infer ligand layout from master: mixed ligands within block {i + 1} "
+                f"(cols {start}-{end - 1}). Column assignments: {col_labels}")
+
+    # Alternating
+    if all(block_labels[i] != block_labels[i + 1] for i in range(len(block_labels) - 1)):
+        return "alternating"
+
+    raise ValueError(
+        f"Cannot infer ligand layout from master: block pattern {block_labels} "
+        f"does not match 'half' or 'alternating'. Column assignments: {col_labels}")
