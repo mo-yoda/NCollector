@@ -1480,6 +1480,22 @@ class NCollectorApp:
             logger.warning("No valid data found")
             return self.master_index
 
+    def _ask_ligand_choice_logged(self, ligand_1_name, ligand_2_name, plate_info):
+        """Wrapper around ask_ligand_choice that logs the user's selection."""
+        choice = ask_ligand_choice(self.main_gi, ligand_1_name, ligand_2_name, plate_info)
+        if choice is not None:
+            chosen_name = ligand_2_name if choice == "L2" else ligand_1_name
+            self.log(f"   [LIGAND] Plate '{plate_info}': manually assigned to '{chosen_name}'")
+        return choice
+
+    def _ask_ligand_layout_logged(self, ligand_1_name, ligand_2_name, protocol_name):
+        """Wrapper around ask_ligand_layout that logs the user's selection."""
+        layout = ask_ligand_layout(self.main_gi, ligand_1_name, ligand_2_name, protocol_name)
+        if layout is not None:
+            self.log(f"   [LIGAND LAYOUT] User selected '{layout}' for '{ligand_1_name}' / "
+                     f"'{ligand_2_name}' — applied to all plates of protocol '{protocol_name}'")
+        return layout
+
     def collect_files(self):
         """
         1. LOAD FILES
@@ -1502,9 +1518,10 @@ class NCollectorApp:
             lum_threshold=lum_threshold,
             labeling_correction=is_labeling,
             plate_layout=build_plate_layout(is_labeling),
+            # Method for optionally needed dialogs are stored
             user_input_fn=lambda **kwargs: ask_user_parameter(self.main_gi, **kwargs),
-            ligand_choice_fn=lambda l1, l2, info: ask_ligand_choice(self.main_gi, l1, l2, info),
-            ligand_layout_fn=lambda l1, l2, proto: ask_ligand_layout(self.main_gi, l1, l2, proto)
+            ligand_choice_fn=self._ask_ligand_choice_logged,
+            ligand_layout_fn=self._ask_ligand_layout_logged
         )
 
         # Reset exclusion state
