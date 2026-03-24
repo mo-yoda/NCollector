@@ -1225,7 +1225,7 @@ class NCollectorApp:
         df_old_work = df_old.copy()
 
         # Normalize Date to consistent YYYY-MM-DD format
-        df_old_work['Date'] = pd.to_datetime(df_old_work['Date'], format='%d-%m-%y').dt.strftime('%Y-%m-%d')
+        df_old_work['Date'] = pd.to_datetime(df_old_work['Date']).dt.strftime('%Y-%m-%d')
         df_new['Date'] = pd.to_datetime(df_new['Date']).dt.strftime('%Y-%m-%d')
 
         # Normalize Time_(min) to float for both sides
