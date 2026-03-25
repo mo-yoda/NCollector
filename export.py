@@ -1,4 +1,5 @@
 import logging
+import re
 import pandas as pd
 from models import LEGACY_COLUMN_DEFAULTS
 
@@ -50,6 +51,70 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         bl_lp_means = last_3.groupby(['File_Name', 'Well_ID'])['Bl_Corrected_BRET'].mean().reset_index()
         bl_lp_means.rename(columns={'Bl_Corrected_BRET': 'Bl_LP'}, inplace=True)
         df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
+
+    # --- Fix legacy Lum check bug: low lum exclusions were listed as applied but not set to NA ---
+    if 'Applied_Exclusions' in df.columns and df['Applied_Exclusions'].astype(str).str.contains(
+            "AUTO: \\[LOW LUM\\]", regex=True).any():
+
+        # Parse all unique LOW LUM entries from any cell (identical across rows)
+        sample_text = df['Applied_Exclusions'].astype(str).iloc[0]
+        lum_pattern = re.compile(
+            r"AUTO:\s*\[LOW LUM\]\s+"
+            r"(.+?)\s*\|\s*"  # ligand
+            r"(.+?)\s*\|\s*"  # cell_line
+            r"(.+?)\s*\|\s*"  # condition (= Transfection)
+            r"(.+?)\s*\|\s*"  # date (dd.mm.yy)
+            r"Replicate\s+(\d+)\s*-\s*value:\s*[\d.]+"  # replicate number
+        )
+        parsed_entries = lum_pattern.findall(sample_text)
+
+        if parsed_entries:
+            # Columns that should have been set to NA for excluded wells
+            data_cols_to_null = [
+                "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET",
+                "Veh_Norm_Kinetic", "Kinetic_Mean", "Raw_BRET_CRC",
+                "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
+                "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean",
+            ]
+            available_data_cols = [c for c in data_cols_to_null if c in df.columns]
+
+            # Normalize the Date column for comparison (the warning uses dd.mm.yy)
+            df_date_normalized = pd.to_datetime(df['Date'], errors='coerce').dt.strftime(
+                '%d.%m.%y') if 'Date' in df.columns else pd.Series()
+
+            total_fixed = 0
+
+            # For each parsed LOW LUM entry, find matching rows and null their data
+            for ligand, cell_line, condition, date_str, replicate_num in parsed_entries:
+                ligand, cell_line, condition, date_str = ligand.strip(), cell_line.strip(), condition.strip(), date_str.strip()
+
+                # Build mask: match on Ligand, Cell_Line, Transfection, Date, Replicate
+                mask = pd.Series(True, index=df.index)
+                if 'Ligand' in df.columns:
+                    mask &= df['Ligand'].astype(str).str.strip() == ligand
+                if 'Cell_Line' in df.columns:
+                    mask &= df['Cell_Line'].astype(str).str.strip() == cell_line
+                if 'Transfection' in df.columns:
+                    mask &= df['Transfection'].astype(str).str.strip() == condition
+                if 'Date' in df.columns and not df_date_normalized.empty:
+                    mask &= df_date_normalized == date_str
+                if 'Replicate' in df.columns:
+                    mask &= df['Replicate'].astype(str).str.strip() == replicate_num
+
+                # Only fix rows where data is NOT already NA
+                if mask.any() and available_data_cols:
+                    already_na = df.loc[mask, available_data_cols[0]].isna()
+                    needs_fix = mask & ~already_na.reindex(df.index, fill_value=True)
+
+                    if needs_fix.any():
+                        df.loc[needs_fix, available_data_cols] = float('nan')
+                        if 'Is_Excluded' in df.columns:
+                            df.loc[needs_fix, 'Is_Excluded'] = True
+                        total_fixed += needs_fix.sum()
+
+            if total_fixed > 0:
+                _bug_fix(
+                    f"Fixed legacy Lum check bug: set {total_fixed} rows to NaN for {len(parsed_entries)} LOW LUM exclusion(s).")
 
     # --- Reconstruct Is_Vehicle for older CSVs ---
     if 'Is_Vehicle' in missing_cols:
