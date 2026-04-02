@@ -3,7 +3,7 @@ from datetime import date
 from dataclasses import dataclass, field
 
 # --- Application Constants --- #
-APP_VERSION = "N Collector v2.0"
+APP_VERSION = "N Collector v2.0.2"
 
 # Plate column layouts
 TRIPLICATE_LAYOUT = [range(1, 4), # Block 1: Cols 1-3
