@@ -5,6 +5,99 @@ from models import LEGACY_COLUMN_DEFAULTS
 
 logger = logging.getLogger("NCollector")
 
+# Columns that should be set to NA when retroactively applying exclusions
+_EXCLUSION_DATA_COLS = [
+    "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET",
+    "Veh_Norm_Kinetic", "Kinetic_Mean", "Raw_BRET_CRC",
+    "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
+    "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean",
+]
+
+
+def _fix_legacy_exclusion_bug(df: pd.DataFrame, tag: str, regex_suffix: str,
+                              match_col: str, label: str) -> str | None:
+    """
+    Shared fixer for legacy exclusion bugs where warnings were recorded in
+    Applied_Exclusions but the corresponding data was never set to NA.
+
+    Args:
+        df:            Master DataFrame (modified in-place).
+        tag:           Warning tag in brackets, e.g. "LOW LUM" or "VEHICLE WARN".
+        regex_suffix:  Regex capturing the identifier after the date field
+                       (e.g. replicate number or well ID) and the trailing value.
+        match_col:     DataFrame column to match the 5th capture group against
+                       (e.g. "Replicate" or "Well_ID").
+        label:         Human-readable label for the log message (e.g. "Lum check").
+
+    Returns:
+        A bug-fix log message string if rows were corrected, or None if nothing to fix.
+    """
+    if 'Applied_Exclusions' not in df.columns:
+        return None
+
+    escaped_tag = re.escape(tag)
+    if not df['Applied_Exclusions'].astype(str).str.contains(
+            f"AUTO: \\[{escaped_tag}\\]", regex=True).any():
+        return None
+
+    # Build regex: 4 common groups (ligand, cell_line, condition, date) + type-specific suffix
+    pattern = re.compile(
+        rf"AUTO:\s*\[{escaped_tag}\]\s+"
+        r"(.+?)\s*\|\s*"  # group 1: ligand
+        r"(.+?)\s*\|\s*"  # group 2: cell_line
+        r"(.+?)\s*\|\s*"  # group 3: condition (= Transfection)
+        r"(.+?)\s*\|\s*"  # group 4: date (dd.mm.yy)
+        + regex_suffix     # group 5: type-specific identifier
+    )
+
+    sample_text = df['Applied_Exclusions'].astype(str).iloc[0]
+    parsed_entries = pattern.findall(sample_text)
+    if not parsed_entries:
+        return None
+
+    available_data_cols = [c for c in _EXCLUSION_DATA_COLS if c in df.columns]
+    if not available_data_cols:
+        return None
+
+    # Normalize dates once for comparison (warnings use dd.mm.yy format)
+    df_date_normalized = (
+        pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+        if 'Date' in df.columns else pd.Series()
+    )
+
+    total_fixed = 0
+
+    for ligand, cell_line, condition, date_str, identifier in parsed_entries:
+        ligand, cell_line, condition, date_str, identifier = (
+            ligand.strip(), cell_line.strip(), condition.strip(), date_str.strip(), identifier.strip())
+
+        # Build mask: 4 common columns + the type-specific column
+        mask = pd.Series(True, index=df.index)
+        for col, val in [('Ligand', ligand), ('Cell_Line', cell_line),
+                         ('Transfection', condition)]:
+            if col in df.columns:
+                mask &= df[col].astype(str).str.strip() == val
+        if 'Date' in df.columns and not df_date_normalized.empty:
+            mask &= df_date_normalized == date_str
+        if match_col in df.columns:
+            mask &= df[match_col].astype(str).str.strip() == identifier
+
+        # Only fix rows where data is NOT already NA
+        if mask.any():
+            already_na = df.loc[mask, available_data_cols[0]].isna()
+            needs_fix = mask & ~already_na.reindex(df.index, fill_value=True)
+
+            if needs_fix.any():
+                df.loc[needs_fix, available_data_cols] = float('nan')
+                if 'Is_Excluded' in df.columns:
+                    df.loc[needs_fix, 'Is_Excluded'] = True
+                total_fixed += needs_fix.sum()
+
+    if total_fixed > 0:
+        return (f"Fixed legacy {label} bug: set {total_fixed} rows to NaN "
+                f"for {len(parsed_entries)} {tag} exclusion(s).")
+    return None
+
 
 def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFrame, bool, bool]:
     """
@@ -52,69 +145,27 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         bl_lp_means.rename(columns={'Bl_Corrected_BRET': 'Bl_LP'}, inplace=True)
         df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
 
-    # --- Fix legacy Lum check bug: low lum exclusions were listed as applied but not set to NA ---
-    if 'Applied_Exclusions' in df.columns and df['Applied_Exclusions'].astype(str).str.contains(
-            "AUTO: \\[LOW LUM\\]", regex=True).any():
+    # --- Fix legacy exclusion bugs: exclusions were listed as applied but data was not set to NA ---
+    _exclusion_fix_configs = [
+        {
+            "tag": "LOW LUM",
+            "regex_suffix": r"Replicate\s+(\d+)\s*-\s*value:\s*[\d.]+",
+            "match_col": "Replicate",
+            "label": "Lum check",
+        },
+        {
+            "tag": "VEHICLE WARN",
+            "regex_suffix": r"([A-H]\d{1,2})\s*-\s*value:\s*[\d.]+",
+            "match_col": "Well_ID",
+            "label": "Vehicle warning",
+        },
+    ]
 
-        # Parse all unique LOW LUM entries from any cell (identical across rows)
-        sample_text = df['Applied_Exclusions'].astype(str).iloc[0]
-        lum_pattern = re.compile(
-            r"AUTO:\s*\[LOW LUM\]\s+"
-            r"(.+?)\s*\|\s*"  # ligand
-            r"(.+?)\s*\|\s*"  # cell_line
-            r"(.+?)\s*\|\s*"  # condition (= Transfection)
-            r"(.+?)\s*\|\s*"  # date (dd.mm.yy)
-            r"Replicate\s+(\d+)\s*-\s*value:\s*[\d.]+"  # replicate number
-        )
-        parsed_entries = lum_pattern.findall(sample_text)
-
-        if parsed_entries:
-            # Columns that should have been set to NA for excluded wells
-            data_cols_to_null = [
-                "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET",
-                "Veh_Norm_Kinetic", "Kinetic_Mean", "Raw_BRET_CRC",
-                "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
-                "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean",
-            ]
-            available_data_cols = [c for c in data_cols_to_null if c in df.columns]
-
-            # Normalize the Date column for comparison (the warning uses dd.mm.yy)
-            df_date_normalized = pd.to_datetime(df['Date'], errors='coerce').dt.strftime(
-                '%d.%m.%y') if 'Date' in df.columns else pd.Series()
-
-            total_fixed = 0
-
-            # For each parsed LOW LUM entry, find matching rows and null their data
-            for ligand, cell_line, condition, date_str, replicate_num in parsed_entries:
-                ligand, cell_line, condition, date_str = ligand.strip(), cell_line.strip(), condition.strip(), date_str.strip()
-
-                # Build mask: match on Ligand, Cell_Line, Transfection, Date, Replicate
-                mask = pd.Series(True, index=df.index)
-                if 'Ligand' in df.columns:
-                    mask &= df['Ligand'].astype(str).str.strip() == ligand
-                if 'Cell_Line' in df.columns:
-                    mask &= df['Cell_Line'].astype(str).str.strip() == cell_line
-                if 'Transfection' in df.columns:
-                    mask &= df['Transfection'].astype(str).str.strip() == condition
-                if 'Date' in df.columns and not df_date_normalized.empty:
-                    mask &= df_date_normalized == date_str
-                if 'Replicate' in df.columns:
-                    mask &= df['Replicate'].astype(str).str.strip() == replicate_num
-
-                # Only fix rows where data is NOT already NA
-                if mask.any() and available_data_cols:
-                    already_na = df.loc[mask, available_data_cols[0]].isna()
-                    needs_fix = mask & ~already_na.reindex(df.index, fill_value=True)
-
-                    if needs_fix.any():
-                        df.loc[needs_fix, available_data_cols] = float('nan')
-                        if 'Is_Excluded' in df.columns:
-                            df.loc[needs_fix, 'Is_Excluded'] = True
-                        total_fixed += needs_fix.sum()
-
-            if total_fixed > 0:
-                _bug_fix(
-                    f"Fixed legacy Lum check bug: set {total_fixed} rows to NaN for {len(parsed_entries)} LOW LUM exclusion(s).")
+    for fix_cfg in _exclusion_fix_configs:
+        fixed = _fix_legacy_exclusion_bug(df, fix_cfg["tag"], fix_cfg["regex_suffix"],
+                                          fix_cfg["match_col"], fix_cfg["label"])
+        if fixed:
+            _bug_fix(fixed)
 
     # --- Reconstruct Is_Vehicle for older CSVs ---
     if 'Is_Vehicle' in missing_cols:
