@@ -1478,7 +1478,7 @@ class NCollectorApp:
                 # Iterate through the mapped cols (1-12)
                 for col_idx, meta in result.column_metadata.items():
                     # Filter out empty cols
-                    if not meta.condition_name or "Empty" in meta.condition_name: continue
+                    if meta.condition_name is None or "Empty" in meta.condition_name: continue
                     # Check if this column is completely excluded
                     all_wells_excluded = True
                     for r in rows_str:
@@ -1665,6 +1665,7 @@ class NCollectorApp:
         Compiles all processing steps into one Master DataFrame.
         Structure: 1 row per well per timepoint.
         Means are repeated for respective technical replicates as AUCs for all timepoints.
+        Empty wells (unknwon cell line or empty condition) are dropped.
         """
         if not self.experiment:
             return None
@@ -1862,6 +1863,14 @@ class NCollectorApp:
                 merged_df['Replicate'] = merged_df['Well_ID'].map(meta_lookups['Replicate'])
                 merged_df['Is_Vehicle'] = (
                     (merged_df['Plate_Row'] == 'H') & (merged_df['Ligand_Conc'].isna())
+                )
+
+                # Drop empty wells (Empty transfections / Unknown cell lines)
+                merged_df.drop(
+                    merged_df[
+                        merged_df['Transfection'].astype(str).str.contains("Empty", na=False) |
+                        merged_df['Cell_Line'].astype(str).str.startswith("Unknown", na=False)
+                    ].index, inplace=True
                 )
 
         if not all_files_data:

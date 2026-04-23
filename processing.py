@@ -277,6 +277,9 @@ def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: Process
             current_rep_id = str(rep_idx + 1)
             c_line = cl_map.get(col, "Unknown")
 
+            # Columns with unknown cell lines are treated as empty wells
+            col_cond_name = "Empty" if str(c_line).startswith("Unknown") else current_cond_name
+
             which_lig = ligand_col_map.get(col, 'L1')
             if which_lig == 'L2' and protocol.ligand_2:
                 current_ligand_name = str(protocol.ligand_2)
@@ -292,7 +295,7 @@ def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: Process
             result.column_metadata[col] = PlateColMetadata(
                 cell_line=c_line,
                 transfection_id=t_id,
-                condition_name=current_cond_name,
+                condition_name=col_cond_name,
                 plasmids=current_plasmids,
                 ligand_identity=current_ligand_name,
                 ligand_conc=current_conc_map,
@@ -322,7 +325,7 @@ def check_luminescence(lum_df: pd.DataFrame,
 
     for key, val in low_lum_cond.items():
         try:
-            # "Cond_Name|Cell|Ligand"
+            # "Cond_Name|Cell|Ligand|Replicate"
             parts = key.split("|")
             if len(parts) < 4: continue
             cond_name, cell_line, lig_name, repl_num = parts[0], parts[1], parts[2], parts[3]
