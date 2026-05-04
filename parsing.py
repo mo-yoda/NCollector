@@ -290,8 +290,8 @@ def extract_metadata(pr_export_df):
             else:
                 standardised_lines.append(cl)  # Keep original if no rule matches
 
-        # Re-join unique parts (e.g. "Control, dQ"); set() removed duplicates
-        metadata['cell_line'] = ", ".join(list(set(standardised_lines)))
+        # Re-join unique parts (e.g. "Control, dQ"); dict.fromkeys removed duplicates and keeps order
+        metadata['cell_line'] = ", ".join(dict.fromkeys(standardised_lines))
 
     # Transform date str to actual date
     if 'measurement_date' in metadata:

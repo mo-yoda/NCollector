@@ -269,8 +269,8 @@ def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: Process
             current_cond_name = " + ".join(sorted(current_plasmids))
         elif t_id == "N/A":
             current_cond_name = "Empty"
-        else:
-            current_cond_name = f"ID {t_id} (Missing)"
+        else: # Also if t_id does not match protocol
+            current_cond_name = "Empty"
 
         # Assign to all columns in this block
         for rep_idx, col in enumerate(block_cols):
