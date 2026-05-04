@@ -170,9 +170,13 @@ def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, 
     if not t_ids:
         return ["N/A"] * block_count
 
+    # Normalize missing ligand_layout to 'one ligand' (equivalent behavior)
+    ligand_layout = str(ligand_layout_type).lower() if ligand_layout_type else "one ligand"
+    cell_layout = str(cell_layout_type).lower()
+
     # Transfection ids are padded with N/A to be safe with indexing
     safe_ids = t_ids + ["N/A"] * block_count
-    cell_layout = str(cell_layout_type).lower()
+    pair_count = block_count // 2  # expected t_ids length for paired patterns
 
     def _unique():
         """1 per block (e.g. 1, 2, 3, 4)"""
@@ -183,65 +187,47 @@ def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, 
         return [safe_ids[0]] * block_count
 
     def _seq_repeat():
-        """Repeat sequence (e.g. 1, 2, 1, 2)"""
-        if len(t_ids) == 1:
-            return _single()
-        if len(t_ids) >= block_count:
-            return _unique()
-        if len(t_ids) == block_count / 2:
-            return t_ids * 2
-
-        # Fallback: pad with N/A when IDs don't evenly divide into blocks
-        return safe_ids[:block_count]
+        """Sequence repeat (e.g. 1,2,1,2). Caller guarantees len(t_ids) == pair_count."""
+        return t_ids * 2
 
     def _elem_repeat():
-        """Repeat elements (e.g. 1, 1, 2, 2)"""
-        if len(t_ids) == 1:
-            return _single()
-        if len(t_ids) >= block_count:
-            return _unique()
-        if len(t_ids) == block_count / 2:
-            res = []
-            for x in t_ids:
-                res.extend([x, x])
-            return res
+        """Element repeat (e.g. 1,1,2,2). Caller guarantees len(t_ids) == pair_count."""
+        return [x for x in t_ids for _ in range(2)]
 
-        # Fallback for uneven lengths
-        res = []
-        for x in safe_ids[:(block_count + 1) // 2]:
-            res.extend([x, x])
-        return res[:block_count]
+    # Safety guards:  _single is correct only when exactly 1 transfection ID is provided, paired patterns
+    # (_seq_repeat and _elem_repeat) are only valid when exactly pair_count IDs are provided
+    # -> otherwise fall back to _unique
+    def _single_safe():
+        if len(t_ids) == 1: return _single()
+        return _unique()
 
-    if not ligand_layout_type:
-        if "one line" in cell_layout:
-            return _unique()
-        elif "half" in cell_layout:
-            return _seq_repeat()
-        elif "alternating" in cell_layout:
-            return _elem_repeat()
-        return _unique()  # Default fallback
+    def _seq_safe():
+        if len(t_ids) == pair_count: return _seq_repeat()
+        if len(t_ids) == 1:          return _single()
+        return _unique()
 
-    ligand_layout = str(ligand_layout_type).lower()
+    def _elem_safe():
+        if len(t_ids) == pair_count: return _elem_repeat()
+        if len(t_ids) == 1:          return _single()
+        return _unique()
+
+    # Decision matrix
     if "one line" in cell_layout:
         if "one ligand" in ligand_layout:    return _unique()
-        if "half" in ligand_layout:          return _seq_repeat()
-        if "alternating" in ligand_layout:   return _elem_repeat()
+        if "half" in ligand_layout:          return _seq_safe()
+        if "alternating" in ligand_layout:   return _elem_safe()
 
     elif "half" in cell_layout:
-        if "one ligand" in ligand_layout:    return _seq_repeat()
-        if "half" in ligand_layout:
-            # "1,2,1,2 or 1,2,3,4" -> depends on t_id count vs block_count
-            return _unique() if len(t_ids) >= block_count else _seq_repeat()
-        if "alternating" in ligand_layout:   return _single()
+        if "one ligand" in ligand_layout:    return _seq_safe()
+        if "half" in ligand_layout:          return _seq_safe()
+        if "alternating" in ligand_layout:   return _single_safe()
 
     elif "alternating" in cell_layout:
-        if "one ligand" in ligand_layout:    return _elem_repeat()
-        if "half" in ligand_layout:          return _single()
-        if "alternating" in ligand_layout:
-            # "1,1,2,2 or 1,2,3,4" -> depends on t_id count vs block_count
-            return _unique() if len(t_ids) >= block_count else _elem_repeat()
+        if "one ligand" in ligand_layout:    return _elem_safe()
+        if "half" in ligand_layout:          return _single_safe()
+        if "alternating" in ligand_layout:   return _elem_safe()
 
-        # Fallback
+    # Fallback
     logger.warning(f"Unhandled layout combination: {cell_layout} + {ligand_layout}")
     return _unique()
 
