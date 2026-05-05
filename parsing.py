@@ -225,13 +225,13 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
 
         main_dna, transfection_conditions = process_transfection_scheme(df_transfection)
 
-    ligand_1 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1)
+    ligand_1 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1).strip()
     ligand_1_conc = slice_table(protocol_sheet, "final concentration in well (log(M))")
 
     # Check whether second ligand was selected
     check_ligand_2 = extract_value(protocol_sheet, "Ligand dilution", col_offset=0, row_offset=1, match_index=1)
     if check_ligand_2 is not None and str(check_ligand_2).strip().lower() not in ["nan", ""]:
-        ligand_2 = check_ligand_2
+        ligand_2 = check_ligand_2.strip()
         ligand_2_conc = slice_table(protocol_sheet, "final concentration in well (log(M))", match_index=1)
         ligand_layout = extract_value(protocol_sheet,"Ligand layout", col_offset= 0, row_offset= 1)
     else:
