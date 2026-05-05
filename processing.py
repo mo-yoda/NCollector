@@ -182,7 +182,7 @@ def format_warning_str(warn_type: str,
     if warn_type == "Lum":
         value_display = round(float(value), 1)
         prefix = "[LOW LUM]"
-        suffix = f"| Replicate {replicate} - value: {value_display}"
+        suffix = f"| {well_id} - value: {value_display}"
     elif warn_type == "Veh":
         value_display = round(float(value), 3)
         prefix = "[VEHICLE WARN]"
@@ -304,47 +304,47 @@ def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: Process
 
 
 def check_luminescence(lum_df: pd.DataFrame,
-                       plate_blocks: list[range],
                        column_metadata: dict,
                        lum_threshold: int,
                        date_str: str) -> list[dict]:
     """
-    Checks mean luminescence of last 5 timepoints per replicate against threshold.
-    Returns list of warning dicts for conditions below threshold.
+    Checks mean luminescence of last 5 timepoints per well against threshold.
+    Returns list of warning dicts for wells below threshold.
     """
     warnings = []
     lum_calc_df = lum_df.drop(columns=["Time (min)"], errors='ignore').apply(pd.to_numeric, errors='coerce')
-    lum_mean_df = calculate_means_on_meta(lum_calc_df, plate_blocks, column_metadata, grouping_mode="column")
 
-    if lum_mean_df.empty:
+    if lum_calc_df.empty:
         return warnings
 
-    lum_end = lum_mean_df.iloc[-5:] if len(lum_mean_df) >= 5 else lum_mean_df
+    # Per-well mean over the last 5 timepoints (or all available if fewer)
+    lum_end = lum_calc_df.iloc[-5:] if len(lum_calc_df) >= 5 else lum_calc_df
     mean_lum_end = lum_end.mean()
-    low_lum_cond = mean_lum_end[mean_lum_end < lum_threshold]
+    low_lum_wells = mean_lum_end[mean_lum_end < lum_threshold]
 
-    for key, val in low_lum_cond.items():
+    for well_id, val in low_lum_wells.items():
         try:
-            # "Cond_Name|Cell|Ligand|Replicate"
-            parts = key.split("|")
-            if len(parts) < 4: continue
-            cond_name, cell_line, lig_name, repl_num = parts[0], parts[1], parts[2], parts[3]
-            if cond_name == "Empty": continue
+            row = well_id[0]
+            col_idx = int(well_id[1:])
+            meta = column_metadata.get(col_idx)
+            if meta is None or meta.condition_name == "Empty":
+                continue
 
             warning_dict = create_warning_record(
                 warn_type="Lum",
                 exp_date=date_str,
-                cond_name=cond_name,
-                cell_line=cell_line,
-                ligand=lig_name,
+                cond_name=meta.condition_name,
+                cell_line=meta.cell_line,
+                ligand=meta.ligand_identity,
                 value=float(val),
-                replicate=str(repl_num),
-                row = "All"
+                replicate=str(meta.replicate),
+                row=row,
+                well_id=well_id
             )
             if warning_dict not in warnings:
                 warnings.append(warning_dict)
         except Exception as e:
-            logger.warning(f"Error parsing lum key {key}: {e}")
+            logger.warning(f"Error processing lum well {well_id}: {e}")
 
     return warnings
 
@@ -525,7 +525,7 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
         for well in result.excluded_wells:
             if well in lum_check_df.columns: lum_check_df[well] = float('nan')
         result.low_lum_warnings = check_luminescence(
-            lum_check_df, plate_blocks, result.column_metadata, config.lum_threshold, date_str
+            lum_check_df, result.column_metadata, config.lum_threshold, date_str
         )
     else:
         logger.debug(f"Lum check skipped: donor wavelength is {result.donor_wavelength}, not 475.")
