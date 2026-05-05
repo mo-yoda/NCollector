@@ -150,7 +150,7 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         {
             "tag": "LOW LUM",
             "regex_suffix": r"Replicate\s+(\d+)\s*-\s*value:\s*[\d.]+",
-            "match_col": "Replicate",
+            "match_col": "Replicate", # Note: <v2.0.4 lum check was per replicate instead of per well
             "label": "Lum check",
         },
         {
