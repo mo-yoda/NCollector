@@ -197,13 +197,17 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
         return None
 
     exp_date = None
-    date_str = extract_value(protocol_sheet, "date of measurement")
-    # Transform date str in real
-    if date_str is not None:
-        try:
-            exp_date = datetime.strptime(date_str.strip(), '%d.%m.%y').date()
-        except ValueError:
-            logger.warning(f"Protocol date '{date_str}' not in DD.MM.YY format.")
+    date_raw = extract_value(protocol_sheet, "date of measurement")
+    if date_raw is not None and not (isinstance(date_raw, float) and pd.isna(date_raw)):
+        if isinstance(date_raw, datetime):
+            exp_date = date_raw.date()
+        elif hasattr(date_raw, "year"):  # already a date object
+            exp_date = date_raw
+        else:
+            try:
+                exp_date = datetime.strptime(str(date_raw).strip(), '%d.%m.%y').date()
+            except ValueError:
+                logger.warning(f"Protocol date '{date_raw}' not in DD.MM.YY format.")
 
     exp_n = extract_value(protocol_sheet, "n =")
 
