@@ -204,3 +204,42 @@ class ProcessingConfig:
     ligand_choice_fn: object = field(default=None, repr=False)
     # Signature: fn(ligand_1_name: str, ligand_2_name: str, protocol_name: str) -> "half" | "alternating" | "one ligand" | None
     ligand_layout_fn: object = field(default=None, repr=False)
+
+
+@dataclass
+class BretMetricsBundle:
+    """
+    Return bundle for processing.compute_bret_metrics.
+
+    Holds every processed DataFrame that step 11 of process_bret_measurement assigns
+    onto a PrResult, plus the cleaned raw BRET ratio. All of these are pure functions
+    of the per-well raw BRET ratio and the set of excluded wells, so the same bundle
+    can be produced either from a live PrResult (object pipeline) or reconstructed
+    purely from a flat master DataFrame (master-native recompute) — no original xlsx
+    files required.
+
+    Note: raw_bret_ratio_cleaned here has NO "Time (min)" column (it is the wide
+    per-well matrix the math operates on). process_bret_measurement keeps assigning its
+    own time-bearing raw_bret_ratio_cleaned onto the PrResult for backwards compatibility.
+    """
+    # Cleaned raw BRET ratio (excluded wells NaN'd, columns = Well_IDs, no time column)
+    raw_bret_ratio_cleaned: pd.DataFrame
+
+    # --- Kinetic traces (one row per timepoint, one column per well) ---
+    labeling_corr_kinetic: pd.DataFrame
+    bl_corr_kinetic: pd.DataFrame
+    kinetic_df: pd.DataFrame
+    kinetic_mean_df: pd.DataFrame
+
+    # --- Last-3-timepoint reductions (CRC: one value per well / per replicate-mean) ---
+    raw_bret_points_df: pd.DataFrame
+    labeling_corr_lp_df: pd.DataFrame
+    bl_corr_lp_df: pd.DataFrame
+    lp_df: pd.DataFrame
+    lp_mean_df: pd.DataFrame
+
+    # --- AUC (one value per well / per replicate-mean) ---
+    labeling_corr_auc_df: pd.DataFrame
+    bl_corr_auc_df: pd.DataFrame
+    auc_df: pd.DataFrame
+    auc_mean_df: pd.DataFrame
