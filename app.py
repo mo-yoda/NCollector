@@ -10,7 +10,9 @@ from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COL
                     DATA_TYPE_MAP, build_plate_layout, ENRICHABLE_COLS, LEGACY_COLUMN_DEFAULTS,
                     SINGLE_CONC_CATEGORIES, REQUIRES_GROUP_BY)
 from parsing import scan_and_load_folders
-from processing import process_bret_measurement, calculate_relative_time, map_plate_metadata
+from processing import (process_bret_measurement, calculate_relative_time, map_plate_metadata,
+                        recompute_master_after_exclusion, reconstruct_file_inputs,
+                        check_luminescence, check_vehicle_wells, coerce_bool)
 from mapping import infer_ligand_info_from_master
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
@@ -18,6 +20,41 @@ from export import (apply_export_filters, build_row_info, generate_header_key,
 from dialogs import ask_user_parameter, ask_ligand_choice, ask_ligand_layout
 
 logger = logging.getLogger("NCollector")
+
+# --- Lightweight tooltip helper --- #
+
+class _Tooltip:
+    """Minimal hover tooltip for a Tk widget (used to explain disabled buttons)."""
+    def __init__(self, widget):
+        self.widget = widget
+        self.tip = None
+        self.text = ""
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def set_text(self, text):
+        self.text = text or ""
+
+    def _show(self, _e=None):
+        if self.tip or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 20
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+            self.tip = tk.Toplevel(self.widget)
+            self.tip.wm_overrideredirect(True)
+            self.tip.wm_geometry(f"+{x}+{y}")
+            tk.Label(self.tip, text=self.text, background="#ffffe0",
+                     relief="solid", borderwidth=1, font=("Arial", 9),
+                     justify="left").pack(ipadx=3, ipady=2)
+        except tk.TclError:
+            self.tip = None
+
+    def _hide(self, _e=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
 
 # --- Main Application --- #
 
@@ -43,6 +80,7 @@ class NCollectorApp:
         self.folder_path = tk.StringVar(value="No folder selected.")
         self.var_labeling_is_checked = tk.BooleanVar(value=False)
         self.var_lum_threshold = tk.IntVar(value=100)
+        self.var_vehicle_threshold = tk.DoubleVar(value=0.2)
 
         # --- GUI Widgets (Initialised to None) ---
         self.log_window = None
@@ -57,6 +95,8 @@ class NCollectorApp:
         self.lbl_rules_summary = None
         self.btn_export_master = None
         self.btn_export_excel = None
+        self.btn_rerun_lum = None
+        self.btn_rerun_vehicle = None
         # Tab 2
         self.tab_select = None
         self.cb_lig = None
@@ -139,23 +179,35 @@ class NCollectorApp:
         # Loading specs
         load_settings_frame = tk.LabelFrame(load_frame, text="Loading Specs")
         load_settings_frame.grid(row=0, column=1, sticky="ew")
+        load_settings_frame.columnconfigure(2, weight=1)  # let buttons stretch
 
-        # Labeling correction checkbox
-        chk_container = tk.Frame(load_settings_frame)
-        chk_container.pack(anchor="ne")
-        # Container needed as text is only supported right of chbx
-
-        lbl_correction = tk.Label(chk_container, text="Labeling correction")
-        lbl_correction.pack(side="left", padx=(0, 5))
-        labeling_chk = tk.Checkbutton(chk_container,
+        # Row 0 — Labeling correction (no button on this row)
+        tk.Label(load_settings_frame, text="Labeling correction").grid(
+            row=0, column=0, sticky="w", padx=(8, 5), pady=(6, 4))
+        labeling_chk = tk.Checkbutton(load_settings_frame,
                                       variable=self.var_labeling_is_checked,
                                       command=self.on_checkbox_toggle)
-        labeling_chk.pack(side="right")
+        labeling_chk.grid(row=0, column=1, sticky="w", pady=(6, 4))
 
-        # Threshold Input
-        lum_thresh_entry = tk.Entry(load_settings_frame, textvariable=self.var_lum_threshold, width=10)
-        lum_thresh_entry.pack(side="right", padx=(10, 5), pady=(0,8))
-        tk.Label(load_settings_frame, text="Lum. Threshold:").pack(side="right", padx=(10, 5))
+        # Row 1 — Luminescence threshold + its re-run button (same line)
+        tk.Label(load_settings_frame, text="Lum. Threshold:").grid(
+            row=1, column=0, sticky="w", padx=(8, 5), pady=4)
+        lum_thresh_entry = tk.Entry(load_settings_frame,
+                                    textvariable=self.var_lum_threshold, width=10)
+        lum_thresh_entry.grid(row=1, column=1, sticky="w", pady=4)
+        self.btn_rerun_lum = tk.Button(load_settings_frame, text="Re-run Lum Check",
+                                       state="disabled", command=self.rerun_lum_check)
+        self.btn_rerun_lum.grid(row=1, column=2, sticky="ew", padx=(10, 8), pady=4)
+
+        # Row 2 — Vehicle warning threshold + its re-run button (same line).
+        tk.Label(load_settings_frame, text="Veh. Threshold:").grid(
+            row=2, column=0, sticky="w", padx=(8, 5), pady=(4, 6))
+        veh_thresh_entry = tk.Entry(load_settings_frame,
+                                    textvariable=self.var_vehicle_threshold, width=10)
+        veh_thresh_entry.grid(row=2, column=1, sticky="w", pady=(4, 6))
+        self.btn_rerun_vehicle = tk.Button(load_settings_frame, text="Re-run Vehicle Check",
+                                           state="disabled", command=self.rerun_vehicle_check)
+        self.btn_rerun_vehicle.grid(row=2, column=2, sticky="ew", padx=(10, 8), pady=(4, 6))
 
         # Collected Ns frame
         loaded_data_frame = tk.LabelFrame(self.tab_import, text="Loaded Data")
@@ -544,96 +596,329 @@ class NCollectorApp:
         self.pending_exclusions = []
         self.lb_exclusions.delete(0, tk.END)
 
+    # Columns that together identify which master rows an exclusion target refers
+    # to. File_Name + Well_ID alone could collide if two loaded files happen to
+    # share a name (e.g. same filename in two folders), so the match is widened to
+    # the well's biological identity. Both _resolve_rule_to_targets (which builds
+    # the target tuples) and apply_exclusions (which builds the match mask) read
+    # this list, so the two keys are guaranteed to line up by construction.
+    _EXCLUSION_KEY_COLS = ('File_Name', 'Well_ID', 'Ligand', 'Transfection',
+                           'Cell_Line', 'Main_Plasmids')
+
+    def _exclusion_key_cols(self, df):
+        """The exclusion-key columns actually present in df, in fixed order.
+        File_Name + Well_ID are always present; the identity columns are added
+        when available (they are part of MASTER_COLUMNS, so normally all six)."""
+        return [c for c in self._EXCLUSION_KEY_COLS if c in df.columns]
+
+    def _resolve_rule_to_targets(self, rule, norm_dates):
+        """
+        Resolves one pending exclusion rule to a set of identity tuples directly on
+        master_df (the single source of truth). Same rule semantics as before,
+        including the "whole date" branch — which now resolves to every matching
+        well on that date rather than flagging PrResult.is_excluded.
+
+        Each returned tuple is keyed on self._EXCLUSION_KEY_COLS — i.e. not just
+        (File_Name, Well_ID) but also Ligand / Transfection / Cell_Line /
+        Main_Plasmids — so that a duplicate file name cannot cause the wrong rows
+        to be flagged. apply_exclusions builds its match mask from the same column
+        list, keeping the two sides consistent.
+
+        norm_dates is master_df['Date'] pre-normalised to the '%d.%m.%y' dropdown form.
+        """
+        df = self.master_df
+        mask = pd.Series(True, index=df.index)
+
+        # "All ligands" also covers the single-locked-ligand case (cb_lig disabled).
+        ligand_is_all = (rule.get('Ligand', 'All') in ("All", "")
+                         or str(self.cb_lig['state']) == 'disabled')
+        if not ligand_is_all:
+            mask &= (df['Ligand'].astype(str) == str(rule['Ligand']))
+        if rule.get('Date', 'All') != "All":
+            mask &= (norm_dates == rule['Date'])
+        if rule.get('Cell_Line', 'All') != "All":
+            mask &= (df['Cell_Line'].astype(str) == str(rule['Cell_Line']))
+        if rule.get('Condition', 'All') != "All":
+            # Index vocabulary "Condition" maps to master_df "Transfection".
+            mask &= (df['Transfection'].astype(str) == str(rule['Condition']))
+        rep = rule.get('Replicate', 'All')
+        if rep not in ("All", ""):
+            mask &= (df['Replicate'].astype(str) == str(rep))
+        row = rule.get('Row', 'All')
+        if row not in ("All", ""):
+            mask &= (df['Plate_Row'].astype(str) == str(row))
+
+        sub = df.loc[mask]
+        if sub.empty:
+            self.log(f"   [WARNING] Rule {rule} matched 0 records.")
+            return set()
+        key_cols = self._exclusion_key_cols(df)
+        return set(zip(*[sub[c].astype(str) for c in key_cols]))
+
+    def _build_recompute_config(self):
+        """
+        Returns a ProcessingConfig for the master-native recompute engine. In fresh
+        mode this is the load-time config (carries the persisted baseline index). In
+        CSV/import mode it is derived from master_df (the engine derives per-file
+        baseline/labeling itself; config only supplies fallbacks + thresholds).
+        """
+        if self.current_config is not None and self.experiment:
+            return self.current_config
+
+        df = self.master_df
+        is_labeling = False
+        if df is not None and not df.empty and 'Replicate' in df.columns:
+            is_labeling = (df['Replicate'].astype(str) == "labeling control").any()
+
+        baseline_idx = None
+        if df is not None and not df.empty and {'File_Name', 'Well_ID', 'Time_(min)'}.issubset(df.columns):
+            sample_file = df['File_Name'].iloc[0]
+            sample_well = df['Well_ID'].iloc[0]
+            m = (df['File_Name'] == sample_file) & (df['Well_ID'] == sample_well)
+            times = pd.to_numeric(df.loc[m, 'Time_(min)'], errors='coerce').sort_values().tolist()
+            if 0.0 in times:
+                baseline_idx = times.index(0.0)
+
+        lum_thr, veh_thr = self._get_thresholds()
+        return ProcessingConfig(
+            labeling_correction=is_labeling,
+            plate_layout=build_plate_layout(is_labeling),
+            baseline_end_index=baseline_idx,
+            lum_threshold=lum_thr,
+            vehicle_warning_threshold=veh_thr,
+        )
+
     def apply_exclusions(self):
         """
-        Iterates through pending rules, finds matching rows in Master DF,
-        and updates the 'excluded_wells' list in the Ref_Result objects.
+        Unified exclusion entry point for BOTH fresh-load and CSV/import modes.
+
+        master_df is the single source of truth for exclusion state. Pending rules are
+        resolved to (File_Name, Well_ID) targets, those rows are flagged
+        Is_Excluded=True (add-only), and the affected files are recomputed via
+        recompute_master_after_exclusion — the one and only re-application path. The
+        object pipeline (process_bret_measurement) is NOT re-run here (it runs only at
+        initial load). The lum + vehicle checks are then auto-re-run on the recomputed
+        data and filtered against previously-ignored warnings, preserving the
+        "exclude -> new warnings may appear" loop in both modes.
         """
         if not self.pending_exclusions:
             self.log("No exclusion rules defined.")
             return
+        if self.master_df is None or self.master_df.empty:
+            self.log("No data loaded to apply exclusions to.")
+            return
 
         self.log(f"\n--- Applying {len(self.pending_exclusions)} Exclusion Rules ---")
-        # --- Save applied rules as text for displaying
+
+        # --- Save applied rules as text for display ---
         pending_lines = self.lb_exclusions.get(0, tk.END)
         new_text_block = "\n".join(pending_lines)
-
         if self.rule_history_text:
             self.rule_history_text += "\n" + new_text_block
         else:
             self.rule_history_text = new_text_block
-        self.lbl_rules_summary.config(text=self.rule_history_text) # Update GUI
+        self.lbl_rules_summary.config(text=self.rule_history_text)  # Update GUI
 
-        # --- Applying the rules
-        count_wells = 0
-        count_files = 0
-
+        # --- Resolve every pending rule to (File_Name, Well_ID) targets on master_df ---
+        norm_dates = pd.to_datetime(self.master_df['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+        targets = set()
         for rule in self.pending_exclusions:
-            # Check whether all ligands or the only one possible is selected
-            ligand_is_all = (rule['Ligand'] == "All" or str(self.cb_lig['state']) == 'disabled')
+            targets |= self._resolve_rule_to_targets(rule, norm_dates)
 
-            # If entire date is excluded
-            if (rule['Date'] != "All" and
-                    ligand_is_all and
-                    rule['Cell_Line'] == "All" and
-                    rule['Condition'] == "All" and
-                    rule['Replicate'] == "All" and
-                    rule['Row'] == "All"):
+        if not targets:
+            self.log("   [WARNING] Pending rules matched 0 records.")
+            self.clear_exclusion_list()
+            return
 
-                # Find matching files and exclude them entirely
-                for folder in self.experiment:
-                    # Date formatting match
-                    if folder.measurement_date.strftime('%d.%m.%y') == rule['Date']:
-                        for res in folder.results:
-                            if not res.is_excluded:
-                                res.is_excluded = True
-                                count_files += 1
-                continue
+        # --- Flag Is_Excluded=True on the resolved rows (add-only / monotonic) ---
+        # The match key is the full exclusion-identity tuple (File_Name + Well_ID +
+        # Ligand/Transfection/Cell_Line/Main_Plasmids), built from the exact same
+        # column list _resolve_rule_to_targets used, so a shared file name cannot
+        # cause the wrong rows to be flagged.
+        key_cols = self._exclusion_key_cols(self.master_df)
+        key_index = pd.MultiIndex.from_arrays(
+            [self.master_df[c].astype(str) for c in key_cols])
+        target_mask = pd.Series(key_index.isin(list(targets)), index=self.master_df.index)
 
-            # Start with full dataframe
-            df = self.master_index.copy()
+        self.master_df.loc[target_mask, 'Is_Excluded'] = True
+        affected_files = sorted(self.master_df.loc[target_mask, 'File_Name'].astype(str).unique().tolist())
+        self.log(f"   [DONE] Flagged {len(targets)} well(s) across "
+                 f"{len(affected_files)} file(s) as excluded.")
 
-            # Apply high level filters
-            if rule.get('Ligand', 'All') != "All":
-                df = df[df['Ligand'] == rule['Ligand']]
-            if rule['Date'] != "All":
-                df = df[df['Date'] == rule['Date']]
-            if rule['Cell_Line'] != "All":
-                df = df[df['Cell_Line'] == rule['Cell_Line']]
-            if rule['Condition'] != "All":
-                df = df[df['Condition'] == rule['Condition']]
-            if rule['Replicate'] != "All":
-                target_rep = str(rule['Replicate'])
-                df = df[df['Replicate'] == target_rep]
+        # --- Append the full applied-exclusion provenance to all rows ---
+        self.master_df['Applied_Exclusions'] = self.rule_history_text.replace("\n", " | ")
 
-            if df.empty:
-                self.log(f"   [WARNING] Rule {rule} matched 0 records.")
-                continue
+        # --- Recompute affected files on the flat master (single engine path) ---
+        config = self._build_recompute_config()
+        self.master_df = recompute_master_after_exclusion(self.master_df, affected_files, config)
 
-            # Handle specific Replicates and Rows
-            for index, row_data in df.iterrows():
-                result_obj = row_data['Ref_Result']
-                col_idx = int(row_data['Column_Index'])
+        # --- Rebuild the exclusion index + summary from the updated master ---
+        self.built_master_index(source="master")
 
-                target_rows = "ABCDEFGH"
-                if rule['Row'] != "All": target_rows = rule['Row']
-
-                for r in target_rows:
-                    well_id = f"{r}{col_idx}"
-                    if well_id not in result_obj.excluded_wells:
-                        result_obj.excluded_wells.append(well_id)
-                        count_wells += 1
-                        logger.debug(f"Excluded {well_id} in {result_obj.file_name}")
-
-        if count_files > 0: self.log(f"   [DONE] Excluded {count_files} entire files.")
-        if count_wells > 0: self.log(f"   [DONE] Excluded {count_wells} specific wells.")
-
-        # Clear list after applying
+        # Clear pending list now that the rules are applied
         self.clear_exclusion_list()
 
-        # Rerun processing to update graphs/stats
-        self.run_processing_pipeline()
-        self.refresh_filter_options()
+        # --- AUTO-RERUN quality checks on the recomputed data ---
+        # Detect fresh warnings, then filter against previously-ignored ones (the auto
+        # path respects self.ignored_warnings; the manual buttons deliberately do not).
+        lum_thr, veh_thr = self._get_thresholds()
+        all_files = self.master_df['File_Name'].astype(str).unique().tolist()
+        detected = self._collect_quality_warnings(
+            all_files, run_lum=True, run_vehicle=True,
+            lum_threshold=lum_thr, vehicle_threshold=veh_thr, log_lum_skips=True)
+
+        new_warnings = [w for w in detected if w['Display'] not in self.ignored_warnings]
+        if new_warnings:
+            self.show_warning_review(new_warnings)
+        elif detected:
+            self.log(f"[INFO] {len(detected)} warnings detected but previously ignored.")
+
+        # --- Refresh the plot helper + re-evaluate quality-button availability ---
+        self.refresh_plot_helper_options()
+        self._update_quality_buttons_state()
+
+        self.log("--- Exclusions applied & data recomputed ---")
+
+    # --- Quality-check helpers (shared by auto-rerun and manual buttons) --- #
+
+    def _get_thresholds(self):
+        """Reads the lum + vehicle thresholds from the Tab-1 entries (single source)."""
+        try:
+            lum = self.var_lum_threshold.get()
+        except tk.TclError:
+            lum = 100
+        try:
+            veh = self.var_vehicle_threshold.get()
+        except tk.TclError:
+            veh = 0.2
+        return lum, veh
+
+    def _collect_quality_warnings(self, files, run_lum, run_vehicle,
+                                  lum_threshold, vehicle_threshold, log_lum_skips=False):
+        """
+        Re-runs the requested checks across `files` by reconstructing each file's
+        inputs from master_df (shared reconstruction helper) and calling
+        check_luminescence / check_vehicle_wells VERBATIM. Returns the full detected
+        warning list (no ignored-filtering — callers decide whether to filter).
+
+        Lum check: skips files lacking donor data (graceful, with a log line). Donor
+        counts are reconstructed raw and the file's currently-excluded wells are NaN'd
+        in a copy before the check (mirrors process_bret_measurement step 3).
+        Vehicle check: always runs (needs only Veh_Norm); it self-skips excluded wells.
+        """
+        warnings = []
+        missing_donor = []
+
+        for fname in files:
+            inputs = reconstruct_file_inputs(self.master_df, fname)
+            if inputs is None:
+                continue
+
+            if run_vehicle and inputs['veh_norm_wide'] is not None:
+                warnings.extend(check_vehicle_wells(
+                    inputs['veh_norm_wide'], inputs['plate_blocks'],
+                    inputs['column_metadata'], inputs['excluded_wells'],
+                    vehicle_threshold, inputs['date_str']))
+
+            if run_lum:
+                if not inputs['has_donor']:
+                    missing_donor.append(fname)
+                    continue
+                donor = inputs['donor_wide'].copy()
+                for w in inputs['excluded_wells']:
+                    if w in donor.columns:
+                        donor[w] = float('nan')
+                warnings.extend(check_luminescence(
+                    donor, inputs['column_metadata'], lum_threshold, inputs['date_str']))
+
+        if run_lum and log_lum_skips and missing_donor:
+            self.log(f"   [LUM] Skipped {len(missing_donor)} file(s) lacking donor data: "
+                     f"{', '.join(missing_donor)}")
+        return warnings
+
+    def rerun_lum_check(self):
+        """
+        On-demand luminescence re-run (Tab 1). Reads the lum threshold from Tab 1,
+        checks every file with donor data (skipping & logging those without), and
+        shows ALL detected warnings — deliberately bypassing self.ignored_warnings
+        so previously-dismissed warnings resurface. Excluded wells are still
+        suppressed (NaN'd before the check). Reuses show_warning_review unchanged.
+        """
+        if self.master_df is None or self.master_df.empty:
+            self.log("[LUM] No data loaded.")
+            return
+        lum_thr, _ = self._get_thresholds()
+        self.log(f"\n--- Re-running Luminescence Check (threshold={lum_thr}) ---")
+        files = self.master_df['File_Name'].astype(str).unique().tolist()
+        detected = self._collect_quality_warnings(
+            files, run_lum=True, run_vehicle=False,
+            lum_threshold=lum_thr, vehicle_threshold=0.0, log_lum_skips=True)
+        if detected:
+            self.show_warning_review(detected)
+        else:
+            self.log("[LUM] No low-luminescence warnings detected.")
+
+    def rerun_vehicle_check(self):
+        """
+        On-demand vehicle re-run (Tab 1). Reads the vehicle threshold from Tab 1 and
+        shows ALL detected vehicle warnings — bypassing self.ignored_warnings (same
+        deliberate divergence from the auto-rerun). Reuses show_warning_review.
+        """
+        if self.master_df is None or self.master_df.empty:
+            self.log("[VEHICLE] No data loaded.")
+            return
+        _, veh_thr = self._get_thresholds()
+        self.log(f"\n--- Re-running Vehicle Check (threshold={veh_thr}) ---")
+        files = self.master_df['File_Name'].astype(str).unique().tolist()
+        detected = self._collect_quality_warnings(
+            files, run_lum=False, run_vehicle=True,
+            lum_threshold=0, vehicle_threshold=veh_thr)
+        if detected:
+            self.show_warning_review(detected)
+        else:
+            self.log("[VEHICLE] No vehicle warnings detected.")
+
+    def _set_tooltip(self, widget, text):
+        """Attach (or update) a hover tooltip on a widget."""
+        if widget is None:
+            return
+        tip = getattr(widget, "_tooltip_obj", None)
+        if tip is None:
+            tip = _Tooltip(widget)
+            widget._tooltip_obj = tip
+        tip.set_text(text)
+
+    def _update_quality_buttons_state(self):
+        """
+        Re-evaluates the enabled/disabled state of the two re-run buttons. Called
+        whenever the data source changes (load, import, enrich, exclusion). The
+        vehicle button is enabled whenever data is present (Veh_Norm always exists);
+        the lum button is enabled only if the master carries any donor data.
+        """
+        has_data = self.master_df is not None and not self.master_df.empty
+
+        if self.btn_rerun_vehicle is not None:
+            self.btn_rerun_vehicle.config(state="normal" if has_data else "disabled")
+            self._set_tooltip(self.btn_rerun_vehicle,
+                              "Re-run the vehicle-deviation check using the Tab-1 threshold."
+                              if has_data else "Load or import data to enable.")
+
+        has_donor = (has_data and 'Donor_Raw_kinetic' in self.master_df.columns
+                     and self.master_df['Donor_Raw_kinetic'].notna().any())
+        if self.btn_rerun_lum is not None:
+            if has_donor:
+                self.btn_rerun_lum.config(state="normal")
+                self._set_tooltip(self.btn_rerun_lum,
+                                  "Re-run the low-luminescence check on donor counts.")
+            else:
+                self.btn_rerun_lum.config(state="disabled")
+                if has_data:
+                    msg = ("Donor (luminescence) data is missing from this dataset "
+                           "— the lum check cannot run.")
+                    logger.info("Lum re-run disabled: no Donor_Raw_kinetic data in master.")
+                else:
+                    msg = "Load or import data to enable."
+                self._set_tooltip(self.btn_rerun_lum, msg)
 
     def setup_plot_helper_tab(self):
         """Builds the GUI for tab 3 plot helper"""
@@ -928,6 +1213,11 @@ class NCollectorApp:
             # Backward compatibility: fill missing columns and clean legacy data
             df, was_modified, was_fixed = ensure_master_csv_schema(df, log_fn=self.log)
 
+            # Normalize Is_Excluded to real booleans (CSV may carry "True"/"False"
+            # strings, 1/0, etc.) so the unified engine path can trust it directly.
+            if 'Is_Excluded' in df.columns:
+                df['Is_Excluded'] = df['Is_Excluded'].map(coerce_bool)
+
             # Store in the unified variable
             self.master_df = df
 
@@ -938,6 +1228,11 @@ class NCollectorApp:
             # Update GUI
             self.lbl_data_source.config(text=f"CSV: {os.path.basename(file_path)}")
             self.refresh_plot_helper_options()
+
+            # Build the dropdown/summary index directly from master_df (CSV mode)
+            # and re-evaluate the on-demand quality-check buttons for this source.
+            self.built_master_index(source="master")
+            self._update_quality_buttons_state()
 
             # If schema was updated, offer to save and optionally enrich
             if was_modified:
@@ -1352,6 +1647,12 @@ class NCollectorApp:
 
         # Refresh GUI and offer to save
         self.refresh_plot_helper_options()
+
+        # Rebuild the index from the now-enriched master and re-evaluate the
+        # quality-check buttons (donor data may now be present after enrichment).
+        self.built_master_index(source="master")
+        self._update_quality_buttons_state()
+
         self.export_master_csv(is_updated=True)
 
     def select_folder(self):
@@ -1458,66 +1759,116 @@ class NCollectorApp:
 
         return " + ".join(selected_key)
 
-    def built_master_index(self):
+    def built_master_index(self, source="auto"):
         """
-        Creates a pd dataframe containing all metadata for all wells.
-        Enables flexible filtering needed for exclusion of data.
-        """
+        Builds the per-column metadata index that drives the Tab-2 exclusion dropdowns
+        and the Tab-1 summary table.
 
-        # Collect list of records for each col
+        source:
+          "object" — build from live PrResult.column_metadata. Used ONLY at initial
+                     load (clean, no exclusions yet).
+          "master" — build directly from the flat master_df rows. Used in CSV/import
+                     mode AND after every exclusion (master_df is the single source of
+                     truth for exclusion state; no Ref_Result object needed).
+          "auto"   — master if experiment empty & master_df populated, else object.
+
+        Both branches emit the same schema (File_Name, Date, Cell_Line, Condition,
+        Ligand, Replicate) so refresh_filter_options / update_dropdown_options /
+        update_summary_table work unchanged in both modes. The old Ref_Result /
+        Column_Index / Transfection_ID columns are dropped — re-application no longer
+        walks live objects.
+        """
+        if source == "auto":
+            source = ("master" if (not self.experiment and self.master_df is not None
+                                   and not self.master_df.empty) else "object")
+        if source == "master":
+            return self._build_index_from_master()
+        return self._build_index_from_objects()
+
+    def _finalize_index(self, records):
+        """Common tail: store records, refresh dropdowns + summary table."""
+        if records:
+            self.master_index = pd.DataFrame(records)
+            summary = self.master_index.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
+            logger.debug(f"Data Summary:\n{summary}")
+            self.refresh_filter_options()
+            self.update_summary_table()
+        else:
+            self.master_index = pd.DataFrame()
+            self.update_summary_table()
+            logger.warning("No valid data found")
+        return self.master_index
+
+    def _build_index_from_objects(self):
+        """Object-path index build (initial load). Reads live column_metadata."""
         records = []
         rows_str = "ABCDEFGH"
 
         for folder in self.experiment:
             for result in folder.results:
-                # Get col metadata first
                 if not result.column_metadata: continue
-                # Skip if file is excluded
                 if result.is_excluded: continue
 
-                # Iterate through the mapped cols (1-12)
                 for col_idx, meta in result.column_metadata.items():
                     # Filter out empty cols
                     if meta.condition_name is None or "Empty" in meta.condition_name: continue
-                    # Check if this column is completely excluded
-                    all_wells_excluded = True
-                    for r in rows_str:
-                        well_id = f"{r}{col_idx}"
-                        if well_id not in result.excluded_wells:
-                            all_wells_excluded = False
-                            break
-                    # If all wells are excluded, do not add to summary table (N count decreases)
+                    # Skip columns whose every well is excluded (N count drops). At
+                    # initial load excluded_wells is empty, so nothing is skipped here.
+                    all_wells_excluded = all(
+                        f"{r}{col_idx}" in result.excluded_wells for r in rows_str)
                     if all_wells_excluded: continue
 
-                    # Create a record for this col
-                    record = {
+                    records.append({
                         "File_Name": result.file_name,
-                        "Date": result.measurement_date.strftime('%d.%m.%y'),  # String for dropdowns
+                        "Date": result.measurement_date.strftime('%d.%m.%y'),  # dropdown string
                         "Cell_Line": meta.cell_line,
                         "Condition": meta.condition_name,
                         "Ligand": meta.ligand_identity,
-                        "Transfection_ID": meta.transfection_id,
-                        "Column_Index": col_idx,
                         "Replicate": meta.replicate,
-                        "Ref_Result": result  # Store the actual object to manipulate later
-                    }
-                    records.append(record)
-        # Built df from records
-        if records:
-            self.master_index = pd.DataFrame(records)
+                    })
 
-            # --- Summary for verification ---
-            summary = self.master_index.groupby(['Cell_Line', 'Condition'])['File_Name'].nunique()
-            logger.debug(f"Data Summary:\n{summary}")
-            self.refresh_filter_options()
-            self.update_summary_table()
-            self.refresh_plot_helper_options()
-            return self.master_index
-        else:
-            self.master_index = pd.DataFrame()
-            self.update_summary_table()
-            logger.warning("No valid data found")
-            return self.master_index
+        result_df = self._finalize_index(records)
+        # Object path also primes the plot helper (master_df may not exist yet).
+        self.refresh_plot_helper_options()
+        return result_df
+
+    def _build_index_from_master(self):
+        """
+        Master-path index build (CSV/import mode + after every exclusion). Derives the
+        same dropdown vocabulary directly from master_df. Note the column mapping:
+        index "Condition" <- master_df "Transfection".
+        """
+        df = self.master_df
+        if df is None or df.empty:
+            return self._finalize_index([])
+
+        work = df.copy()
+        # Dropdown date string (consistent with the object branch '%d.%m.%y').
+        work['_DateStr'] = pd.to_datetime(work['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+        work['_ColIdx'] = work['Well_ID'].astype(str).str[1:]
+        work['_Excl'] = (work['Is_Excluded'].map(coerce_bool)
+                         if 'Is_Excluded' in work.columns else False)
+
+        # Drop empty/unknown columns (defensive — compile already removes them).
+        work = work[~work['Transfection'].astype(str).str.contains("Empty", na=False)]
+        work = work[~work['Cell_Line'].astype(str).str.startswith("Unknown", na=False)]
+
+        records = []
+        for (fname, col_idx), g in work.groupby(['File_Name', '_ColIdx'], sort=False):
+            # Skip a column whose every well is currently excluded (N count drops).
+            if g['_Excl'].all():
+                continue
+            first = g.iloc[0]
+            records.append({
+                "File_Name": fname,
+                "Date": first['_DateStr'],
+                "Cell_Line": first['Cell_Line'],
+                "Condition": first['Transfection'],
+                "Ligand": first['Ligand'],
+                "Replicate": str(first['Replicate']),
+            })
+
+        return self._finalize_index(records)
 
     def _ask_ligand_choice_logged(self, ligand_1_name, ligand_2_name, plate_info):
         """Wrapper around ask_ligand_choice that logs the user's selection."""
@@ -1548,13 +1899,13 @@ class NCollectorApp:
         # Create config
         try:
             is_labeling = self.var_labeling_is_checked.get()
-            lum_threshold = self.var_lum_threshold.get()
         except tk.TclError:
             is_labeling = False
-            lum_threshold = 100
+        lum_threshold, vehicle_threshold = self._get_thresholds()
 
         self.current_config = ProcessingConfig(
             lum_threshold=lum_threshold,
+            vehicle_warning_threshold=vehicle_threshold,
             labeling_correction=is_labeling,
             plate_layout=build_plate_layout(is_labeling),
             # Method for optionally needed dialogs are stored
@@ -1578,15 +1929,14 @@ class NCollectorApp:
 
         self.log(f"--- Loading Complete. Loaded {len(self.experiment)} folders. ---")
 
-        # Log detected wavelengths once (from the first measurement file found)
+        # Log detected wavelengths once (from the first measurement file found).
+        # The lum check is always performed regardless of wavelength (the user knows
+        # their channels); wavelengths are logged for reference only.
         for folder in self.experiment:
             for res in folder.results:
                 self.log(f"   [CHANNELS] Donor: {res.donor_wavelength} nm | "
                          f"Acceptor: {res.acceptor_wavelength} nm")
-                if res.donor_wavelength == 475:
-                    self.log(f"   [CHANNELS] Luminescence check enabled (donor = 475 nm)")
-                else:
-                    self.log(f"   [CHANNELS] Luminescence check disabled (donor ≠ 475 nm)")
+                self.log("   [CHANNELS] Luminescence check will be performed for all files.")
                 break
             else:
                 continue
@@ -1599,11 +1949,17 @@ class NCollectorApp:
         self.btn_export_master.config(state="normal")
         self.btn_export_excel.config(state="normal")
         self.btn_run_plot_helper.config(state="normal")
+        self._update_quality_buttons_state()
 
     def run_processing_pipeline(self):
         """
-        2. Processing of raw BRET data and indexing with protocol info
-        Calls processing functions and is rerun if data was excluded.
+        2. Processing of raw BRET data and indexing with protocol info.
+
+        This runs the OBJECT pipeline (process_bret_measurement) and is invoked ONLY
+        at initial load. Re-application of exclusions no longer comes through here — it
+        is handled entirely on master_df by apply_exclusions via the master-native
+        engine. Because no exclusions exist at load, the resulting master is clean
+        (Raw_BRET_kinetic complete), satisfying the engine's add-only assumption.
         """
         self.log("\n--- Starting Processing Pipeline ---")
 
@@ -1636,8 +1992,8 @@ class NCollectorApp:
                 all_detected_warnings.extend(result.low_lum_warnings)
                 all_detected_warnings.extend(result.vehicle_warnings)
 
-        # Built master indexing table (needed for flexible data exclusion)
-        self.built_master_index()
+        # Built master indexing table from the live objects (clean, initial load).
+        self.built_master_index(source="object")
 
         # Only show warnings that were not ignored previously
         new_warnings = [
@@ -1653,6 +2009,7 @@ class NCollectorApp:
         self.log("\n--- Compiling Master Dataframe... ---")
         self.master_df = self.compile_master_dataframe()
         self.refresh_plot_helper_options()
+        self._update_quality_buttons_state()
 
         self.log("\n--- Processing Complete & Plot Helper Ready ---")
 
