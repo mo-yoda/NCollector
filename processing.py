@@ -637,17 +637,19 @@ def process_bret_measurement(result: PrResult, protocol: ProtocolData, config: P
         for well in result.excluded_wells:
             if well in raw_df.columns: raw_df[well] = float('nan')
 
-    # 3. CHECK LUMINESCENCE (only when donor channel is 475 nm)
-    if result.donor_wavelength == 475:
-        # Apply exclusions to a temporary copy for the lum check only
-        lum_check_df = result.donor_df.copy()
-        for well in result.excluded_wells:
-            if well in lum_check_df.columns: lum_check_df[well] = float('nan')
-        result.low_lum_warnings = check_luminescence(
-            lum_check_df, result.column_metadata, config.lum_threshold, date_str
-        )
-    else:
-        logger.debug(f"Lum check skipped: donor wavelength is {result.donor_wavelength}, not 475.")
+    # 3. CHECK LUMINESCENCE (always performed — donor/acceptor wavelengths are
+    #    informational only; the user knows their channels). The 475 nm gate was
+    #    removed so the lum check runs for every dataset (incl. imported masters).
+    logger.info(f"Performing luminescence check for {result.file_name} "
+                f"(donor={result.donor_wavelength} nm, "
+                f"acceptor={result.acceptor_wavelength} nm).")
+    # Apply exclusions to a temporary copy for the lum check only
+    lum_check_df = result.donor_df.copy()
+    for well in result.excluded_wells:
+        if well in lum_check_df.columns: lum_check_df[well] = float('nan')
+    result.low_lum_warnings = check_luminescence(
+        lum_check_df, result.column_metadata, config.lum_threshold, date_str
+    )
 
     # 4. BUILD TIME VECTOR
     time_col = "Time (min)"
@@ -759,6 +761,94 @@ def _reconstruct_column_metadata(file_rows: pd.DataFrame) -> dict:
             ligand_conc=conc_map,
         )
     return column_metadata
+
+
+def coerce_bool(v) -> bool:
+    """
+    Robustly coerce a value (bool, int/float, or string like 'True'/'False' that a
+    re-read CSV may carry) to a Python bool. Used so the master-native code treats
+    Is_Excluded consistently regardless of whether the master came from the live
+    pipeline (real bool) or from pd.read_csv (possibly object/str).
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        try:
+            return bool(v) and not pd.isna(v)
+        except Exception:
+            return bool(v)
+    return str(v).strip().lower() in ("true", "1", "1.0", "yes")
+
+
+def _pivot_wide(file_rows: pd.DataFrame, value_col: str):
+    """Pivot a single file's long rows to a wide (Time_(min) x Well_ID) frame.
+    Returns None if the column is absent or the pivot is empty."""
+    if value_col not in file_rows.columns:
+        return None
+    wide = (file_rows.pivot_table(index='Time_(min)', columns='Well_ID',
+                                  values=value_col, aggfunc='first')
+            .sort_index())
+    return wide if not wide.empty else None
+
+
+def reconstruct_file_inputs(master_df: pd.DataFrame, file_name: str):
+    """
+    Reconstruct, purely from the flat master DataFrame, the per-file inputs needed to
+    re-run the luminescence and vehicle quality checks — no original xlsx and no live
+    PrResult required. This is the shared reconstruction helper used by both the
+    auto-rerun (after an exclusion) and the on-demand Tab-1 re-run buttons.
+
+    Returns a dict (or None if the file has no rows):
+        column_metadata : {col_idx -> PlateColMetadata}
+        plate_blocks    : triplicate/quadruplicate layout (labeling iff any
+                          Replicate == "labeling control")
+        excluded_wells  : Well_IDs currently flagged Is_Excluded for this file
+        date_str        : measurement date as '%d.%m.%y' (matches object pipeline)
+        veh_norm_wide   : wide Veh_Norm_Kinetic (Time_(min) x Well_ID) or None
+        donor_wide      : wide Donor_Raw_kinetic (raw, NOT exclusion-applied) or None
+        has_donor       : whether any donor data exists for this file
+    """
+    if master_df is None or master_df.empty or 'File_Name' not in master_df.columns:
+        return None
+
+    file_rows = master_df[master_df['File_Name'] == file_name]
+    if file_rows.empty:
+        return None
+
+    fr = file_rows.copy()
+    fr['Time_(min)'] = pd.to_numeric(fr['Time_(min)'], errors='coerce')
+
+    column_metadata = _reconstruct_column_metadata(fr)
+
+    is_labeling = (fr['Replicate'].astype(str) == "labeling control").any()
+    plate_blocks = build_plate_layout(is_labeling)
+
+    if 'Is_Excluded' in fr.columns:
+        excl_mask = fr['Is_Excluded'].map(coerce_bool)
+        excluded_wells = fr.loc[excl_mask, 'Well_ID'].unique().tolist()
+    else:
+        excluded_wells = []
+
+    try:
+        date_str = pd.to_datetime(fr['Date'].iloc[0]).strftime('%d.%m.%y')
+    except Exception:
+        date_str = str(fr['Date'].iloc[0]) if 'Date' in fr.columns else ""
+
+    veh_norm_wide = _pivot_wide(fr, 'Veh_Norm_Kinetic')
+
+    has_donor = ('Donor_Raw_kinetic' in fr.columns
+                 and fr['Donor_Raw_kinetic'].notna().any())
+    donor_wide = _pivot_wide(fr, 'Donor_Raw_kinetic') if has_donor else None
+
+    return {
+        'column_metadata': column_metadata,
+        'plate_blocks': plate_blocks,
+        'excluded_wells': excluded_wells,
+        'date_str': date_str,
+        'veh_norm_wide': veh_norm_wide,
+        'donor_wide': donor_wide,
+        'has_donor': has_donor,
+    }
 
 
 def _melt_wide(df_wide: pd.DataFrame, value_name: str) -> pd.DataFrame:
