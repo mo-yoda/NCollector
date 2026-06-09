@@ -1,9 +1,35 @@
 import logging
 import re
 import pandas as pd
-from models import LEGACY_COLUMN_DEFAULTS
+from models import LEGACY_COLUMN_DEFAULTS, APP_VERSION
+from processing import pristine_raw_for_file, _melt_wide
+from restore import migrate_blob_separator
 
 logger = logging.getLogger("NCollector")
+
+def parse_ncollector_version(value):
+    """Extract (major, minor, patch) from a version string like 'N Collector v2.0.5'.
+    Returns None if no vX.Y.Z pattern is present (missing / '< v2' / free text)."""
+    if value is None:
+        return None
+    m = re.search(r'v?(\d+)\.(\d+)\.(\d+)', str(value))
+    if not m:
+        return None
+    return tuple(int(g) for g in m.groups())
+
+
+# Used to STAMP migrated masters so the fixed-anchor gate below is skipped on subsequent imports
+_CURRENT_VERSION = parse_ncollector_version(APP_VERSION) or (0, 0, 0)
+
+
+def is_legacy_master_version(value, threshold) -> bool:
+    """True if the master version is below `threshold`. Missing / unparseable / '< v2'
+    all count as legacy (returns True). `threshold` format e.g. (2,0,5)."""
+    parsed = parse_ncollector_version(value)
+    if parsed is None:
+        return True
+    return parsed < threshold
+
 
 # Columns that should be set to NA when retroactively applying exclusions
 _EXCLUSION_DATA_COLS = [
@@ -18,7 +44,7 @@ def _fix_legacy_exclusion_bug(df: pd.DataFrame, tag: str, regex_suffix: str,
                               match_col: str, label: str) -> str | None:
     """
     Shared fixer for legacy exclusion bugs where warnings were recorded in
-    Applied_Exclusions but the corresponding data was never set to NA.
+    Applied_Exclusions but the corresponding data was never set to NA (< v2.0.3).
 
     Args:
         df:            Master DataFrame (modified in-place).
@@ -119,6 +145,13 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         bugs_fixed.append(msg)
         logger.info(msg)
 
+    # Capture the master's stored NCollector_version
+    stored_version = None
+    if 'NCollector_version' in df.columns and df['NCollector_version'].notna().any():
+        stored_version = df['NCollector_version'].dropna().iloc[0]
+    master_is_legacy = is_legacy_master_version(
+        stored_version, threshold=_CURRENT_VERSION)
+
     # --- Fill all missing columns with defaults ---
     missing_cols = set(LEGACY_COLUMN_DEFAULTS.keys()) - set(df.columns)
 
@@ -146,26 +179,28 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         df = df.merge(bl_lp_means, on=['File_Name', 'Well_ID'], how='left')
 
     # --- Fix legacy exclusion bugs: exclusions were listed as applied but data was not set to NA ---
-    _exclusion_fix_configs = [
-        {
-            "tag": "LOW LUM",
-            "regex_suffix": r"Replicate\s+(\d+)\s*-\s*value:\s*[\d.]+",
-            "match_col": "Replicate", # Note: <v2.0.4 lum check was per replicate instead of per well
-            "label": "Lum check",
-        },
-        {
-            "tag": "VEHICLE WARN",
-            "regex_suffix": r"([A-H]\d{1,2})\s*-\s*value:\s*[\d.]+",
-            "match_col": "Well_ID",
-            "label": "Vehicle warning",
-        },
-    ]
+    # (< v2.0.3)
+    if is_legacy_master_version(stored_version, threshold=(2,0,3)):
+        _exclusion_fix_configs = [
+            {
+                "tag": "LOW LUM",
+                "regex_suffix": r"Replicate\s+(\d+)\s*-\s*value:\s*[\d.]+",
+                "match_col": "Replicate", # Note: <v2.0.4 lum check was per replicate instead of per well
+                "label": "Lum check",
+            },
+            {
+                "tag": "VEHICLE WARN",
+                "regex_suffix": r"([A-H]\d{1,2})\s*-\s*value:\s*[\d.]+",
+                "match_col": "Well_ID",
+                "label": "Vehicle warning",
+            },
+        ]
 
-    for fix_cfg in _exclusion_fix_configs:
-        fixed = _fix_legacy_exclusion_bug(df, fix_cfg["tag"], fix_cfg["regex_suffix"],
-                                          fix_cfg["match_col"], fix_cfg["label"])
-        if fixed:
-            _bug_fix(fixed)
+        for fix_cfg in _exclusion_fix_configs:
+            fixed = _fix_legacy_exclusion_bug(df, fix_cfg["tag"], fix_cfg["regex_suffix"],
+                                              fix_cfg["match_col"], fix_cfg["label"])
+            if fixed:
+                _bug_fix(fixed)
 
     # --- Reconstruct Is_Vehicle for older CSVs ---
     if 'Is_Vehicle' in missing_cols:
@@ -224,8 +259,57 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
             df['AUC_Mean'] = recalc
             _bug_fix("Recalculated 'AUC_Mean' from corrected 'Veh_Norm_AUC'.")
 
+    # --- Populate Raw_BRET_unexcluded (pristine, exclusion-free raw) ---
+    # Handled in inside pristine_raw_for_file
+    # (1) reconstruct PRISTINE raw from Donor/Acceptor channels even for wells that
+    # are CURRENTLY excluded (2) ONLY for wells still NaN after the channel step (no channels available)
+    # copy the existing Raw_BRET_kinetic as the best-available value.
+    # ->  a legacy master WITH channels is fully restorable; a legacy
+    #     master WITHOUT channels loses only its pre-existing exclusions
+    if ('Raw_BRET_unexcluded' in df.columns
+            and {'File_Name', 'Well_ID', 'Time_(min)'}.issubset(df.columns)):
+        cur = pd.to_numeric(df['Raw_BRET_unexcluded'], errors='coerce')
+        if cur.isna().any():
+            work = df.copy()
+            work['Time_(min)'] = pd.to_numeric(work['Time_(min)'], errors='coerce')
+            parts = []
+            for fname, fr in work.groupby('File_Name', sort=False):
+                pristine = pristine_raw_for_file(fr, include_kinetic_tail=True)
+                if pristine is None or pristine.empty:
+                    continue
+                melted = _melt_wide(pristine, '_pris')
+                melted['File_Name'] = fname
+                parts.append(melted)
+            if parts:
+                allp = pd.concat(parts, ignore_index=True)
+                joined = (work.reset_index()
+                          .merge(allp, on=['File_Name', 'Well_ID', 'Time_(min)'], how='left')
+                          .set_index('index'))
+                pris = pd.to_numeric(joined['_pris'].reindex(df.index), errors='coerce')
+                fill_mask = cur.isna() & pris.notna()
+                if fill_mask.any():
+                    df.loc[fill_mask, 'Raw_BRET_unexcluded'] = pris[fill_mask]
+                    _modified(f"Populated 'Raw_BRET_unexcluded' (pristine raw) for "
+                              f"{int(fill_mask.sum())} well-rows (channels first, "
+                              f"Raw_BRET_kinetic fallback).")
+
+    # --- Migrate Applied_Exclusions to the v2.0.5 " || " separator ---
+    # This is an optimization (the re-tokenize+ rejoin is idempotent).
+    # A blob with no rule markers (None / empty / pre-v2 free text) is left as a single opaque token and
+    # surfaces later as one "Legacy exclusions" entry.
+    if 'Applied_Exclusions' in df.columns and is_legacy_master_version(stored_version, threshold=(2,0,5)):
+        migrated = df['Applied_Exclusions'].map(migrate_blob_separator)
+        if not migrated.equals(df['Applied_Exclusions']):
+            df['Applied_Exclusions'] = migrated
+            _modified("Migrated 'Applied_Exclusions' to ' || ' rule separator.")
+
     was_modified = len(modified) > 0
     was_fixed = len(bugs_fixed) > 0
+
+    # Stamp the master to the current app version ONLY after a migration actually ran on a legacy master
+    if master_is_legacy and was_modified and 'NCollector_version' in df.columns:
+        df['NCollector_version'] = APP_VERSION
+        logger.info(f"Stamped 'NCollector_version' = '{APP_VERSION}' after migration.")
 
     if bugs_fixed and log_fn:
         for msg in bugs_fixed:
