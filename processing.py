@@ -131,7 +131,7 @@ def calculate_means_on_meta(processed_df: pd.DataFrame,
         # Create a base name for the condition
         cond_name = meta.condition_name if meta else f"Block_{block_idx + 1}"
         cell_line = meta.cell_line if meta else "Unknown"
-        ligand_name = meta.ligand_identity
+        ligand_name = meta.ligand_identity if meta else "N/A"
 
         # Used to calculate means of replicates
         if grouping_mode == "row":
@@ -380,6 +380,9 @@ def apply_labeling_correction(data_df: pd.DataFrame,
             c for c in block
             if column_metadata.get(c) and column_metadata[c].replicate == "labeling control"
         ]
+
+        if not control_col:
+            continue
 
         control_wells = [f"{r}{control_col[0]}" for r in "ABCDEFGH"]
         valid_controls = [w for w in control_wells if w in data_df.columns and w not in excluded_wells]
@@ -791,6 +794,79 @@ def _pivot_wide(file_rows: pd.DataFrame, value_col: str):
     return wide if not wide.empty else None
 
 
+def pristine_raw_for_file(file_rows: pd.DataFrame,
+                          include_kinetic_tail: bool = False) -> pd.DataFrame:
+    """
+    Build the wide PRISTINE (exclusion-free) raw BRET matrix for one file's rows.
+
+    Returns a frame: index = Time_(min) (sorted ascending), columns = Well_ID.
+    The per-well fallback ladder is applied element-wise (robust to partially
+    populated wells):
+
+        1. Raw_BRET_unexcluded            (the persisted pristine column)
+        2. else Acceptor / Donor          (guard donor 0/NaN -> NaN)
+        3. else NaN                        (unrestorable)
+
+    SHARED CORE for the two callers that MUST agree on what "pristine raw" means:
+      * the ENGINE (recompute_master_after_exclusion) uses the CORE ONLY
+        (include_kinetic_tail=False): a missing pristine source is plain NaN, i.e. the
+        well is unrestorable. The engine must NOT fall back to Raw_BRET_kinetic, because
+        that column already has exclusions applied — letting it stand in for the
+        pristine source would make exclusion-applied values masquerade as pristine and
+        silently mark unrestorable wells as restorable.
+      * the IMPORT MIGRATION (ensure_master_csv_schema) passes
+        include_kinetic_tail=True, which appends exactly ONE extra final tail step
+        "4. else copy Raw_BRET_kinetic" so a channel-less legacy well still has a
+        best-available value to store on disk (the stored column has to hold something).
+
+    That single tail step is the ONLY deliberate difference between the two callers.
+    """
+    if file_rows is None or file_rows.empty:
+        return pd.DataFrame()
+
+    fr = file_rows.copy()
+    fr['Time_(min)'] = pd.to_numeric(fr['Time_(min)'], errors='coerce')
+
+    unexcl = _pivot_wide(fr, 'Raw_BRET_unexcluded')
+    donor = _pivot_wide(fr, 'Donor_Raw_kinetic')
+    acceptor = _pivot_wide(fr, 'Acceptor_Raw_kinetic')
+    raw_kin = _pivot_wide(fr, 'Raw_BRET_kinetic')
+
+    # Pick a skeleton (index x columns) from the first available frame, then widen the
+    # column set to the union of every available source so no well is dropped.
+    skeleton = next((c for c in (raw_kin, unexcl, donor, acceptor)
+                     if c is not None and not c.empty), None)
+    if skeleton is None:
+        return pd.DataFrame()
+
+    idx = skeleton.index
+    cols = skeleton.columns
+    for cand in (unexcl, donor, acceptor, raw_kin):
+        if cand is not None and not cand.empty:
+            cols = cols.union(cand.columns)
+
+    def _align(w):
+        if w is None or w.empty:
+            return pd.DataFrame(float('nan'), index=idx, columns=cols)
+        return w.reindex(index=idx, columns=cols)
+
+    unexcl = _align(unexcl)
+    donor = _align(donor)
+    acceptor = _align(acceptor)
+    raw_kin = _align(raw_kin)
+
+    # 2. Acceptor / Donor with the donor 0/NaN guard -> NaN.
+    safe_donor = donor.where((donor != 0) & donor.notna())
+    channel_ratio = acceptor / safe_donor
+
+    # Ladder: Raw_BRET_unexcluded -> channels -> (migration tail) Raw_BRET_kinetic -> NaN
+    pristine = unexcl.where(unexcl.notna(), channel_ratio) # unexcl, else channels
+    if include_kinetic_tail:
+        pristine = pristine.where(pristine.notna(), raw_kin) # only fills cells STILL NaN
+
+    return pristine.sort_index()
+
+
 def reconstruct_file_inputs(master_df: pd.DataFrame, file_name: str):
     """
     Reconstruct, purely from the flat master DataFrame, the per-file inputs needed to
@@ -868,20 +944,27 @@ def recompute_master_after_exclusion(master_df: pd.DataFrame,
     Recomputes the derived BRET metrics for a set of files DIRECTLY on the flat master
     DataFrame — no live PrResult objects and no original xlsx required.
 
-    Exclusions in this app are add-only (monotonic), so recomputing from the master's
-    current Raw_BRET_kinetic (NaN-ing newly excluded wells) reproduces exactly what the
-    object pipeline would have produced for the retained wells. The recompute starts from
-    Raw_BRET_kinetic (the PRE-correction per-well data), NOT from a corrected column, so
-    excluding a labeling-control well correctly re-triggers labeling correction.
+    Exclude and restore are the SAME operation here: the recompute always re-sources the
+    PRISTINE (exclusion-free) raw BRET via pristine_raw_for_file (engine variant: core
+    only — Raw_BRET_unexcluded -> Acceptor/Donor -> NaN, never the exclusion-applied
+    Raw_BRET_kinetic), then applies the file's CURRENT Is_Excluded set FRESH (full-set,
+    not incremental). Raw_BRET_kinetic is DERIVED from that pristine source with the
+    currently-excluded wells NaN-d, so flipping Is_Excluded False (restore) brings a
+    well's data back exactly, and flipping it True (exclude) removes it — preserving the
+    Is_Excluded <-> Raw_BRET_kinetic isna invariant and the _EXCLUSION_DATA_COLS
+    behaviour. A well with no pristine source (NaN after the core ladder) stays NaN and
+    is unrestorable. The recompute starts from the pre-correction per-well data, so
+    excluding/restoring a labeling-control well correctly re-triggers labeling correction.
 
     For each File_Name in affected_files this:
-      1. Pivots that file's Raw_BRET_kinetic to wide (index = sorted unique Time_(min)).
+      1. Builds that file's pristine raw wide matrix (index = sorted unique Time_(min)).
       2. Reconstructs column_metadata from the file's master rows.
       3. Derives plate_blocks (labeling iff any Replicate == "labeling control") and
          baseline_end_idx (positional index of Time_(min) == 0).
       4. Reads excluded_wells (Is_Excluded == True) for the file.
-      5. Calls compute_bret_metrics, then overwrites the derived master columns for that
-         file's rows. Donor/Acceptor/PR_Time are left untouched.
+      5. Calls compute_bret_metrics (which NaN-s the excluded wells), then overwrites the
+         derived master columns for that file's rows. Donor/Acceptor/PR_Time and the
+         persisted Raw_BRET_unexcluded are left untouched.
 
     Returns a new master DataFrame (input is not mutated), column-ordered per MASTER_COLUMNS.
     """
@@ -924,12 +1007,11 @@ def recompute_master_after_exclusion(master_df: pd.DataFrame,
             logger.warning(f"recompute: no rows for file '{fname}'. Skipping.")
             continue
 
-        # 1. Pivot clean Raw_BRET_kinetic to wide. Row order ascending time == object-path order.
-        raw_wide = (file_rows.pivot_table(index='Time_(min)', columns='Well_ID',
-                                          values='Raw_BRET_kinetic', aggfunc='first')
-                    .sort_index())
-        if raw_wide.empty:
-            logger.warning(f"recompute: empty raw pivot for '{fname}'. Skipping.")
+        # 1. Build the file's PRISTINE raw wide (engine variant: core only — no
+        #    Raw_BRET_kinetic tail). Row order ascending time == object-path order.
+        raw_wide = pristine_raw_for_file(file_rows, include_kinetic_tail=False)
+        if raw_wide is None or raw_wide.empty:
+            logger.warning(f"recompute: no pristine raw for '{fname}'. Skipping.")
             continue
 
         times_sorted = [float(t) for t in raw_wide.index.tolist()]

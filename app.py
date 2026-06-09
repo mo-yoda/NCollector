@@ -746,7 +746,8 @@ class NCollectorApp:
                  f"{len(affected_files)} file(s) as excluded.")
 
         # --- Append the full applied-exclusion provenance to all rows ---
-        self.master_df['Applied_Exclusions'] = self.rule_history_text.replace("\n", " | ")
+        # v2.0.5: rules are joined with " || "
+        self.master_df['Applied_Exclusions'] = self.rule_history_text.replace("\n", " || ")
 
         # --- Recompute affected files on the flat master (single engine path) ---
         config = self._build_recompute_config()
@@ -2092,6 +2093,17 @@ class NCollectorApp:
                     .merge(df_bl, on=merge_on, how="left") \
                     .merge(df_norm, on=merge_on, how="left")
 
+                # --- PRISTINE, EXCLUSION-FREE RAW (uniform provenance for ALL files) ---
+                # Raw_BRET_unexcluded = Acceptor / Donor,
+                # Donor 0/NaN -> NaN
+                # Left UNROUNDED. This column is never NaN-d by exclusion, so it is the
+                # pristine source the engine restores from.
+                _donor = pd.to_numeric(merged_df["Donor_Raw_kinetic"], errors="coerce")
+                _acceptor = pd.to_numeric(merged_df["Acceptor_Raw_kinetic"], errors="coerce")
+                merged_df["Raw_BRET_unexcluded"] = (
+                    _acceptor / _donor.where((_donor != 0) & _donor.notna())
+                )
+
                 # --- MAP RAW PLATE READER TIME (file-specific, from res.raw_time) ---
                 if res.raw_time is not None and len(res.raw_time) == len(t_vec):
                     raw_time_map = dict(zip(t_vec, res.raw_time))
@@ -2181,8 +2193,8 @@ class NCollectorApp:
 
                 # Get the exclusion text (handle empty case)
                 exclusion_text = self.rule_history_text if self.rule_history_text else "None"
-                # Clean newlines for CSV compatibility
-                exclusion_text_clean = exclusion_text.replace("\n", " | ")
+                # v2.0.5: join rules with " || "
+                exclusion_text_clean = exclusion_text.replace("\n", " || ")
                 merged_df["Applied_Exclusions"] = exclusion_text_clean
 
                 # Mark excluded wells: True if this well was in the exclusion list

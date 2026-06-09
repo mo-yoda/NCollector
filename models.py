@@ -3,7 +3,7 @@ from datetime import date
 from dataclasses import dataclass, field
 
 # --- Application Constants --- #
-APP_VERSION = "N Collector v2.0.4"
+APP_VERSION = "N Collector v2.0.5"
 
 # Plate column layouts
 TRIPLICATE_LAYOUT = [range(1, 4), # Block 1: Cols 1-3
@@ -25,6 +25,7 @@ MASTER_COLUMNS = [
     "Transfection", "Cell_Line", "Ligand",
     "Ligand_Conc", "Plate_Row", "Replicate", "Well_ID", "Time_(min)", "PR_Time(min)",
     "Donor_Raw_kinetic", "Acceptor_Raw_kinetic",
+    "Raw_BRET_unexcluded",     # Pristine, exclusion-free raw BRET ratio (Acceptor/Donor) - to allow reversability of exclusions
     "Raw_BRET_kinetic", "Lab_BRET_kinetic", "Bl_Corrected_BRET", "Veh_Norm_Kinetic", "Kinetic_Mean",
     "Raw_BRET_CRC", "Lab_LP", "Bl_LP", "Veh_Norm_LP", "LP_Mean",
     "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
@@ -40,6 +41,7 @@ LEGACY_COLUMN_DEFAULTS = {
     "Info_Sheet":         {"default": "", "reconstructable": False, "enrichable": True},
     "Donor_Raw_kinetic":  {"default": float('nan'), "reconstructable": False, "enrichable": True},
     "Acceptor_Raw_kinetic": {"default": float('nan'), "reconstructable": False, "enrichable": True},
+    "Raw_BRET_unexcluded": {"default": float('nan'), "reconstructable": True, "enrichable": False}, # reconstructable only guaranteeable from channels
     "PR_Time(min)":       {"default": float('nan'), "reconstructable": False, "enrichable": True},
     "Is_Vehicle":         {"default": False, "reconstructable": True, "enrichable": False},
     "Is_Excluded":        {"default": False, "reconstructable": True, "enrichable": False},
