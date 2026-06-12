@@ -17,6 +17,7 @@ from mapping import infer_ligand_info_from_master
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
                     ensure_master_csv_schema)
+from restore import (list_active_exclusions, restore_rule, restore_wells)
 from dialogs import ask_user_parameter, ask_ligand_choice, ask_ligand_layout
 
 logger = logging.getLogger("NCollector")
@@ -92,7 +93,6 @@ class NCollectorApp:
         self.load_files_button = None
         self.main_plasmids_label = None
         self.summary_tree = None
-        self.lbl_rules_summary = None
         self.btn_export_master = None
         self.btn_export_excel = None
         self.btn_rerun_lum = None
@@ -107,6 +107,16 @@ class NCollectorApp:
         self.lbl_row = None
         self.cb_row = None
         self.lb_exclusions = None
+        # Tab 2 — Exclude/Revert
+        self.var_excl_mode = None          # StringVar in {"exclude", "revert"} (default "exclude")
+        self.rb_exclude = None
+        self.rb_revert = None
+        self.btn_apply_excl = None         # "Apply exclusions and re-calculate" (exclude mode only)
+        self.btn_revert_excl = None        # "Revert exclusions and re-calculate" (revert mode only)
+        self.lb_active_excl_tab2 = None    # Tab 2 multi-select active-exclusions box (revert mode only)
+        # Shared "Active Exclusions" state (both tabs are fed by refresh_active_exclusions)
+        self.lb_active_excl_tab1 = None    # Tab 1 display-only active-exclusions box (replaces lbl_rules_summary)
+        self._active_excl_entries = []     # Parallel list: visible row index -> entry dict (both boxes share order)
         # Tab 3
         self.tab_plot_helper = None
         self.lbl_data_source = None
@@ -240,11 +250,24 @@ class NCollectorApp:
         self.summary_tree.column("Dates", width=150)
         self.summary_tree.pack(fill="both", expand=True)
 
-        # Text of applies exclusion rules
-        rules_frame = tk.LabelFrame(self.tab_import, text="Applied Exclusion Rules")
-        rules_frame.pack(fill="x", padx=10, pady=5)
-        self.lbl_rules_summary = tk.Label(rules_frame, text="No exclusion rules applied", justify="left", anchor="w")
-        self.lbl_rules_summary.pack(fill="x", padx=5, pady=5)
+        # Active exclusions (display-only)
+        # the SAME shared "Active Exclusions" view as Tab 2, fed by refresh_active_exclusions()
+        # off list_active_exclusions(master_df)
+        rules_frame = tk.LabelFrame(self.tab_import, text="Active Exclusions")
+        rules_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        active_box1 = tk.Frame(rules_frame)
+        active_box1.pack(fill="both", expand=True, padx=5, pady=5)
+        active_scroll1 = ttk.Scrollbar(active_box1, orient="vertical")
+        active_scroll1.pack(side="right", fill="y")
+        # Display-only: selectmode "none"
+        self.lb_active_excl_tab1 = tk.Listbox(active_box1, height=4, activestyle="none",
+                                              selectmode="none", exportselection=False,
+                                              yscrollcommand=active_scroll1.set)
+        self.lb_active_excl_tab1.pack(side="left", fill="both", expand=True)
+        active_scroll1.config(command=self.lb_active_excl_tab1.yview)
+        # click/drag is specifically silenced (display only)
+        for _seq in ("<Button-1>", "<B1-Motion>", "<Double-Button-1>"):
+            self.lb_active_excl_tab1.bind(_seq, lambda e: "break")
 
         # --- EXPORT SECTION ---
         export_frame = tk.LabelFrame(self.tab_import, text="Export Options")
@@ -288,8 +311,22 @@ class NCollectorApp:
     def setup_exclusion_tab(self):
         """Builds GUI for Tab 2 data selection"""
 
+        # Mode toggle (Exclude vs Revert)
+        # Mutually-exclusive, exactly one selected, default "exclude"
+        self.var_excl_mode = tk.StringVar(value="exclude")
+        mode_frame = tk.LabelFrame(self.tab_select, text="Mode")
+        mode_frame.pack(fill="x", pady=(10, 0), padx=5)
+        self.rb_exclude = ttk.Radiobutton(mode_frame, text="Exclude Data",
+                                           variable=self.var_excl_mode, value="exclude",
+                                           command=self._on_excl_mode_change)
+        self.rb_exclude.pack(side="left", padx=10, pady=5)
+        self.rb_revert = ttk.Radiobutton(mode_frame, text="Revert Exclusions",
+                                          variable=self.var_excl_mode, value="revert",
+                                          command=self._on_excl_mode_change, state="disabled")
+        self.rb_revert.pack(side="left", padx=10, pady=5)
+
         # Frame for dropdowns
-        filter_frame = tk.LabelFrame(self.tab_select, text="Exclude Data")
+        filter_frame = tk.LabelFrame(self.tab_select, text="Exclude & Revert Data")
         filter_frame.pack(fill = "x", pady=10, padx=5)
 
         # Variables
@@ -355,9 +392,319 @@ class NCollectorApp:
         self.lb_exclusions = tk.Listbox(list_frame, height=8)
         self.lb_exclusions.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Apply Button (Bottom)
-        tk.Button(self.tab_select, text="Apply exclusions and re-calculate",
-                  command=self.apply_exclusions).pack(pady=10, ipadx=10)
+        # Apply Exclusions is enabled only in EXCLUDE mode; Revert only in REVERT mode.
+        action_frame = tk.Frame(self.tab_select)
+        action_frame.pack(pady=10)
+        self.btn_apply_excl = tk.Button(action_frame, text="Apply exclusions and re-calculate",
+                                        command=self.apply_exclusions)
+        self.btn_apply_excl.pack(side="left", padx=5, ipadx=10)
+        self.btn_revert_excl = tk.Button(action_frame, text="Revert exclusions and re-calculate",
+                                         command=self.revert_exclusions, state="disabled")
+        self.btn_revert_excl.pack(side="left", padx=5, ipadx=10)
+
+        # Active Exclusions box (Tab 2 copy)
+        # Multi-select; selectable ONLY in revert mode
+        active_frame2 = tk.LabelFrame(self.tab_select, text="Active Exclusions")
+        active_frame2.pack(fill="both", expand=True, padx=10, pady=5)
+        active_box2 = tk.Frame(active_frame2)
+        active_box2.pack(fill="both", expand=True, padx=5, pady=5)
+        active_scroll2 = ttk.Scrollbar(active_box2, orient="vertical")
+        active_scroll2.pack(side="right", fill="y")
+        self.lb_active_excl_tab2 = tk.Listbox(active_box2, height=5, selectmode="extended",
+                                              exportselection=False,
+                                              yscrollcommand=active_scroll2.set)
+        self.lb_active_excl_tab2.pack(side="left", fill="both", expand=True)
+        active_scroll2.config(command=self.lb_active_excl_tab2.yview)
+        # Selection guard: in exclude mode, swallow click/drag so nothing can be selected.
+        self.lb_active_excl_tab2.bind("<Button-1>", self._tab2_active_select_guard)
+        self.lb_active_excl_tab2.bind("<B1-Motion>", self._tab2_active_select_guard)
+
+        # Initialise button/selectability state and prime both active-exclusion boxes.
+        self._update_excl_action_buttons()
+        self._apply_tab2_selectability()
+
+    # --- Exclude/Revert mode plumbing (Prompt 5) ----------------------------------- #
+
+    def _on_excl_mode_change(self):
+        """
+        Mode change handler (TASK 1). Bound to both radiobuttons' command and also invoked
+        when the Revert option is force-disabled. On every change:
+          (a) repopulate the comboboxes from the correct subset (refresh_filter_options
+              -> mode-aware _option_source_df),
+          (b) CLEAR the pending list (a pending exclude rule is meaningless in revert mode
+              and vice versa),
+          (c) toggle the two action buttons,
+          (d) toggle the Tab-2 Active-Exclusions box selectability.
+        """
+        self.refresh_filter_options()          # (a)
+        self.clear_exclusion_list()             # (b)
+        self._update_excl_action_buttons()      # (c)
+        self._apply_tab2_selectability()        # (d)
+
+    def _tab2_active_select_guard(self, _event):
+        """Swallow clicks/drags on the Tab-2 Active-Exclusions box unless in revert mode."""
+        if self.var_excl_mode is None or self.var_excl_mode.get() != "revert":
+            return "break"
+        return None
+
+    def _apply_tab2_selectability(self):
+        """Clear any lingering Tab-2 selection when not in revert mode (selection is only
+        meaningful while reverting; the click guard prevents new selections)."""
+        if self.lb_active_excl_tab2 is None:
+            return
+        if self.var_excl_mode is None or self.var_excl_mode.get() != "revert":
+            self.lb_active_excl_tab2.selection_clear(0, tk.END)
+
+    def _update_excl_action_buttons(self):
+        """Apply enabled only in EXCLUDE mode, Revert only in REVERT mode (TASK 4).
+        Both additionally require data to be present."""
+        mode = self.var_excl_mode.get() if self.var_excl_mode is not None else "exclude"
+        has_data = self.master_df is not None and not self.master_df.empty
+        if self.btn_apply_excl is not None:
+            self.btn_apply_excl.config(
+                state="normal" if (mode == "exclude" and has_data) else "disabled")
+        if self.btn_revert_excl is not None:
+            self.btn_revert_excl.config(
+                state="normal" if (mode == "revert" and has_data) else "disabled")
+
+    def _update_revert_mode_state(self, has_entries):
+        """
+        Enable/disable the "Revert Exclusions" radiobutton (TASK 1). Greyed whenever there
+        are no active exclusions. If revert was the active mode and it just became empty,
+        snap back to exclude mode (and run the mode-change side effects).
+        """
+        if self.rb_revert is None:
+            return
+        if has_entries:
+            self.rb_revert.config(state="normal")
+        else:
+            self.rb_revert.config(state="disabled")
+            if self.var_excl_mode is not None and self.var_excl_mode.get() == "revert":
+                # Programmatic var.set() does NOT fire the radiobutton command, so run the
+                # mode-change side effects explicitly.
+                self.var_excl_mode.set("exclude")
+                self._on_excl_mode_change()
+
+    @staticmethod
+    def _display_label(label):
+        """
+        Human-friendly text for an active-exclusion entry. For restore-split tokens
+        (emitted by restore.py when a rule is partially reverted) the trailing
+        "- value: n/a" carries no information, so it is dropped for display. The original
+        label is left untouched in self._active_excl_entries for the revert dispatch.
+        """
+        s = str(label)
+        if "[RESTORE-SPLIT]" in s and " - value:" in s:
+            s = s.split(" - value:")[0].rstrip()
+        return s
+
+    def refresh_active_exclusions(self):
+        """
+        Shared refresh for the Active-Exclusions view (TASK 3). Calls
+        list_active_exclusions(master_df) ONCE and repopulates BOTH listboxes (Tab 1
+        display-only + Tab 2 multi-select), keeping self._active_excl_entries as the
+        parallel visible-row-index -> entry-dict map (identical order in both boxes). Also
+        re-evaluates the Revert-mode enable state and re-toggles the action buttons +
+        Tab-2 selectability.
+
+        This is the single method BOTH tabs' events call after anything that mutates
+        exclusions or swaps the data source.
+        """
+        entries = []
+        if self.master_df is not None and not self.master_df.empty:
+            try:
+                entries = list_active_exclusions(self.master_df)
+            except Exception as e:
+                logger.warning(f"Could not list active exclusions: {e}")
+                entries = []
+        self._active_excl_entries = entries
+
+        # Compact row text: "<label>  (N wells)" or "(N wells; M not revertable)".
+        # The displayed label is cleaned for restore-split tokens (drops the meaningless
+        # "- value: n/a" tail); the REAL label is kept in self._active_excl_entries for the
+        # dispatch in revert_exclusions, so this only affects what the user sees.
+        rows = []
+        for e in entries:
+            n = len(e.get("wells", []))
+            m = len(e.get("non_restorable", []))
+            suffix = f"({n} wells; {m} not revertable)" if m else f"({n} wells)"
+            rows.append(f"{self._display_label(e['label'])}  {suffix}")
+
+        # Tab 1 (display-only)
+        if self.lb_active_excl_tab1 is not None:
+            self.lb_active_excl_tab1.delete(0, tk.END)
+            if rows:
+                for r in rows:
+                    self.lb_active_excl_tab1.insert(tk.END, r)
+            else:
+                self.lb_active_excl_tab1.insert(tk.END, "No exclusion rules applied")
+
+        # Tab 2 (multi-select; selectable only in revert mode)
+        if self.lb_active_excl_tab2 is not None:
+            self.lb_active_excl_tab2.delete(0, tk.END)
+            for r in rows:
+                self.lb_active_excl_tab2.insert(tk.END, r)
+
+        # Revert-mode availability + button/selectability state under the current mode.
+        self._update_revert_mode_state(bool(entries))
+        self._update_excl_action_buttons()
+        self._apply_tab2_selectability()
+
+    def _collect_revert_inputs(self):
+        """
+        Gather the two revert input (exclusion rules or dropwdown selected) sources separately,
+        because they mean different things and must dispatch differently:
+
+          (A) WHOLE-RULE selection — the rows multi-selected in the Tab-2 Active-Exclusions
+              box. Returned as a list of entry LABELS so each can be reverted as a unit via
+              restore_rule, which already leaves wells still claimed by ANOTHER active rule
+              excluded (and that other rule intact).
+
+          (B) PER-WELL criteria — the pending combobox rules. Resolved via the SHARED resolver
+              (_resolve_rule_to_wells) and intersected with the currently-excluded set, then
+              released from whichever rule(s) own them (releasing a shared well does require
+              releasing it from every claiming rule — that is the intended well-level semantic).
+
+        Returns (selected_labels: list[str], pending_target: set[(file, well)]).
+        """
+        selected_labels = []
+        if self.lb_active_excl_tab2 is not None:
+            for i in self.lb_active_excl_tab2.curselection():
+                if 0 <= i < len(self._active_excl_entries):
+                    selected_labels.append(self._active_excl_entries[i]["label"])
+
+        pending_target = set()
+        if self.pending_exclusions:
+            df = self.master_df
+            norm_dates = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+            excl = (df['Is_Excluded'].map(coerce_bool)
+                    if 'Is_Excluded' in df.columns else pd.Series(False, index=df.index))
+            excluded_set = set(zip(df.loc[excl, 'File_Name'].astype(str),
+                                   df.loc[excl, 'Well_ID'].astype(str)))
+            for rule in self.pending_exclusions:
+                wells = self._resolve_rule_to_wells(rule, norm_dates)
+                pending_target |= (wells & excluded_set)
+
+        return selected_labels, pending_target
+
+    def revert_exclusions(self):
+        """
+        Revert dispatch, via restore.py's label-based API. Two input sources are
+        handled with DIFFERENT semantics (see _collect_revert_inputs):
+
+          (A) Whole-rule selections -> restore_rule per selected entry. restore_rule already
+              leaves wells still claimed by ANOTHER active rule excluded and leaves that
+              other rule intact, so reverting one rule never silently drops an overlapping
+              rule. These wells are NOT cross-dispatched into other rules.
+
+          (B) Pending combobox criteria -> a per-well target released from whichever rule(s)
+              own each well (full coverage -> restore_rule, partial -> restore_wells),
+              evaluated AFTER the whole-rule reverts so it sees the updated blob.
+
+        ALL restore decisions live in restore.py. Non-restorable / blocked wells are logged.
+
+        Efficiency: each entry's restorable/non_restorable split is ALREADY computed by
+        list_active_exclusions (it drives the "(N wells; M not revertable)" suffix) and held
+        in self._active_excl_entries. We consult that here to SKIP rules that can revert
+        nothing.
+        """
+        if self.master_df is None or self.master_df.empty:
+            self.log("No data loaded to revert exclusions from.")
+            return
+
+        # Use the entries from the last refresh (already carry restorable/non_restorable and
+        # match the listbox the user selected from) instead of recomputing the whole list.
+        entries_now = self._active_excl_entries
+        if not entries_now:
+            self.log("No active exclusions to revert.")
+            self.refresh_active_exclusions()
+            return
+
+        selected_labels, pending_target = self._collect_revert_inputs()
+        if not selected_labels and not pending_target:
+            self.log("[REVERT] Nothing selected and no pending rule matched a currently-excluded well.")
+            return
+
+        self.log(f"\n--- Reverting {len(selected_labels)} selected rule(s)"
+                 f" + {len(pending_target)} criteria-targeted well(s) ---")
+
+        config = self._build_recompute_config()
+
+        total_restored = 0
+        total_blocked = 0
+        all_nonrestorable = []
+        affected_files = set()
+        any_decomposed = False
+
+        def _tally(report):
+            nonlocal total_restored, total_blocked, any_decomposed
+            total_restored += report.get("restored_count", 0)
+            total_blocked += report.get("blocked_by_other_rule_count", 0)
+            all_nonrestorable.extend(report.get("nonrestorable", []))
+            affected_files.update(report.get("affected_files", []))
+            any_decomposed = any_decomposed or report.get("rule_decomposed", False)
+
+        # (A) Whole-rule reverts
+        # Labels captured before mutation; each restore_rule
+        # only rewrites its OWN token, so the remaining selected labels stay resolvable
+        entry_by_label = {e["label"]: e for e in entries_now}
+        for label in selected_labels:
+            e = entry_by_label.get(label)
+            if e is not None and not e.get("restorable"):
+                nrk = e.get("non_restorable", [])
+                all_nonrestorable.extend(nrk)
+                self.log(f"   [SKIP] '{self._display_label(label)}' has no revertable wells "
+                         f"({len(nrk)} non-revertable) — not attempted.")
+                continue
+            _tally(restore_rule(self.master_df, label, config))
+
+        # (B) Per-well criteria reverts
+        if pending_target:
+            for entry in list_active_exclusions(self.master_df):
+                entry_wells = set(entry["wells"])
+                inter = pending_target & entry_wells
+                if not inter:
+                    continue
+                restorable_inter = inter & {(f, w) for (f, w) in entry.get("restorable", [])}
+                if not restorable_inter:
+                    all_nonrestorable.extend(
+                        [(f, w, r) for (f, w, r) in entry.get("non_restorable", []) if (f, w) in inter])
+                    continue
+                if inter == entry_wells:
+                    _tally(restore_rule(self.master_df, entry["label"], config))
+                else:
+                    _tally(restore_wells(self.master_df, entry["label"], inter, config))
+
+        self.log(f"   [DONE] Restored {total_restored} well(s) across "
+                 f"{len(affected_files)} file(s).")
+        if any_decomposed:
+            self.log("   [INFO] One or more rules were decomposed to per-well tokens "
+                     "(partial restore).")
+
+        # --- Refresh everything the revert touched ---
+        # IMPORTANT: restore.py rewrote master_df['Applied_Exclusions'] in place but does not
+        # touch rule_history_text. Re-sync it from the authoritative blob now so a later
+        # apply_exclusions (which rebuilds the blob from rule_history_text) does not resurrect
+        # the rule that was just reverted.
+        self._sync_rule_history_from_master()
+        self.clear_exclusion_list()
+        self.built_master_index(source="master")
+        self.refresh_plot_helper_options()
+        self._update_quality_buttons_state()
+        self.refresh_active_exclusions()
+
+        # --- Non-restorable / blocked feedback: logged summary, not a hard block ---
+        if total_blocked:
+            self.log(f"   [INFO] {total_blocked} well(s) left excluded — still claimed by "
+                     f"another active exclusion rule.")
+        if all_nonrestorable:
+            # De-duplicate and log each well that could not be reverted (with its reason).
+            uniq = sorted(set(all_nonrestorable))
+            self.log(f"   [WARNING] {len(uniq)} well(s) could not be reverted:")
+            for (f, w, reason) in uniq:
+                self.log(f"       - {f} / {w}: {reason}")
+
+        self.log("--- Exclusions reverted & data recomputed ---")
 
     def log(self, message):
         """Logs to the separate window"""
@@ -496,9 +843,55 @@ class NCollectorApp:
             self.cb_row.config(state="disabled")
         self.update_dropdown_options("Replicate")
 
+    def _option_source_df(self):
+        """
+        Build the Tab-2 dropdown OPTION SOURCE, filtered by the current mode:
+          exclude mode -> rows still in play   (Is_Excluded == False)
+          revert  mode -> already-excluded rows (Is_Excluded == True)
+
+        Derived directly from master_df (using processing.coerce_bool for the Is_Excluded
+        test) so that REVERT mode can surface even fully-excluded columns, which
+        built_master_index drops from self.master_index. Returns a frame carrying exactly
+        the vocabulary columns the cascading logic expects: Ligand, Date ('%d.%m.%y'),
+        Cell_Line, Condition (<- Transfection), Replicate.
+
+        Bootstrap fallback: at the very first object-mode load, built_master_index ->
+        refresh_filter_options runs BEFORE master_df is compiled. In that window master_df
+        is empty, so we fall back to self.master_index (which at load time already holds the
+        clean, exclusion-free vocabulary). Only valid for exclude mode (no exclusions yet).
+        """
+        cols = ["Ligand", "Date", "Cell_Line", "Condition", "Replicate"]
+        want_excluded = (self.var_excl_mode is not None
+                         and self.var_excl_mode.get() == "revert")
+
+        df = self.master_df
+        if df is not None and not df.empty:
+            excl = (df['Is_Excluded'].map(coerce_bool)
+                    if 'Is_Excluded' in df.columns else pd.Series(False, index=df.index))
+            work = df[excl] if want_excluded else df[~excl]
+            # Drop empty/unknown columns (consistent with _build_index_from_master).
+            if not work.empty:
+                work = work[~work['Transfection'].astype(str).str.contains("Empty", na=False)]
+                work = work[~work['Cell_Line'].astype(str).str.startswith("Unknown", na=False)]
+            if work.empty:
+                return pd.DataFrame(columns=cols)
+            return pd.DataFrame({
+                "Ligand": work['Ligand'].astype(str),
+                "Date": pd.to_datetime(work['Date'], errors='coerce').dt.strftime('%d.%m.%y'),
+                "Cell_Line": work['Cell_Line'].astype(str),
+                "Condition": work['Transfection'].astype(str),
+                "Replicate": work['Replicate'].astype(str),
+            })
+
+        # --- Bootstrap fallback (object-mode load, master_df not yet compiled) ---
+        if want_excluded or self.master_index is None or self.master_index.empty:
+            return pd.DataFrame(columns=cols)
+        return self.master_index[cols].copy()
+
     def refresh_filter_options(self):
         """Called during built master index. Updates dropdown options of date, cell line and condition."""
-        if self.master_index.empty: return
+        idx = self._option_source_df()
+        if idx.empty: return
 
         # Reset Variables
         self.var_lig.set("All")
@@ -506,10 +899,11 @@ class NCollectorApp:
         self.var_cell.set("All")
         self.var_cond.set("All")
         self.var_repl.set("All")
+        self.var_row.set("All")
         self.cb_row.config(state="disabled")
 
         # If only one ligand exists, default to it and disable the box.
-        unique_ligands = sorted(self.master_index['Ligand'].dropna().unique().tolist())
+        unique_ligands = sorted(idx['Ligand'].dropna().unique().tolist())
         if len(unique_ligands) == 1:
             single_ligand = unique_ligands[0]
             self.var_lig.set(single_ligand)
@@ -526,8 +920,13 @@ class NCollectorApp:
         """
         Dynamically updates the values of all dropdowns based on the current selection of others.
         trigger_source: The name of the field that triggered the update.
+
+        The OPTION SOURCE is mode-filtered via _option_source_df (exclude -> not-excluded
+        rows, revert -> excluded rows); everything else (cascading narrowing, Row
+        enable/disable) is unchanged.
         """
-        if self.master_index.empty: return
+        idx = self._option_source_df()
+        if idx.empty: return
 
         # Map Columns to their UI Components
         field_map = {
@@ -544,16 +943,16 @@ class NCollectorApp:
         # Iterate through each field
         for param, (target_var, target_widget) in field_map.items():
             # Built an all true mask
-            mask = pd.Series(True, index=self.master_index.index)
+            mask = pd.Series(True, index=idx.index)
 
             # Apply filters from ALL OTHER fields
             for curr_param, val in current_selections.items():
                 # Skip the changed dropdown (curr_param) so it doesn't filter itself
                 if curr_param != param and val != "All" and val != "":
-                    mask &= (self.master_index[curr_param].astype(str) == str(val))
+                    mask &= (idx[curr_param].astype(str) == str(val))
 
             # Extract unique values using the mask directly
-            valid_options = sorted(self.master_index.loc[mask, param].dropna().unique().tolist())
+            valid_options = sorted(idx.loc[mask, param].dropna().unique().tolist())
 
             # Update Widget
             target_widget['values'] = ["All"] + valid_options
@@ -611,25 +1010,17 @@ class NCollectorApp:
         when available (they are part of MASTER_COLUMNS, so normally all six)."""
         return [c for c in self._EXCLUSION_KEY_COLS if c in df.columns]
 
-    def _resolve_rule_to_targets(self, rule, norm_dates):
+    def _rule_mask(self, rule, norm_dates):
         """
-        Resolves one pending exclusion rule to a set of identity tuples directly on
-        master_df (the single source of truth). Same rule semantics as before,
-        including the "whole date" branch — which now resolves to every matching
-        well on that date rather than flagging PrResult.is_excluded.
-
-        Each returned tuple is keyed on self._EXCLUSION_KEY_COLS — i.e. not just
-        (File_Name, Well_ID) but also Ligand / Transfection / Cell_Line /
-        Main_Plasmids — so that a duplicate file name cannot cause the wrong rows
-        to be flagged. apply_exclusions builds its match mask from the same column
-        list, keeping the two sides consistent.
-
-        norm_dates is master_df['Date'] pre-normalised to the '%d.%m.%y' dropdown form.
+        Boolean mask over master_df for ONE pending criteria rule — the single source of
+        the pending-rule filter semantics, shared by both the exclude path
+        (_resolve_rule_to_targets) and the revert path (_resolve_rule_to_wells) so the two
+        can never drift. "All ligands" also covers the single-locked-ligand case
+        (cb_lig disabled). norm_dates is master_df['Date'] pre-normalised to '%d.%m.%y'.
         """
         df = self.master_df
         mask = pd.Series(True, index=df.index)
 
-        # "All ligands" also covers the single-locked-ligand case (cb_lig disabled).
         ligand_is_all = (rule.get('Ligand', 'All') in ("All", "")
                          or str(self.cb_lig['state']) == 'disabled')
         if not ligand_is_all:
@@ -647,6 +1038,25 @@ class NCollectorApp:
         row = rule.get('Row', 'All')
         if row not in ("All", ""):
             mask &= (df['Plate_Row'].astype(str) == str(row))
+        return mask
+
+    def _resolve_rule_to_targets(self, rule, norm_dates):
+        """
+        Resolves one pending exclusion rule to a set of identity tuples directly on
+        master_df (the single source of truth). Same rule semantics as before,
+        including the "whole date" branch — which now resolves to every matching
+        well on that date rather than flagging PrResult.is_excluded.
+
+        Each returned tuple is keyed on self._EXCLUSION_KEY_COLS — i.e. not just
+        (File_Name, Well_ID) but also Ligand / Transfection / Cell_Line /
+        Main_Plasmids — so that a duplicate file name cannot cause the wrong rows
+        to be flagged. apply_exclusions builds its match mask from the same column
+        list, keeping the two sides consistent.
+
+        norm_dates is master_df['Date'] pre-normalised to the '%d.%m.%y' dropdown form.
+        """
+        df = self.master_df
+        mask = self._rule_mask(rule, norm_dates)
 
         sub = df.loc[mask]
         if sub.empty:
@@ -654,6 +1064,20 @@ class NCollectorApp:
             return set()
         key_cols = self._exclusion_key_cols(df)
         return set(zip(*[sub[c].astype(str) for c in key_cols]))
+
+    def _resolve_rule_to_wells(self, rule, norm_dates):
+        """
+        Resolve one pending criteria rule to a set of (File_Name, Well_ID) tuples, using
+        the SAME mask as _resolve_rule_to_targets (via _rule_mask). Used by the revert
+        path, which needs plain (file, well) pairs for the restore.py API rather than the
+        full exclusion-identity tuples the add-only flag mask uses.
+        """
+        df = self.master_df
+        mask = self._rule_mask(rule, norm_dates)
+        sub = df.loc[mask]
+        if sub.empty:
+            return set()
+        return set(zip(sub['File_Name'].astype(str), sub['Well_ID'].astype(str)))
 
     def _build_recompute_config(self):
         """
@@ -688,6 +1112,28 @@ class NCollectorApp:
             vehicle_warning_threshold=veh_thr,
         )
 
+    def _sync_rule_history_from_master(self):
+        """
+        Re-derive self.rule_history_text from the AUTHORITATIVE Applied_Exclusions blob on
+        master_df.
+
+        rule_history_text is the app's running provenance string. apply_exclusions rebuilds
+        the whole blob from it, and the Excel export writes it out. restore.py, however,
+        rewrites master_df['Applied_Exclusions'] in place on a revert WITHOUT touching
+        rule_history_text — Calling this after any revert (and after a data-
+        source swap that brings its own blob) keeps rule_history_text equal to the blob.
+        """
+        blob = ""
+        if (self.master_df is not None and not self.master_df.empty
+                and 'Applied_Exclusions' in self.master_df.columns):
+            s = self.master_df['Applied_Exclusions'].dropna()
+            if not s.empty:
+                blob = str(s.iloc[0]).strip()
+        if not blob or blob.lower() == "none":
+            self.rule_history_text = ""
+        else:
+            self.rule_history_text = blob.replace(" || ", "\n")
+
     def apply_exclusions(self):
         """
         Unified exclusion entry point for BOTH fresh-load and CSV/import modes.
@@ -717,7 +1163,6 @@ class NCollectorApp:
             self.rule_history_text += "\n" + new_text_block
         else:
             self.rule_history_text = new_text_block
-        self.lbl_rules_summary.config(text=self.rule_history_text)  # Update GUI
 
         # --- Resolve every pending rule to (File_Name, Well_ID) targets on master_df ---
         norm_dates = pd.to_datetime(self.master_df['Date'], errors='coerce').dt.strftime('%d.%m.%y')
@@ -777,6 +1222,10 @@ class NCollectorApp:
         # --- Refresh the plot helper + re-evaluate quality-button availability ---
         self.refresh_plot_helper_options()
         self._update_quality_buttons_state()
+
+        # --- Refresh the shared Active-Exclusions view (both tabs) + Tab-2 comboboxes ---
+        # repopulates both active boxes and re-evaluates the Revert-mode enable state now that the excluded set changed.
+        self.refresh_active_exclusions() #
 
         self.log("--- Exclusions applied & data recomputed ---")
 
@@ -1225,6 +1674,9 @@ class NCollectorApp:
             # Reset raw data references so we know we are in "CSV Mode"
             self.experiment = []
             self.master_index = pd.DataFrame()  # Clear exclusion index
+            # The imported master carries its own Applied_Exclusions blob -> align
+            # rule_history_text with it
+            self._sync_rule_history_from_master()
 
             # Update GUI
             self.lbl_data_source.config(text=f"CSV: {os.path.basename(file_path)}")
@@ -1234,6 +1686,7 @@ class NCollectorApp:
             # and re-evaluate the on-demand quality-check buttons for this source.
             self.built_master_index(source="master")
             self._update_quality_buttons_state()
+            self.refresh_active_exclusions()
 
             # If schema was updated, offer to save and optionally enrich
             if was_modified:
@@ -1653,6 +2106,9 @@ class NCollectorApp:
         # quality-check buttons (donor data may now be present after enrichment).
         self.built_master_index(source="master")
         self._update_quality_buttons_state()
+        # Enrichment may make previously non-restorable wells restorable (Donor/Acceptor
+        # channels now present), so refresh the shared Active-Exclusions view.
+        self.refresh_active_exclusions()
 
         self.export_master_csv(is_updated=True)
 
@@ -1670,7 +2126,7 @@ class NCollectorApp:
                 self.summary_tree.delete(i)
             self.rule_history_text = ""
             self.main_plasmids_label.config(text="")
-            self.lbl_rules_summary.config(text="")
+            self.refresh_active_exclusions()
             self.clear_exclusion_list()
             self.btn_export_master.config(state="disabled")
             self.btn_export_excel.config(state="disabled")
@@ -1917,7 +2373,7 @@ class NCollectorApp:
 
         # Reset exclusion state
         self.rule_history_text = ""
-        self.lbl_rules_summary.config(text="")
+        self.refresh_active_exclusions()
         self.clear_exclusion_list()
         self.ignored_warnings.clear()
 
@@ -2011,6 +2467,8 @@ class NCollectorApp:
         self.master_df = self.compile_master_dataframe()
         self.refresh_plot_helper_options()
         self._update_quality_buttons_state()
+        # possible applied auto-warning exclusions
+        self.refresh_active_exclusions()
 
         self.log("\n--- Processing Complete & Plot Helper Ready ---")
 
