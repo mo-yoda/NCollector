@@ -17,7 +17,8 @@ from mapping import infer_ligand_info_from_master
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
                     ensure_master_csv_schema)
-from restore import (list_active_exclusions, restore_rule, restore_wells)
+from restore import (list_active_exclusions, restore_rule, restore_wells,
+                     build_resolve_ctx)
 from dialogs import ask_user_parameter, ask_ligand_choice, ask_ligand_layout
 
 logger = logging.getLogger("NCollector")
@@ -630,12 +631,19 @@ class NCollectorApp:
 
         config = self._build_recompute_config()
 
+        # One shared resolution context for the whole batch revert. Precomputes the
+        # invariant resolution work (normalised dates, stripped criteria columns, per-rule
+        # criteria masks, restorability) ONCE so reverting N rules is not O(N x N) full-master
+        # re-scans. Built on self.master_df (the object the restore calls mutate in place).
+        resolve_ctx = build_resolve_ctx(self.master_df)
+
         total_restored = 0
         total_blocked = 0
         all_nonrestorable = []
         affected_files = set()
         any_decomposed = False
 
+        # Collect for restoring summary
         def _tally(report):
             nonlocal total_restored, total_blocked, any_decomposed
             total_restored += report.get("restored_count", 0)
@@ -656,11 +664,11 @@ class NCollectorApp:
                 self.log(f"   [SKIP] '{self._display_label(label)}' has no revertable wells "
                          f"({len(nrk)} non-revertable) — not attempted.")
                 continue
-            _tally(restore_rule(self.master_df, label, config))
+            _tally(restore_rule(self.master_df, label, config, recompute=False, ctx=resolve_ctx))
 
         # (B) Per-well criteria reverts
         if pending_target:
-            for entry in list_active_exclusions(self.master_df):
+            for entry in list_active_exclusions(self.master_df, ctx=resolve_ctx):
                 entry_wells = set(entry["wells"])
                 inter = pending_target & entry_wells
                 if not inter:
@@ -671,15 +679,28 @@ class NCollectorApp:
                         [(f, w, r) for (f, w, r) in entry.get("non_restorable", []) if (f, w) in inter])
                     continue
                 if inter == entry_wells:
-                    _tally(restore_rule(self.master_df, entry["label"], config))
+                    _tally(restore_rule(self.master_df, entry["label"], config,
+                                        recompute=False, ctx=resolve_ctx))
                 else:
-                    _tally(restore_wells(self.master_df, entry["label"], inter, config))
+                    _tally(restore_wells(self.master_df, entry["label"], inter, config,
+                                         recompute=False, ctx=resolve_ctx))
 
         self.log(f"   [DONE] Restored {total_restored} well(s) across "
                  f"{len(affected_files)} file(s).")
         if any_decomposed:
             self.log("   [INFO] One or more rules were decomposed to per-well tokens "
                      "(partial restore).")
+
+        # --- Single batched recompute over the UNION of affected files ---
+        # The per-rule restore calls above ran with recompute=False: they flipped
+        # Is_Excluded and rewrote the Applied_Exclusions blob in place, but deferred the
+        # expensive derived-column recompute to here. Recomputing the union ONCE means each
+        # affected file is recomputed a single time instead of once per rule (the previous
+        # behaviour, which made a many-rule revert run the whole BRET pipeline N times).
+        # Must run BEFORE built_master_index / refresh_* below, which read derived columns.
+        if affected_files:
+            self.master_df = recompute_master_after_exclusion(
+                self.master_df, sorted(affected_files), config)
 
         # --- Refresh everything the revert touched ---
         # IMPORTANT: restore.py rewrote master_df['Applied_Exclusions'] in place but does not
