@@ -2,7 +2,7 @@ import logging
 import re
 import pandas as pd
 from models import LEGACY_COLUMN_DEFAULTS, APP_VERSION
-from processing import pristine_raw_for_file, _melt_wide
+from processing import pristine_raw_for_file, _melt_wide, parse_date_series
 from restore import migrate_blob_separator
 
 logger = logging.getLogger("NCollector")
@@ -95,7 +95,7 @@ def _fix_legacy_exclusion_bug(df: pd.DataFrame, tag: str, regex_suffix: str,
 
     # Normalize dates once for comparison (warnings use dd.mm.yy format)
     df_date_normalized = (
-        pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+        parse_date_series(df['Date'], context="ensure_master_csv_schema/exclusion-fix").dt.strftime('%d.%m.%y')
         if 'Date' in df.columns else pd.Series()
     )
 
@@ -171,6 +171,19 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
                   _modified(f"Both '{mangled}' and '{canonical}' present; kept canonical "
                             f"'{canonical}' (backfilled NaNs from '{mangled}') and dropped "
                             f"'{mangled}'.")
+
+    # --- Canonicalize the stored Date column to ISO "%Y-%m-%d" (ONCE) ---
+    # Masters round-tripped through R/Excel under European (day-first) locales may come back
+    # reformatted (dd.mm.yy, dd/mm/yyyy, dd-mm-yy, ...). Rewrite as canonical ISO, so a re-saved
+    # master is clean ISO.
+    if 'Date' in df.columns:
+        _original_date = df['Date'].astype('string')
+        _iso_date = parse_date_series(df['Date'], context="ensure_master_csv_schema").dt.strftime('%Y-%m-%d')
+        _rewrite = _iso_date.notna() & (_iso_date.astype('string') != _original_date.str.strip())
+        if _rewrite.any():
+            df.loc[_rewrite, 'Date'] = _iso_date[_rewrite]
+            _modified(f"Canonicalized 'Date' to ISO YYYY-MM-DD for {int(_rewrite.sum())} "
+                      f"row(s) (externally reformatted).")
 
     # Capture the master's stored NCollector_version
     stored_version = None

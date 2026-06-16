@@ -1,4 +1,5 @@
 import logging
+import re
 import pandas as pd
 
 from models import (PlateColMetadata, PrResult, ProtocolData, ProcessingConfig,
@@ -6,6 +7,68 @@ from models import (PlateColMetadata, PrResult, ProtocolData, ProcessingConfig,
 from mapping import get_cell_line_map, get_transfection_map, get_ligand_map, built_conc_dic
 
 logger = logging.getLogger("NCollector")
+
+# Detects a leading 4-digit year, e.g. "2026-04-10", "2026/04/10", "2026.04.10".
+_ISO_YEAR_FIRST_RE = re.compile(r'^\s*\d{4}[-/.]')
+
+
+def parse_date_series(s: pd.Series, *, context: str = "", log_examples: int = 5) -> pd.Series:
+    """
+    Single source of truth for reading the master's "Date" column.
+
+    Masters edited outside the app in R/Excel come back reformatted under European
+    (day-first) locales: dd.mm.yy (DE/AT), dd/mm/yyyy (UK), dd-mm-yy, mixed 2/4-digit
+    years, etc. This parses a Series of unknown / possibly-mixed European date strings
+    into datetimes deterministically and WITHOUT the pandas "Could not infer format"
+    warning. There is no month-first/US data, so anything that is not ISO year-first is
+    parsed day-first.
+
+    Rules:
+      * Leading 4-digit year (^\\d{4}[-/.]) -> parsed as ISO "%Y-%m-%d" (the app's own
+        native output; separators normalised to '-' first so "2026/04/10" also works).
+      * Everything else -> day-first (dayfirst=True, format="mixed"), tolerating
+        '-', '.', '/' separators and 2- or 4-digit years. Never month-first.
+      * errors='coerce': unparseable values become NaT and are LOGGED (count + a few
+        examples) so bad data is visible rather than silent.
+
+    Idempotent on already-datetime input (returned unchanged). Genuinely empty/missing
+    inputs are not counted as parse failures.
+
+        "context"   only for debug logging
+    """
+    if pd.api.types.is_datetime64_any_dtype(s): # if already datetime, skip
+        return s
+
+    stripped = s.astype("string").str.strip()
+    missing_in = stripped.isna() | (stripped == "")
+
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]") # NaT default, overwrite in branches
+
+    # Branch 1: ISO year-first (the app's own output) -- unambiguous, vectorised.
+    iso_mask = stripped.str.match(_ISO_YEAR_FIRST_RE).fillna(False)
+    if iso_mask.any():
+        iso_norm = stripped[iso_mask].str.replace(r'[/.]', '-', regex=True)
+        out.loc[iso_mask] = pd.to_datetime(iso_norm, format="%Y-%m-%d", errors="coerce")
+
+    # Branch 2: everything else -> day-first. format="mixed" suppresses the inference
+    # warning while dayfirst=True fixes the ordering for European data.
+    day_mask = (~iso_mask) & (~missing_in)
+    if day_mask.any():
+        out.loc[day_mask] = pd.to_datetime(
+            stripped[day_mask], dayfirst=True, format="mixed", errors="coerce")
+
+    # Visibility: report values that genuinely failed to parse (ignore empty inputs).
+    failed = out.isna() & (~missing_in)
+    n_failed = int(failed.sum())
+    if n_failed:
+        examples = list(stripped[failed].dropna().unique()[:log_examples])
+        ctx = f" [{context}]" if context else ""
+        logger.warning(
+            "parse_date_series%s: %d/%d date value(s) could not be parsed and were set "
+            "to NaT. Examples: %s", ctx, n_failed, int((~missing_in).sum()), examples)
+
+    return out
+
 
 # --- Calculation Helpers --- #
 

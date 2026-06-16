@@ -12,7 +12,7 @@ from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COL
 from parsing import scan_and_load_folders
 from processing import (process_bret_measurement, calculate_relative_time, map_plate_metadata,
                         recompute_master_after_exclusion, reconstruct_file_inputs,
-                        check_luminescence, check_vehicle_wells, coerce_bool)
+                        check_luminescence, check_vehicle_wells, coerce_bool, parse_date_series)
 from mapping import infer_ligand_info_from_master
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
@@ -577,7 +577,7 @@ class NCollectorApp:
         pending_target = set()
         if self.pending_exclusions:
             df = self.master_df
-            norm_dates = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+            norm_dates = parse_date_series(df['Date'], context="_collect_revert_inputs").dt.strftime('%d.%m.%y')
             excl = (df['Is_Excluded'].map(coerce_bool)
                     if 'Is_Excluded' in df.columns else pd.Series(False, index=df.index))
             excluded_set = set(zip(df.loc[excl, 'File_Name'].astype(str),
@@ -898,7 +898,7 @@ class NCollectorApp:
                 return pd.DataFrame(columns=cols)
             return pd.DataFrame({
                 "Ligand": work['Ligand'].astype(str),
-                "Date": pd.to_datetime(work['Date'], errors='coerce').dt.strftime('%d.%m.%y'),
+                "Date": parse_date_series(work['Date'], context="_option_source_df").dt.strftime('%d.%m.%y'),
                 "Cell_Line": work['Cell_Line'].astype(str),
                 "Condition": work['Transfection'].astype(str),
                 "Replicate": work['Replicate'].astype(str),
@@ -1186,7 +1186,7 @@ class NCollectorApp:
             self.rule_history_text = new_text_block
 
         # --- Resolve every pending rule to (File_Name, Well_ID) targets on master_df ---
-        norm_dates = pd.to_datetime(self.master_df['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+        norm_dates = parse_date_series(self.master_df['Date'], context="apply_exclusions").dt.strftime('%d.%m.%y')
         targets = set()
         for rule in self.pending_exclusions:
             targets |= self._resolve_rule_to_targets(rule, norm_dates)
@@ -2322,7 +2322,7 @@ class NCollectorApp:
 
         work = df.copy()
         # Dropdown date string (consistent with the object branch '%d.%m.%y').
-        work['_DateStr'] = pd.to_datetime(work['Date'], errors='coerce').dt.strftime('%d.%m.%y')
+        work['_DateStr'] = parse_date_series(work['Date'], context="_build_index_from_master").dt.strftime('%d.%m.%y')
         work['_ColIdx'] = work['Well_ID'].astype(str).str[1:]
         work['_Excl'] = (work['Is_Excluded'].map(coerce_bool)
                          if 'Is_Excluded' in work.columns else False)
