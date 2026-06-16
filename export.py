@@ -39,6 +39,14 @@ _EXCLUSION_DATA_COLS = [
     "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean",
 ]
 
+# Legacy/mangled header -> canonical schema name.
+# in case of R-round trip of masters (turned the parenthesized time columns to dots)
+_LEGACY_TIME_COLUMN_ALIASES = {
+    "Time_.min.":   "Time_(min)",
+    "PR_Time.min.": "PR_Time(min)",
+    "Time (min)":   "Time_(min)",
+}
+
 
 def _fix_legacy_exclusion_bug(df: pd.DataFrame, tag: str, regex_suffix: str,
                               match_col: str, label: str) -> str | None:
@@ -144,6 +152,25 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
         modified.append(msg)
         bugs_fixed.append(msg)
         logger.info(msg)
+
+    # --- Canonicalize legacy/mangled header names FIRST ---
+    # Must run before the missing_cols computation below: otherwise a column like
+    # "PR_Time(min)" hiding under its mangled name "PR_Time.min." looks "missing" and
+    # gets overwritten with a NaN default, silently discarding the real data.
+    for mangled, canonical in _LEGACY_TIME_COLUMN_ALIASES.items():
+        if mangled not in df.columns:
+            continue  # idempotent: no-op when names are already canonical
+        if canonical not in df.columns:
+            df = df.rename(columns={mangled: canonical})
+            _modified(f"Renamed mangled column '{mangled}' -> '{canonical}'")
+        else:
+        # Collision: both names present. Prefer the canonical column and only
+        # backfill its NaNs from the mangled one, so no data is silently dropped.
+                  df[canonical] = df[canonical].combine_first(df[mangled])
+                  df = df.drop(columns=[mangled])
+                  _modified(f"Both '{mangled}' and '{canonical}' present; kept canonical "
+                            f"'{canonical}' (backfilled NaNs from '{mangled}') and dropped "
+                            f"'{mangled}'.")
 
     # Capture the master's stored NCollector_version
     stored_version = None
