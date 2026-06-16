@@ -1672,7 +1672,7 @@ class NCollectorApp:
         if not file_path: return
 
         try:
-            df = pd.read_csv(file_path)
+            df = pd.read_csv(file_path, low_memory=False)
 
             # Validation
             required = ["Transfection", "Cell_Line", "Ligand", "Kinetic_Mean"]
