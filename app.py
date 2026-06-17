@@ -79,7 +79,6 @@ class NCollectorApp:
         self.conc_row_lookup = {}  # Maps display strings to filter criteria for conc layout
 
         # --- GUI Variables ---
-        self.folder_path = tk.StringVar(value="No folder selected.")
         self.var_labeling_is_checked = tk.BooleanVar(value=False)
         self.var_lum_threshold = tk.IntVar(value=100)
         self.var_vehicle_threshold = tk.DoubleVar(value=0.2)
@@ -90,7 +89,7 @@ class NCollectorApp:
         self.notebook = None
         # Tab 1
         self.tab_import = None
-        self.path_label = None
+        self.subfolders_label = None
         self.load_files_button = None
         self.main_plasmids_label = None
         self.summary_tree = None
@@ -121,6 +120,8 @@ class NCollectorApp:
         # Tab 3
         self.tab_plot_helper = None
         self.lbl_data_source = None
+        self.lbl_data_source_tab1 = None  # Tab 1 mirror of the data-source label
+        self.lbl_csv_source = None         # Tab 1 CSV-only label (imported CSV name)
         self.lb_ligands = None
         self.lb_exp_cells = None
         self.lb_exp_trans = None
@@ -165,31 +166,16 @@ class NCollectorApp:
         self.setup_plot_helper_tab()
 
     def setup_import_tab(self):
-        # Select Folder button
-        tk.Button(self.tab_import, text="Select folder containing results of experiment",
-                  command=self.select_folder).pack(pady=10, padx=10)
+        # --- Three side-by-side boxes: Loading Specs | Folder Import | Master Import ---
+        io_frame = tk.Frame(self.tab_import)
+        io_frame.pack(fill="x", padx=10, pady=10)
+        io_frame.columnconfigure(0, weight=0)  # loading specs (natural width, far left)
+        io_frame.columnconfigure(1, weight=1)  # folder box (expands)
+        io_frame.columnconfigure(2, weight=0)  # master box (natural width)
 
-        # Display label for path
-        self.path_label = tk.Label(self.tab_import, textvariable=self.folder_path, wraplength=700, justify="left",
-                                   font=('Arial', 10))
-        self.path_label.pack(pady=0, padx=15, anchor="nw")
-
-        # Load frame
-        load_frame = tk.Frame(self.tab_import)
-        load_frame.pack(pady=5, fill="x", padx=10)
-        # Weight setting to place load button in the middle
-        load_frame.columnconfigure(0, weight=4)
-        load_frame.columnconfigure(1, weight=1)
-
-        # Load button
-        self.load_files_button = tk.Button(load_frame, text="Load Files", state="disabled",
-                                           command=self.collect_files)
-        # self.load_files_button.pack(padx=10)
-        self.load_files_button.grid(row=0, column=0, padx=5, pady=0, sticky="sew")
-
-        # Loading specs
-        load_settings_frame = tk.LabelFrame(load_frame, text="Loading Specs")
-        load_settings_frame.grid(row=0, column=1, sticky="ew")
+        # === BOX 1 (far left): Loading Specs ===
+        load_settings_frame = tk.LabelFrame(io_frame, text="Loading Specs")
+        load_settings_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         load_settings_frame.columnconfigure(2, weight=1)  # let buttons stretch
 
         # Row 0 — Labeling correction (no button on this row)
@@ -220,9 +206,48 @@ class NCollectorApp:
                                            state="disabled", command=self.rerun_vehicle_check)
         self.btn_rerun_vehicle.grid(row=2, column=2, sticky="ew", padx=(10, 8), pady=(4, 6))
 
+        # === BOX 2 (center): Import from experiment folder ===
+        box_folder = tk.LabelFrame(io_frame, text="Import from Experiment Folder")
+        box_folder.grid(row=0, column=1, sticky="nsew", padx=5)
+
+        # Select Folder button
+        tk.Button(box_folder, text="Select folder containing results of experiment",
+                  command=self.select_folder).pack(fill="x", anchor="w", padx=8, pady=(8, 4))
+
+        # Found subfolders display (path itself is logged, not shown here)
+        self.subfolders_label = tk.Label(box_folder, text="No folder selected.", wraplength=320,
+                                         justify="left", font=('Arial', 10))
+        self.subfolders_label.pack(anchor="nw", padx=8, pady=0)
+
+        # Load Files button
+        self.load_files_button = tk.Button(box_folder, text="Load Files", state="disabled",
+                                           command=self.collect_files)
+        self.load_files_button.pack(fill="x", padx=8, pady=5)
+
+        # === BOX 3 (right): Import Master CSV ===
+        box_master = tk.LabelFrame(io_frame, text="Import Master CSV")
+        box_master.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
+
+        # Import Master CSV button — same handler as Tab 3
+        tk.Button(box_master, text="Import Master CSV",
+                  command=self.import_master_csv).pack(anchor="w", padx=8, pady=(8, 4))
+
+        # CSV-specific label: shows the imported CSV file name (CSV imports only,
+        # not experiment-folder loads). "No CSV loaded" when no master CSV imported.
+        self.lbl_csv_source = tk.Label(box_master, text="No CSV loaded",
+                                       justify="left", wraplength=180)
+        self.lbl_csv_source.pack(anchor="w", padx=8, pady=(0, 8))
+
         # Collected Ns frame
         loaded_data_frame = tk.LabelFrame(self.tab_import, text="Loaded Data")
         loaded_data_frame.pack(fill="both", expand=True,  padx=10, pady=5)
+
+        # Data Source (mirrors the Tab 3 data-source label), above Main Plasmids
+        ds_frame = tk.Frame(loaded_data_frame)
+        ds_frame.pack(anchor="w", padx=8, pady=(6, 0))
+        tk.Label(ds_frame, text="Data Source", font=("Arial", 9, "bold")).pack(side="left")
+        self.lbl_data_source_tab1 = tk.Label(ds_frame, text="No Data Loaded", justify="left")
+        self.lbl_data_source_tab1.pack(side="left", padx=(6, 0))
 
         # Label to display Main Plasmids
         self.main_plasmids_label = tk.Label(loaded_data_frame, text="", justify="left", font=("Arial", 10, "bold"))
@@ -279,6 +304,19 @@ class NCollectorApp:
         self.btn_export_excel = tk.Button(export_frame, text="Export Excel Report (Default)", state="disabled",
                                           command=self.export_excel_report)
         self.btn_export_excel.pack(side="left", fill="x", expand=True, padx=5, pady=10)
+
+    def _set_data_source(self, text):
+        """Update both the Tab 3 and Tab 1 data-source labels in sync."""
+        if self.lbl_data_source is not None:
+            self.lbl_data_source.config(text=text)
+        if self.lbl_data_source_tab1 is not None:
+            self.lbl_data_source_tab1.config(text=text)
+
+    def _set_csv_label(self, name):
+        """Tab 1 CSV-only label: show the imported CSV file name, or 'No CSV loaded'.
+        Reflects master-CSV imports only — never experiment-folder loads."""
+        if self.lbl_csv_source is not None:
+            self.lbl_csv_source.config(text=name if name else "No CSV loaded")
 
     def on_checkbox_toggle(self):
         if self.var_labeling_is_checked.get():
@@ -1397,13 +1435,18 @@ class NCollectorApp:
         # --- Import Master CSV ---
         src_frame = tk.Frame(self.tab_plot_helper)
         src_frame.pack(fill="x", padx=10, pady=10)
-        tk.Label(src_frame, text="Data Source", font=("Arial", 9, "bold")).pack(side="top")
 
-        self.lbl_data_source = tk.Label(src_frame, text="No Data Loaded")
-        self.lbl_data_source.pack(side="left", padx=10)
-
+        # Import button on the right; data-source title + value left-aligned above it
         tk.Button(src_frame, text="Import Master CSV",
                   command=self.import_master_csv).pack(side="right")
+
+        src_label_frame = tk.Frame(src_frame)
+        src_label_frame.pack(side="left", anchor="w")
+        tk.Label(src_label_frame, text="Data Source",
+                 font=("Arial", 9, "bold")).pack(anchor="w")
+        self.lbl_data_source = tk.Label(src_label_frame, text="No Data Loaded",
+                                        justify="left")
+        self.lbl_data_source.pack(anchor="w")
 
         # --- Filter Selection ---
         sel_frame = tk.LabelFrame(self.tab_plot_helper, text="Select Data to Include")
@@ -1544,7 +1587,7 @@ class NCollectorApp:
         """Populates the list boxes in the plot helper from master df (opt. imported csv file)."""
         if self.master_df is None or self.master_df.empty:
             self.btn_run_plot_helper.config(state="disabled")
-            self.lbl_data_source.config(text="No Data")
+            self._set_data_source("No Data")
             return
 
         if not self.experiment:
@@ -1553,7 +1596,7 @@ class NCollectorApp:
         else:
             #  Fresh Analysis mode
             experiment = self.master_df['Main_Plasmids'].unique()[0] if 'Main_Plasmids' in self.master_df.columns else "Experiment"
-            self.lbl_data_source.config(text=f"Internal: {experiment}")
+            self._set_data_source(f"Internal: {experiment}")
 
         self.btn_run_plot_helper.config(state="normal")
 
@@ -1700,7 +1743,14 @@ class NCollectorApp:
             self._sync_rule_history_from_master()
 
             # Update GUI
-            self.lbl_data_source.config(text=f"CSV: {os.path.basename(file_path)}")
+            self._set_data_source(f"CSV: {os.path.basename(file_path)}")
+            self._set_csv_label(os.path.basename(file_path))
+            # Populate the Loaded Data "Main Plasmids" label from the imported master
+            if 'Main_Plasmids' in df.columns:
+                mp_vals = [str(v) for v in pd.unique(df['Main_Plasmids'].dropna())]
+                self.main_plasmids_label.config(text=", ".join(mp_vals))
+            else:
+                self.main_plasmids_label.config(text="")
             self.refresh_plot_helper_options()
 
             # Build the dropdown/summary index directly from master_df (CSV mode)
@@ -1708,6 +1758,19 @@ class NCollectorApp:
             self.built_master_index(source="master")
             self._update_quality_buttons_state()
             self.refresh_active_exclusions()
+
+            # Enable exports for the imported master (both run purely off master_df)
+            self.btn_export_master.config(state="normal")
+            self.btn_export_excel.config(state="normal")
+
+            # PROMPT 2 HOOK (merge / multi-import): when the merge / multi-import path
+            # lands, it ALSO swaps/mutates master_df, so it must call the same trio after
+            # the merged master is in place:
+            #     self.built_master_index(source="master")
+            #     self.refresh_active_exclusions()
+            #     self.refresh_plot_helper_options()  (+ self._update_quality_buttons_state())
+            # so the comboboxes, both Active-Exclusions boxes, and the Revert-mode state all
+            # reflect the merged data.
 
             # If schema was updated, offer to save and optionally enrich
             if was_modified:
@@ -2147,14 +2210,16 @@ class NCollectorApp:
                 self.summary_tree.delete(i)
             self.rule_history_text = ""
             self.main_plasmids_label.config(text="")
+            self._set_csv_label(None)  # selecting a folder is not a CSV import
             self.refresh_active_exclusions()
             self.clear_exclusion_list()
             self.btn_export_master.config(state="disabled")
             self.btn_export_excel.config(state="disabled")
 
 
-            # Update GUI immediately
-            self.folder_path.set(f"Selected Path: {self.directory}\n\nScanning for files...")
+            # Log selected path
+            self.log(f"Selected path: {self.directory}\n   Scanning for files...")
+            self.subfolders_label.config(text="Scanning for files...")
             self.load_files_button.config(state="disabled")
             self.main_gi.update()
 
@@ -2167,13 +2232,16 @@ class NCollectorApp:
             if self.subfolder_paths_with_files:
                 count = len(self.subfolder_paths_with_files)
                 folder_names = [os.path.basename(path) for path in self.subfolder_paths_with_files]
-                folder_names_string = "\n ".join(folder_names)
-                self.folder_path.set(
-                    f"Selected Path: {self.directory}\n\n Found following subfolders with xlsx/xlsm files:\n {folder_names_string}")
+                folder_names_string = "\n   ".join(folder_names)
+                self.log(f"Selected path: {self.directory}\n   "
+                         f"Found {count} subfolder(s) with xlsx/xlsm files:\n   {folder_names_string}")
+                self.subfolders_label.config(
+                    text=f"Found {count} subfolder(s) with xlsx/xlsm files:\n   " + "\n   ".join(folder_names))
                 self.load_files_button.config(state="normal")
                 logger.info(f"Found {count} folders: \n {folder_names_string}")
             else:
-                self.folder_path.set(f"Error: No .xlsx or .xlsm files found in {self.directory} or any subfolder.")
+                self.log(f"[ERROR] No .xlsx or .xlsm files found in {self.directory} or any subfolder.")
+                self.subfolders_label.config(text="No .xlsx or .xlsm files found in this folder.")
                 self.load_files_button.config(state="disabled")
                 logger.warning(f"No .xlsx or .xlsm files found starting from: {self.directory}")
 
@@ -2748,7 +2816,7 @@ class NCollectorApp:
             self.master_df.to_csv(file_path, index=False)
             csv_name = os.path.basename(file_path)
             self.log(f"   [SUCCESS] Saved {'updated ' if is_updated else ''}Master CSV: {csv_name}")
-            self.lbl_data_source.config(text=f"CSV: {csv_name}")
+            self._set_data_source(f"CSV: {csv_name}")
         except Exception as e:
             self.log(f"   [ERROR] Failed to save CSV: {e}")
 
