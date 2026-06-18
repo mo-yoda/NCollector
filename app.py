@@ -375,6 +375,9 @@ class NCollectorApp:
         self.var_cond = tk.StringVar(value="All")
         self.var_repl = tk.StringVar(value="All")
         self.var_row = tk.StringVar(value="All")
+        # Scope (Main_Plasmids + File_Name) selectors shown only on post-merge masters (see_refresh_scope_selectors)
+        self.var_main = tk.StringVar(value="All")
+        self.var_file = tk.StringVar(value="All")
 
         # 1. Ligand Dropdown
         tk.Label(filter_frame, text="Ligand:").grid(row=0, column=0, padx=5, pady=5)
@@ -417,9 +420,36 @@ class NCollectorApp:
         self.cb_row.pack(side="left", padx=5)
         self.cb_row['values'] = ["All", "A", "B", "C", "D", "E", "F", "G", "H"]
 
+        # Scope filters (Main_Plasmids + File_Name) shown only on post-merge masters
+        # (populated by _refresh_scope_selectors)
+        scope_frame = tk.Frame(filter_frame)
+        scope_frame.grid(row=2, column=0, columnspan=8, pady=5, sticky="w")
+
+        self.lbl_main = tk.Label(scope_frame, text="Main Plasmids:")
+        self.lbl_main.grid(row=0, column=0, padx=5)
+        self.cb_main = ttk.Combobox(scope_frame, textvariable=self.var_main,
+                                    state="readonly", width=18)
+        self.cb_main.grid(row=0, column=1, padx=5)
+        self.cb_main['values'] = ["All"]
+        self.cb_main.bind("<<ComboboxSelected>>",
+                          lambda e: self.update_dropdown_options("Main_Plasmids"))
+
+        self.lbl_file = tk.Label(scope_frame, text="Source File:")
+        self.lbl_file.grid(row=0, column=2, padx=5)
+        self.cb_file = ttk.Combobox(scope_frame, textvariable=self.var_file,
+                                    state="readonly", width=22)
+        self.cb_file.grid(row=0, column=3, padx=5)
+        self.cb_file['values'] = ["All"]
+        self.cb_file.bind("<<ComboboxSelected>>",
+                          lambda e: self.update_dropdown_options("File_Name"))
+
+        # Hidden until a master proves them meaningful (grid_remove preserves placement).
+        self.lbl_main.grid_remove(); self.cb_main.grid_remove()
+        self.lbl_file.grid_remove(); self.cb_file.grid_remove()
+
         # Buttons
         btn_frame = tk.Frame(filter_frame)
-        btn_frame.grid(row=2, column=0, columnspan=6, pady=10)
+        btn_frame.grid(row=3, column=0, columnspan=6, pady=10)
 
         tk.Button(btn_frame, text="Add Rule to List", command=self.add_exclusion_rule).pack(side="left", padx=5)
         tk.Button(btn_frame, text="Clear List", command=self.clear_exclusion_list).pack(side="left", padx=5)
@@ -462,7 +492,7 @@ class NCollectorApp:
         self._update_excl_action_buttons()
         self._apply_tab2_selectability()
 
-    # --- Exclude/Revert mode plumbing (Prompt 5) ----------------------------------- #
+    # --- Exclude/Revert mode ----------------------------------- #
 
     def _on_excl_mode_change(self):
         """
@@ -912,14 +942,17 @@ class NCollectorApp:
         test) so that REVERT mode can surface even fully-excluded columns, which
         built_master_index drops from self.master_index. Returns a frame carrying exactly
         the vocabulary columns the cascading logic expects: Ligand, Date ('%d.%m.%y'),
-        Cell_Line, Condition (<- Transfection), Replicate.
+        Cell_Line, Condition (<- Transfection), Replicate, plus the scope columns
+        Main_Plasmids and File_Name (used by the cascade only when their selectors are
+        shown; otherwise they sit at "All" and act as no-ops).
 
         Bootstrap fallback: at the very first object-mode load, built_master_index ->
         refresh_filter_options runs BEFORE master_df is compiled. In that window master_df
         is empty, so we fall back to self.master_index (which at load time already holds the
         clean, exclusion-free vocabulary). Only valid for exclude mode (no exclusions yet).
         """
-        cols = ["Ligand", "Date", "Cell_Line", "Condition", "Replicate"]
+        cols = ["Ligand", "Date", "Cell_Line", "Condition", "Replicate",
+                "Main_Plasmids", "File_Name"]
         want_excluded = (self.var_excl_mode is not None
                          and self.var_excl_mode.get() == "revert")
 
@@ -940,6 +973,8 @@ class NCollectorApp:
                 "Cell_Line": work['Cell_Line'].astype(str),
                 "Condition": work['Transfection'].astype(str),
                 "Replicate": work['Replicate'].astype(str),
+                "Main_Plasmids": work['Main_Plasmids'].astype(str),
+                "File_Name": work['File_Name'].astype(str),
             })
 
         # --- Bootstrap fallback (object-mode load, master_df not yet compiled) ---
@@ -959,7 +994,12 @@ class NCollectorApp:
         self.var_cond.set("All")
         self.var_repl.set("All")
         self.var_row.set("All")
+        self.var_main.set("All")
+        self.var_file.set("All")
         self.cb_row.config(state="disabled")
+
+        # Show + populate the Main_Plasmids + File_Name scope selectors iff meaningful
+        self._refresh_scope_selectors()
 
         # If only one ligand exists, default to it and disable the box.
         unique_ligands = sorted(idx['Ligand'].dropna().unique().tolist())
@@ -974,6 +1014,50 @@ class NCollectorApp:
         # Trigger the update logic (trigger_source=None means full reset)
         trigger = "Ligand" if len(unique_ligands) == 1 else None
         self.update_dropdown_options(trigger_source=trigger)
+
+    def _refresh_scope_selectors(self):
+        """
+        Show/populate the Main_Plasmids and File_Name scope selectors only when meaningful
+        (case only possible for merged masters), and otherwise hide them and reset their vars to "All".
+
+        Visibility rules (each independent):
+          * Main_Plasmids — shown iff master_df['Main_Plasmids'].nunique() > 1, i.e. the
+            master spans more than one experiment (a merged blob).
+          * File_Name — shown iff some File_Name carries the merge auto-rename marker '#'
+            (a FILENAME_DATA_COLLISION resolved during a blob merge).
+
+        Option lists are seeded from the master index (Main_Plasmids, File_Name) with an
+        "All" sentinel first; update_dropdown_options then refines them as part of the
+        cascade.
+        """
+        df = self.master_df
+        idx = self.master_index
+
+        # --- Main_Plasmids ---
+        show_main = (df is not None and not df.empty and 'Main_Plasmids' in df.columns
+                     and df['Main_Plasmids'].nunique(dropna=True) > 1)
+        main_vals = (sorted(idx['Main_Plasmids'].dropna().astype(str).unique().tolist())
+                     if idx is not None and not idx.empty and 'Main_Plasmids' in idx.columns
+                     else [])
+        self.cb_main['values'] = ["All"] + main_vals
+        if show_main:
+            self.lbl_main.grid(); self.cb_main.grid()
+        else:
+            self.var_main.set("All")
+            self.lbl_main.grid_remove(); self.cb_main.grid_remove()
+
+        # --- File_Name ---
+        show_file = (df is not None and not df.empty and 'File_Name' in df.columns
+                     and df['File_Name'].astype(str).str.contains('#', regex=False, na=False).any())
+        file_vals = (sorted(idx['File_Name'].dropna().astype(str).unique().tolist())
+                     if idx is not None and not idx.empty and 'File_Name' in idx.columns
+                     else [])
+        self.cb_file['values'] = ["All"] + file_vals
+        if show_file:
+            self.lbl_file.grid(); self.cb_file.grid()
+        else:
+            self.var_file.set("All")
+            self.lbl_file.grid_remove(); self.cb_file.grid_remove()
 
     def update_dropdown_options(self, trigger_source=None):
         """
@@ -993,7 +1077,10 @@ class NCollectorApp:
             "Date": (self.var_date, self.cb_date),
             "Cell_Line": (self.var_cell, self.cb_cell),
             "Condition": (self.var_cond, self.cb_cond),
-            "Replicate": (self.var_repl, self.cb_rep)
+            "Replicate": (self.var_repl, self.cb_rep),
+            # Scope selectors, only shown if relevant (otherwise hidden with "All")
+            "Main_Plasmids": (self.var_main, self.cb_main),
+            "File_Name": (self.var_file, self.cb_file),
         }
 
         # Get current selection
@@ -1039,13 +1126,20 @@ class NCollectorApp:
             "Cell_Line": self.var_cell.get(),
             "Condition": self.var_cond.get(),
             "Replicate": self.var_repl.get(),
-            "Row": self.var_row.get()
+            "Row": self.var_row.get(),
+            "Main_Plasmids": self.var_main.get(),
+            "File_Name": self.var_file.get(),
         }
 
         # Check for duplicates or empty
         rule_str = f"Ligand: {rule['Ligand']} | Date: {rule['Date']} | "\
                    f"Cell: {rule['Cell_Line']} | Cond: {rule['Condition']} | "\
                    f"Rep:{rule['Replicate']} | Row:{rule['Row']}"
+        # Scope segments are appended ONLY when meaningful (not "All"/empty)
+        if rule['Main_Plasmids'] not in ("All", ""):
+            rule_str += f" | Main: {rule['Main_Plasmids']}"
+        if rule['File_Name'] not in ("All", ""):
+            rule_str += f" | File: {rule['File_Name']}"
 
         self.pending_exclusions.append(rule)
         self.lb_exclusions.insert(tk.END, rule_str)
@@ -1097,6 +1191,13 @@ class NCollectorApp:
         row = rule.get('Row', 'All')
         if row not in ("All", ""):
             mask &= (df['Plate_Row'].astype(str) == str(row))
+        # Scope narrowing (post-merge masters). Skipped when "All"/empty
+        main = rule.get('Main_Plasmids', 'All')
+        if main not in ("All", "") and 'Main_Plasmids' in df.columns:
+            mask &= (df['Main_Plasmids'].astype(str) == str(main))
+        fname = rule.get('File_Name', 'All')
+        if fname not in ("All", "") and 'File_Name' in df.columns:
+            mask &= (df['File_Name'].astype(str) == str(fname))
         return mask
 
     def _resolve_rule_to_targets(self, rule, norm_dates):
@@ -1763,7 +1864,7 @@ class NCollectorApp:
             self.btn_export_master.config(state="normal")
             self.btn_export_excel.config(state="normal")
 
-            # PROMPT 2 HOOK (merge / multi-import): when the merge / multi-import path
+            # HOOK (merge / multi-import): when the merge / multi-import path
             # lands, it ALSO swaps/mutates master_df, so it must call the same trio after
             # the merged master is in place:
             #     self.built_master_index(source="master")
@@ -2351,6 +2452,10 @@ class NCollectorApp:
         rows_str = "ABCDEFGH"
 
         for folder in self.experiment:
+            # Match the Main_Plasmids string exactly as the compile path writes it onto master_df
+            proto = getattr(folder, "protocol", None)
+            main_plasmids = (" + ".join(proto.main_plasmids)
+                             if proto and proto.main_plasmids else "Unknown")
             for result in folder.results:
                 if not result.column_metadata: continue
                 if result.is_excluded: continue
@@ -2371,6 +2476,7 @@ class NCollectorApp:
                         "Condition": meta.condition_name,
                         "Ligand": meta.ligand_identity,
                         "Replicate": meta.replicate,
+                        "Main_Plasmids": main_plasmids,
                     })
 
         result_df = self._finalize_index(records)
@@ -2412,6 +2518,7 @@ class NCollectorApp:
                 "Condition": first['Transfection'],
                 "Ligand": first['Ligand'],
                 "Replicate": str(first['Replicate']),
+                "Main_Plasmids": str(first['Main_Plasmids']) if 'Main_Plasmids' in g.columns else "Unknown",
             })
 
         return self._finalize_index(records)
