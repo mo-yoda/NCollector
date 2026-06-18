@@ -72,11 +72,13 @@ LEGACY_LABEL = "Legacy exclusions"
 # the *_DEFAULTS dicts list the canonical criteria keys with their "match-all" defaults
 # ("All"/"" both mean "do not filter on this field").
 _MANUAL_KEY_MAP = {"Ligand": "Ligand", "Date": "Date", "Cell": "Cell_Line",
-                   "Cond": "Condition", "Rep": "Replicate", "Row": "Row"}
+                   "Cond": "Condition", "Rep": "Replicate", "Row": "Row",
+                   "Main": "Main_Plasmids", "File": "File_Name"}
 _MANUAL_DEFAULTS = {"Ligand": "All", "Date": "All", "Cell_Line": "All",
-                    "Condition": "All", "Replicate": "", "Row": ""}
+                    "Condition": "All", "Replicate": "", "Row": "",
+                    "Main_Plasmids": "All", "File_Name": "All"}
 _AUTO_DEFAULTS = {"Ligand": "All", "Cell_Line": "All", "Condition": "All",
-                  "Date": "All", "well_id": ""}
+                  "Date": "All", "well_id": "", "File_Name": "All"}
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +159,13 @@ def _parse_auto_token(tok: str) -> dict:
         # tail looks like "{well_id} - value: {v}"
         well = tail.split(" - value:")[0].strip() if " - value:" in tail else tail.strip()
         crit["well_id"] = well
+    # Optional trailing keyed segment "| File: {fname}" (additive; absent -> stays "All",
+    # so every legacy AUTO token parses exactly as before).
+    for p in parts[5:]:
+        if ":" in p:
+            k, v = p.split(":", 1)
+            if k.strip() == "File":
+                crit["File_Name"] = v.strip()
     return crit
 
 
@@ -227,7 +236,7 @@ class _ResolveCtx:
         # Stripped string views of the columns rules filter on (computed once)
         self._scol = {}
         for c in ('File_Name', 'Well_ID', 'Ligand', 'Cell_Line', 'Transfection',
-                  'Plate_Row', 'Replicate'):
+                  'Plate_Row', 'Replicate', 'Main_Plasmids'):
             if c in df.columns:
                 self._scol[c] = df[c].astype(str).str.strip()
         self._crit_cache = {}          # (source, sorted-criteria-items) -> boolean mask
@@ -284,6 +293,9 @@ class _ResolveCtx:
             else:
                 # No well_id -> cannot pin; refuse to match anything.
                 mask &= False
+            fname = criteria.get("File_Name", "All")
+            if fname not in ("All", "") and 'File_Name' in self._scol:
+                mask &= self._eq('File_Name', fname)
         else:
             # manual
             lig = criteria.get("Ligand", "All")
@@ -304,6 +316,12 @@ class _ResolveCtx:
             row = criteria.get("Row", "")
             if row not in ("All", "") and 'Plate_Row' in self._scol:
                 mask &= self._eq('Plate_Row', row)
+            main = criteria.get("Main_Plasmids", "All")
+            if main not in ("All", "") and 'Main_Plasmids' in self._scol:
+                mask &= self._eq('Main_Plasmids', main)
+            fname = criteria.get("File_Name", "All")
+            if fname not in ("All", "") and 'File_Name' in self._scol:
+                mask &= self._eq('File_Name', fname)
 
         self._crit_cache[key] = mask
         return mask
@@ -507,13 +525,16 @@ def list_active_exclusions(master_df: pd.DataFrame, ctx=None) -> list[dict]:
 def _well_token(master_df: pd.DataFrame, file_name: str, well_id: str) -> str:
     """
     Build a single well-pinned token (auto form) that re-resolves to exactly this well:
-        'AUTO: [RESTORE-SPLIT] {ligand} | {cell} | {cond} | {date} | {well_id} - value: n/a'
+        'AUTO: [RESTORE-SPLIT] {ligand} | {cell} | {cond} | {date} | {well_id} - value: n/a | File: {file_name}'
+    The trailing "| File: {file_name}" pins the token to one (File_Name, Well_ID) even when
+    another source file shares the same Ligand/Cell/Cond/Date/Well_ID.
     Used for cases were part of a rule is reverted.
     """
     rows = master_df[(master_df['File_Name'].astype(str) == str(file_name)) &
                      (master_df['Well_ID'].astype(str) == str(well_id))]
     if rows.empty:
-        return f"AUTO: [RESTORE-SPLIT] All | All | All | All | {well_id} - value: n/a"
+        return (f"AUTO: [RESTORE-SPLIT] All | All | All | All | "
+                f"{well_id} - value: n/a | File: {file_name}")
     first = rows.iloc[0]
     lig = str(first.get('Ligand', 'All'))
     cell = str(first.get('Cell_Line', 'All'))
@@ -522,7 +543,8 @@ def _well_token(master_df: pd.DataFrame, file_name: str, well_id: str) -> str:
         date = pd.to_datetime(first.get('Date')).strftime('%d.%m.%y')
     except Exception:
         date = str(first.get('Date', 'All'))
-    return f"AUTO: [RESTORE-SPLIT] {lig} | {cell} | {cond} | {date} | {well_id} - value: n/a"
+    return (f"AUTO: [RESTORE-SPLIT] {lig} | {cell} | {cond} | {date} | "
+            f"{well_id} - value: n/a | File: {file_name}")
 
 
 # --------------------------------------------------------------------------- #
