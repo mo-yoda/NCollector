@@ -548,6 +548,272 @@ def _well_token(master_df: pd.DataFrame, file_name: str, well_id: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Token emitters (inverse of the _parse_*_token parsers) + merge-time scoping
+# --------------------------------------------------------------------------- #
+# These are used by the merge engine (merge.py) to rewrite an imported source's
+# Applied_Exclusions so that, AFTER concatenation, every rule re-resolves to EXACTLY
+# the (File_Name, Well_ID) set it covered within its own source — no bleed onto the
+# other sources' rows — while keeping criteria-rules readable instead of exploding
+# them into per-well tokens. The shapes emitted here round-trip cleanly through
+# parse_exclusion_blob / criteria_mask, so the existing restore machinery treats a
+# merged blob exactly like any other.
+
+def _emit_manual_token(crit: dict) -> str:
+    """Inverse of _parse_manual_token: build a canonical manual rule string from a
+    criteria dict (canonical master-column keys). Mirrors app.apply_exclusions' writer:
+    the six core fields are always present; Main/File are appended only when meaningful."""
+    s = (f"Ligand: {crit.get('Ligand', 'All')} | Date: {crit.get('Date', 'All')} | "
+         f"Cell: {crit.get('Cell_Line', 'All')} | Cond: {crit.get('Condition', 'All')} | "
+         f"Rep:{crit.get('Replicate', '')} | Row:{crit.get('Row', '')}")
+    main = crit.get('Main_Plasmids', 'All')
+    if main not in ("All", ""):
+        s += f" | Main: {main}"
+    fname = crit.get('File_Name', 'All')
+    if fname not in ("All", ""):
+        s += f" | File: {fname}"
+    return s
+
+
+def _emit_auto_token(crit: dict, tag: str = "MERGE") -> str:
+    """Inverse of _parse_auto_token: build a canonical AUTO rule string (well-pinned,
+    optionally File-pinned) from a criteria dict. Used to rewrite File references on
+    auto rules during a merge remap. The trailing 'value: n/a' is cosmetic."""
+    lig = crit.get('Ligand', 'All')
+    cell = crit.get('Cell_Line', 'All')
+    cond = crit.get('Condition', 'All')
+    date = crit.get('Date', 'All')
+    well = crit.get('well_id', '')
+    s = f"AUTO: [{tag}] {lig} | {cell} | {cond} | {date} | {well} - value: n/a"
+    fname = crit.get('File_Name', 'All')
+    if fname not in ("All", ""):
+        s += f" | File: {fname}"
+    return s
+
+
+def _emit_token(entry: dict) -> str:
+    """Re-emit a parsed rule entry ({source, criteria}) to its canonical token string."""
+    if entry["source"] == "AUTO":
+        return _emit_auto_token(entry["criteria"])
+    return _emit_manual_token(entry["criteria"])
+
+
+def remap_blob_file_names(blob, rename_map: dict) -> str:
+    """
+    Rewrite File references inside an Applied_Exclusions blob according to rename_map
+    ({old_File_Name: new_File_Name}). Only rules whose File criterion is an exact key of
+    rename_map are touched; everything else is preserved verbatim (re-emitted in canonical
+    form). Returns the rejoined blob (" || ").
+
+    The merge engine calls this on a source's blob BEFORE scope_blob_for_merge whenever that
+    source had files collision-renamed, so a File-pinned rule keeps pointing at the renamed
+    rows rather than silently resolving to nothing. Idempotent for an empty/identity map.
+    """
+    if not rename_map:
+        return "" if blob is None else str(blob)
+    entries = parse_exclusion_blob(blob)
+    if not entries:
+        # Opaque / legacy / "None": nothing parseable to remap.
+        return "" if blob is None else str(blob)
+    out = []
+    for e in entries:
+        crit = dict(e["criteria"])
+        old = crit.get("File_Name", "All")
+        if old in rename_map:
+            crit["File_Name"] = rename_map[old]
+            out.append(_emit_token({"source": e["source"], "criteria": crit}))
+        else:
+            out.append(e["label"])
+    return " || ".join(out)
+
+
+# Columns walked, in readability-preference order, when scoping a manual rule at merge time
+
+# ORDER MATTERS here: the ladder tries these one at a time and stops at the first that cleanly separates
+# this source from the others, so the most human-readable discriminators (the biological identity, then Date,
+# then the technical Replicate/Row) come first.
+# Note that Date is the only column whose values must be compared in the rule's normalized form (%d.%m.%y)
+# rather than raw (see _disc_series).
+_MERGE_DISCRIMINATORS = ['Main_Plasmids', 'Cell_Line', 'Ligand', 'Transfection',
+                         'Date', 'Replicate', 'Plate_Row']
+# master column -> the criteria key _emit_manual_token / _parse_manual_token use for it.
+# This is keyed by MASTER-COLUMN name (what the discriminator ladder iterates over).
+# (different from _MANUAL_KEY_MAP as that map is keyed by the blob's ABBREVIATED field
+# names ('Cell', 'Cond', 'Rep', 'Row', 'Main', 'File')). Order is irrelevant — this is a
+# plain .get() lookup table, never iterated.
+_COL_TO_CRIT_KEY = {'Main_Plasmids': 'Main_Plasmids', 'Cell_Line': 'Cell_Line',
+                    'Ligand': 'Ligand', 'Transfection': 'Condition', 'Date': 'Date',
+                    'Replicate': 'Replicate', 'Plate_Row': 'Row',
+                    'File_Name': 'File_Name'}
+
+
+def _disc_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """Per-row string values of `col`, normalized to match how criteria_mask compares it.
+    Every column is matched by raw stripped string EXCEPT Date, which criteria_mask compares
+    in '%d.%m.%y' form — so a Date discriminator must be computed (and injected) in that same
+    form to round-trip through _emit_manual_token -> _parse_manual_token -> criteria_mask."""
+    if col == 'Date':
+        return (pd.to_datetime(df['Date'], errors='coerce', format='mixed')
+                .dt.strftime('%d.%m.%y').fillna(''))
+    return df[col].astype(str).str.strip()
+
+
+def _wells_of_mask(df: pd.DataFrame, mask: pd.Series) -> set:
+    """(File_Name, Well_ID) tuples for the rows under `mask`."""
+    if not mask.any():
+        return set()
+    sub = df.loc[mask]
+    return set(zip(sub['File_Name'].astype(str), sub['Well_ID'].astype(str)))
+
+
+def _scoped_resolves_to(ctx: '_ResolveCtx', tokens: list[str]) -> set:
+    """Union of (File_Name, Well_ID) that `tokens` re-resolve to against the merged frame
+    (criteria ∩ Is_Excluded). Used to VERIFY a scoping attempt before accepting it."""
+    acc = set()
+    for t in tokens:
+        for e in parse_exclusion_blob(t):
+            acc |= ctx.rule_wells(e, only_excluded=True)
+    return acc
+
+
+def _inject_manual(label: str, overrides: dict) -> str:
+    """Take a manual rule's text, apply {master_column: value} overrides, re-emit."""
+    crit = _parse_manual_token(label)
+    for col, val in overrides.items():
+        crit[_COL_TO_CRIT_KEY.get(col, col)] = val
+    return _emit_manual_token(crit)
+
+
+def _scope_one_manual(merged_df, ctx, entry, origin_mask, w_mask, target_wells, log_fn):
+    """Scope a single MANUAL rule against the provisional merged frame. Walks the
+    discriminator ladder (no-bleed -> single column -> minimal pair -> File) and returns
+    the FIRST attempt that verifies (re-resolves to exactly target_wells). Returns None if
+    nothing verified (caller then falls back to per-well tokens)."""
+    crit_mask = ctx.criteria_mask(entry["source"], entry["criteria"])
+    bleed_mask = crit_mask & (~origin_mask)
+
+    # --- (A) no bleed: the rule already cannot touch other sources -> keep verbatim ---
+    if not bleed_mask.any():
+        toks = [entry["label"]]
+        if _scoped_resolves_to(ctx, toks) == target_wells:
+            return toks
+
+    # --- (B) single readable column ---
+    for col in _MERGE_DISCRIMINATORS:
+        if col not in merged_df.columns:
+            continue
+        s = _disc_series(merged_df, col)
+        vw = set(s[w_mask])
+        vb = set(s[bleed_mask])
+        if vw and vw.isdisjoint(vb):
+            toks = [_inject_manual(entry["label"], {col: v}) for v in sorted(vw)]
+            if _scoped_resolves_to(ctx, toks) == target_wells:
+                if log_fn and len(toks) == 1:
+                    log_fn(f"   [MERGE SCOPE] '{entry['label']}' scoped by {col}.")
+                return toks
+
+    # --- (C) minimal pair of columns ---
+    present = [c for c in _MERGE_DISCRIMINATORS if c in merged_df.columns]
+    series = {c: _disc_series(merged_df, c) for c in present}
+    for i in range(len(present)):
+        for j in range(i + 1, len(present)):
+            c1, c2 = present[i], present[j]
+            s1, s2 = series[c1], series[c2]
+            pw = set(zip(s1[w_mask], s2[w_mask]))
+            pb = set(zip(s1[bleed_mask], s2[bleed_mask]))
+            if pw and pw.isdisjoint(pb):
+                toks = [_inject_manual(entry["label"], {c1: v1, c2: v2})
+                        for (v1, v2) in sorted(pw)]
+                if _scoped_resolves_to(ctx, toks) == target_wells:
+                    if log_fn:
+                        log_fn(f"   [MERGE SCOPE] '{entry['label']}' scoped by {c1}+{c2}.")
+                    return toks
+
+    # --- (D) last resort: File scoping (one rule per origin file) ---
+    files = sorted({f for (f, _) in target_wells})
+    bleed_files = set(merged_df.loc[bleed_mask, 'File_Name'].astype(str).str.strip())
+    if files and set(files).isdisjoint(bleed_files):
+        toks = [_inject_manual(entry["label"], {'File_Name': f}) for f in files]
+        if _scoped_resolves_to(ctx, toks) == target_wells:
+            if log_fn:
+                log_fn(f"   [MERGE SCOPE] '{entry['label']}' scoped by File ({len(files)}).")
+            return toks
+
+    return None
+
+
+def scope_blob_for_merge(merged_df: pd.DataFrame, src_blob, origin_mask,
+                         log_fn=None) -> list[str]:
+    """
+    Re-scope ONE source's Applied_Exclusions blob for a merge.
+
+    Args:
+        merged_df:   the provisional concatenated frame (all sources, collision-resolved).
+        src_blob:    this source's Applied_Exclusions blob (File references already remapped
+                     by the caller if any of this source's files were collision-renamed).
+        origin_mask: boolean Series over merged_df.index, True on THIS source's rows.
+        log_fn:      optional logger callback.
+
+    Returns the list of scoped rule tokens for this source such that, when concatenated with
+    the other sources' tokens into the unified blob, each rule re-resolves (criteria ∩
+    Is_Excluded) against the WHOLE merged frame to exactly the (File_Name, Well_ID) set it
+    covered within this source alone.
+
+    Strategy per rule:
+      * AUTO rule  -> re-emit one File-pinned _well_token per origin well (single-well; exact).
+      * manual rule -> inject the most readable discriminating field(s) (Main_Plasmids,
+        Cell_Line, Ligand, Transfection, Replicate, Plate_Row), falling back to File scoping,
+        then VERIFY against the merged frame.
+      * verification failure (pathological shared-everything overlap) -> decompose THAT rule
+        only into per-well File-pinned tokens.
+
+    A blob with no parseable markers (opaque/legacy) is re-expressed as per-well tokens for
+    this source's currently-excluded wells.
+    """
+    if merged_df is None or merged_df.empty:
+        return []
+    if origin_mask is None:
+        origin_mask = pd.Series(True, index=merged_df.index)
+    origin_mask = origin_mask.reindex(merged_df.index, fill_value=False).astype(bool)
+
+    ctx = _ResolveCtx(merged_df)
+    excl = ctx.excluded_mask()
+    entries = parse_exclusion_blob(src_blob)
+
+    # Opaque / legacy blob: no rule structure -> per-well tokens for this source's excluded wells.
+    if not entries:
+        own = _wells_of_mask(merged_df, origin_mask & excl)
+        return [_well_token(merged_df, f, w) for (f, w) in sorted(own)]
+
+    out = []
+    for e in entries:
+        crit_mask = ctx.criteria_mask(e["source"], e["criteria"])
+        w_mask = crit_mask & origin_mask & excl
+        target_wells = _wells_of_mask(merged_df, w_mask)
+        if not target_wells:
+            # This rule excludes nothing within this source's surviving rows -> drop it.
+            continue
+
+        if e["source"] == "AUTO":
+            # Single-well auto rules: re-emit File-pinned per origin well (exact).
+            out.extend(_well_token(merged_df, f, w) for (f, w) in sorted(target_wells))
+            continue
+
+        scoped = _scope_one_manual(merged_df, ctx, e, origin_mask, w_mask,
+                                   target_wells, log_fn)
+        if scoped is not None:
+            out.extend(scoped)
+        else:
+            # Safety net: pathological overlap (sources identical in every meaningful field
+            # AND by file) -> decompose this rule alone into per-well File-pinned tokens.
+            if log_fn:
+                log_fn(f"   [MERGE SCOPE] '{e['label']}' could not be field-scoped; "
+                       f"decomposed into {len(target_wells)} per-well token(s).")
+            out.extend(_well_token(merged_df, f, w) for (f, w) in sorted(target_wells))
+
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Restore core
 # --------------------------------------------------------------------------- #
 
