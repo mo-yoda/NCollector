@@ -193,3 +193,85 @@ def ask_ligand_layout(parent,
 
     parent.wait_window(dialog)
     return result[0]
+
+def ask_filename_collision(parent, colliding_files):
+    """
+    Modal dialog shown for FILENAME_DATA_COLLISION: two or more sources contain a file
+    with the SAME name but DIFFERENT raw data. One global choice applies to all colliding
+    files — the first occurrence keeps its name, the others are renamed.
+
+    Args:
+        parent: Tkinter parent window.
+        colliding_files: list of file names that collide across sources.
+
+    Returns:
+        "rename" to keep both copies (renaming later occurrences),
+        "cancel" or None to abort the merge.
+    """
+    result = ["cancel"]  # default to cancel if window is closed without a choice
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("Filename Collision")
+    dialog.geometry("520x320")
+    dialog.transient(parent)
+    dialog.grab_set()
+
+    files_preview = ", ".join(str(f) for f in colliding_files[:8])
+    if len(colliding_files) > 8:
+        files_preview += f", … (+{len(colliding_files) - 8} more)"
+
+    msg = ("Some files share the same name across sources but carry DIFFERENT raw data:\n\n"
+           f"{files_preview}\n\n"
+           "These are not the same measurement. You can keep both copies by renaming the "
+           "later occurrences (the first occurrence keeps its original name), or cancel the "
+           "merge to fix the inputs yourself.\n\n"
+           "This choice applies to ALL colliding files.")
+    tk.Label(dialog, text=msg, wraplength=470, justify="left",
+             font=("Arial", 10)).pack(pady=(15, 10), padx=15)
+
+    def on_rename():
+        result[0] = "rename"
+        dialog.destroy()
+
+    def on_cancel():
+        result[0] = "cancel"
+        dialog.destroy()
+
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(pady=15)
+
+    tk.Button(btn_frame, text="Rename & keep both", command=on_rename,
+              padx=10).pack(side="left", padx=10)
+    tk.Button(btn_frame, text="Cancel merge", command=on_cancel,
+              padx=10).pack(side="left", padx=10)
+
+    parent.wait_window(dialog)
+    return result[0]
+
+
+def warn_and_abort(parent, title, message):
+    """
+    Simple warning dialog with no proceed option. Generic sink for every no-override
+    forbidden merge code (TIME_VECTOR_DIVERGENCE, LABELING_MISMATCH, RAW_CHANNELS_REQUIRED,
+    and any future no-override code). The caller passes the issue's own code as `title`
+    and its own `message`; this dialog does not author per-code text.
+
+    Returns:
+        None (informational only).
+    """
+    dialog = tk.Toplevel(parent)
+    dialog.title(str(title) if title else "Merge Blocked")
+    dialog.geometry("520x280")
+    dialog.transient(parent)
+    dialog.grab_set()
+
+    tk.Label(dialog, text=str(title), fg="#b00000",
+             font=("Arial", 11, "bold")).pack(pady=(15, 5), padx=15)
+    tk.Label(dialog, text=str(message), wraplength=470, justify="left",
+             font=("Arial", 10)).pack(pady=(0, 10), padx=15)
+
+    tk.Button(dialog, text="OK", command=dialog.destroy,
+              padx=20).pack(pady=15)
+
+    parent.wait_window(dialog)
+    return None

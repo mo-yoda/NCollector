@@ -522,13 +522,16 @@ def list_active_exclusions(master_df: pd.DataFrame, ctx=None) -> list[dict]:
 # Per-well token synthesis (well-pinned, same shape auto rules use)
 # --------------------------------------------------------------------------- #
 
-def _well_token(master_df: pd.DataFrame, file_name: str, well_id: str) -> str:
+def well_token(master_df: pd.DataFrame, file_name: str, well_id: str) -> str:
     """
     Build a single well-pinned token (auto form) that re-resolves to exactly this well:
         'AUTO: [RESTORE-SPLIT] {ligand} | {cell} | {cond} | {date} | {well_id} - value: n/a | File: {file_name}'
     The trailing "| File: {file_name}" pins the token to one (File_Name, Well_ID) even when
     another source file shares the same Ligand/Cell/Cond/Date/Well_ID.
-    Used for cases were part of a rule is reverted.
+
+    Public emitter: used internally for partial-rule reverts and merge-time blob scoping,
+    and by the app's merge layer to record union exclusions for conflicting duplicate files
+    so the added wells stay shown and revertable.
     """
     rows = master_df[(master_df['File_Name'].astype(str) == str(file_name)) &
                      (master_df['Well_ID'].astype(str) == str(well_id))]
@@ -759,7 +762,7 @@ def scope_blob_for_merge(merged_df: pd.DataFrame, src_blob, origin_mask,
     covered within this source alone.
 
     Strategy per rule:
-      * AUTO rule  -> re-emit one File-pinned _well_token per origin well (single-well; exact).
+      * AUTO rule  -> re-emit one File-pinned well_token per origin well (single-well; exact).
       * manual rule -> inject the most readable discriminating field(s) (Main_Plasmids,
         Cell_Line, Ligand, Transfection, Replicate, Plate_Row), falling back to File scoping,
         then VERIFY against the merged frame.
@@ -782,7 +785,7 @@ def scope_blob_for_merge(merged_df: pd.DataFrame, src_blob, origin_mask,
     # Opaque / legacy blob: no rule structure -> per-well tokens for this source's excluded wells.
     if not entries:
         own = _wells_of_mask(merged_df, origin_mask & excl)
-        return [_well_token(merged_df, f, w) for (f, w) in sorted(own)]
+        return [well_token(merged_df, f, w) for (f, w) in sorted(own)]
 
     out = []
     for e in entries:
@@ -795,7 +798,7 @@ def scope_blob_for_merge(merged_df: pd.DataFrame, src_blob, origin_mask,
 
         if e["source"] == "AUTO":
             # Single-well auto rules: re-emit File-pinned per origin well (exact).
-            out.extend(_well_token(merged_df, f, w) for (f, w) in sorted(target_wells))
+            out.extend(well_token(merged_df, f, w) for (f, w) in sorted(target_wells))
             continue
 
         scoped = _scope_one_manual(merged_df, ctx, e, origin_mask, w_mask,
@@ -808,7 +811,7 @@ def scope_blob_for_merge(merged_df: pd.DataFrame, src_blob, origin_mask,
             if log_fn:
                 log_fn(f"   [MERGE SCOPE] '{e['label']}' could not be field-scoped; "
                        f"decomposed into {len(target_wells)} per-well token(s).")
-            out.extend(_well_token(merged_df, f, w) for (f, w) in sorted(target_wells))
+            out.extend(well_token(merged_df, f, w) for (f, w) in sorted(target_wells))
 
     return out
 
@@ -966,7 +969,7 @@ def _restore_core(master_df, label, wells_subset, config, recompute: bool = True
         # Opaque blob: re-express the still-excluded wells as explicit per-well tokens.
         all_still = ctx.all_excluded_wells()
         if all_still:
-            new_tokens = [_well_token(master_df, f, w) for (f, w) in sorted(all_still)]
+            new_tokens = [well_token(master_df, f, w) for (f, w) in sorted(all_still)]
         else:
             new_tokens = []
         _write_blob(master_df, new_tokens)
@@ -982,7 +985,7 @@ def _restore_core(master_df, label, wells_subset, config, recompute: bool = True
             new_tokens = [t for j, t in enumerate(tokens) if j != target_idx]
         else:
             # Replace the rule with well-pinned tokens for exactly its remaining wells.
-            replacement = [_well_token(master_df, f, w) for (f, w) in sorted(must_cover)]
+            replacement = [well_token(master_df, f, w) for (f, w) in sorted(must_cover)]
             new_tokens = []
             for j, t in enumerate(tokens):
                 if j == target_idx:
