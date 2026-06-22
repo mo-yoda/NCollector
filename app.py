@@ -1,7 +1,7 @@
 import os
 import logging
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, ttk, messagebox
 import numpy as np
 import pandas as pd
 from datetime import datetime, date
@@ -18,8 +18,10 @@ from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
                     ensure_master_csv_schema)
 from restore import (list_active_exclusions, restore_rule, restore_wells,
-                     build_resolve_ctx)
-from dialogs import ask_user_parameter, ask_ligand_choice, ask_ligand_layout
+                     build_resolve_ctx, well_token)
+from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
+                     ask_filename_collision, warn_and_abort)
+import merge
 
 logger = logging.getLogger("NCollector")
 
@@ -129,6 +131,16 @@ class NCollectorApp:
         self.combo_specific = None
         self.lb_conc_layout = None
         self.btn_run_plot_helper = None
+        # Tab 4 — Merge
+        self.tab_merge = None
+        # List of source entries:
+        #   {"label": str, "kind": "master"|"folder", "path": str,
+        #    "df": pd.DataFrame, "n_files": int, "n_rows": int}
+        self.merge_sources: list[dict] = []
+        self.merge_tree = None
+        self.merge_summary_tree = None
+        self.merge_main_plasmids_label = None
+        self.btn_merge_run = None
 
         # --- Setup GUI ---
         self.setup_logging()
@@ -161,9 +173,13 @@ class NCollectorApp:
         self.tab_plot_helper = tk.Frame(self.notebook)
         self.notebook.add(self.tab_plot_helper, text="Plot Helper")
 
+        self.tab_merge = tk.Frame(self.notebook)
+        self.notebook.add(self.tab_merge, text="Merge")
+
         self.setup_import_tab()
         self.setup_exclusion_tab()
         self.setup_plot_helper_tab()
+        self.setup_merge_tab()
 
     def setup_import_tab(self):
         # --- Three side-by-side boxes: Loading Specs | Folder Import | Master Import ---
@@ -1807,6 +1823,650 @@ class NCollectorApp:
             # Call the core engine with the unified DF
             self.write_excel_export(file_path, self.master_df, config)
 
+    #  Shared loaders (used by Import & by the Merge tab)
+    def _load_master_df(self, path):
+        """
+        Read a master CSV from disk, validate its core columns, migrate it to the current
+        schema, and coerce Is_Excluded to real booleans. Shared by import_master_csv and
+        the Merge tab's Add-Master-CSV path.
+
+        Returns (df, was_modified, was_fixed).
+        Raises ValueError if the file lacks required master columns.
+        """
+        df = pd.read_csv(path, low_memory=False)
+
+        required = ["Transfection", "Cell_Line", "Ligand", "Kinetic_Mean"]
+        if not all(col in df.columns for col in required):
+            raise ValueError("Invalid CSV format. Required master columns are missing.")
+
+        # Backward compatibility: fill missing columns and clean legacy data.
+        df, was_modified, was_fixed = ensure_master_csv_schema(df, log_fn=self.log)
+
+        # Normalize Is_Excluded to real booleans (CSV may carry "True"/"False" strings,
+        # 1/0, etc.) so the unified engine / merge backend can trust it directly.
+        if 'Is_Excluded' in df.columns:
+            df['Is_Excluded'] = df['Is_Excluded'].map(coerce_bool)
+
+        return df, was_modified, was_fixed
+
+    def _process_folder_to_master(self, folder_paths, config):
+        """
+        Process one or more experiment subfolders into a master-shaped DataFrame WITHOUT
+        touching application state. Used by the Merge tab to add an experiment folder as a
+        merge source.
+
+        Mirrors the object pipeline (scan -> process_bret_measurement -> compile) but
+        writes to a LOCAL frame and returns it: it does NOT assign self.master_df, does NOT
+        flip the warning/export buttons, does NOT run the interactive main-plasmids filter
+        or the warning-review dialog. Ligand dialogs are reused via the passed
+        ProcessingConfig callbacks, exactly as collect_files builds them. A folder source is
+        enriched by construction (Donor/Acceptor raw channels are always populated by
+        compile), so it always passes the merge channel gate.
+        """
+        if not folder_paths:
+            return pd.DataFrame()
+
+        experiment = scan_and_load_folders(folder_paths, log_fn=self.log)
+        if not experiment:
+            return pd.DataFrame()
+
+        for folder in experiment:
+            if not folder.protocol:
+                continue
+            for result in folder.results:
+                process_bret_measurement(result, folder.protocol, config)
+
+        # Provenance directory for the Path column (common root of the scanned subfolders).
+        try:
+            directory = (folder_paths[0] if len(folder_paths) == 1
+                         else os.path.commonpath(folder_paths))
+        except ValueError:
+            directory = folder_paths[0]
+
+        return self.compile_master_dataframe(experiment=experiment, directory=directory,
+                                             rule_history_text="")
+
+    def setup_merge_tab(self):
+        """Builds the Merge tab: a Sources list, a Summary preview (mirrors Tab 1, with an
+        extra Source column), and the Merge action. Adding sources never mutates
+        self.master_df — only Merge does. Compatibility is checked automatically at merge
+        time and reported to the app log."""
+        # --- Sources ---
+        src_frame = tk.LabelFrame(self.tab_merge, text="Sources")
+        src_frame.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+
+        tree_box = tk.Frame(src_frame)
+        tree_box.pack(fill="both", expand=True, padx=5, pady=5)
+        tree_scroll = ttk.Scrollbar(tree_box, orient="vertical")
+        tree_scroll.pack(side="right", fill="y")
+        self.merge_tree = ttk.Treeview(
+            tree_box, columns=("Label", "Kind", "Files", "Rows"),
+            show="headings", height=6, yscrollcommand=tree_scroll.set)
+        tree_scroll.config(command=self.merge_tree.yview)
+        for col, txt, w in (("Label", "Label", 240), ("Kind", "Kind", 80),
+                            ("Files", "Files", 60), ("Rows", "Rows", 80)):
+            self.merge_tree.heading(col, text=txt)
+            self.merge_tree.column(col, width=w,
+                                   anchor=("center" if col in ("Kind", "Files", "Rows") else "w"))
+        self.merge_tree.pack(side="left", fill="both", expand=True)
+
+        src_btns = tk.Frame(src_frame)
+        src_btns.pack(fill="x", padx=5, pady=(0, 6))
+        tk.Button(src_btns, text="Add Master CSV…",
+                  command=self.merge_add_master_csv).pack(side="left", padx=4)
+        tk.Button(src_btns, text="Add Experiment Folder…",
+                  command=self.merge_add_folder).pack(side="left", padx=4)
+        tk.Button(src_btns, text="Remove Selected",
+                  command=self.merge_remove_selected).pack(side="left", padx=4)
+        tk.Button(src_btns, text="Clear All",
+                  command=self.merge_clear_all).pack(side="left", padx=4)
+
+        # --- Summary preview (mirrors Tab 1's Loaded Data table + Main Plasmids) ---
+        summary_frame = tk.LabelFrame(self.tab_merge, text="Sources Summary")
+        summary_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        tk.Button(summary_frame, text="Display Summary",
+                  command=self.merge_display_summary).pack(anchor="w", padx=6, pady=(6, 4))
+
+        # Main Plasmids label (same style as Tab 1)
+        self.merge_main_plasmids_label = tk.Label(summary_frame, text="", justify="left",
+                                                  font=("Arial", 10, "bold"))
+        self.merge_main_plasmids_label.pack(pady=(0, 5))
+
+        sum_box = tk.Frame(summary_frame)
+        sum_box.pack(pady=(0, 8), fill="both", expand=True, padx=10)
+        sum_scroll = ttk.Scrollbar(sum_box, orient="vertical")
+        sum_scroll.pack(side="right", fill="y")
+        sum_scroll_x = ttk.Scrollbar(sum_box, orient="horizontal")
+        sum_scroll_x.pack(side="bottom", fill="x")
+        # Base columns; merge_display_summary appends one check column per source at runtime.
+        self.merge_summary_tree = ttk.Treeview(
+            sum_box, columns=("Ligand", "Cell", "Cond", "N", "Dates"),
+            show="headings", yscrollcommand=sum_scroll.set,
+            xscrollcommand=sum_scroll_x.set, height=6)
+        sum_scroll.config(command=self.merge_summary_tree.yview)
+        sum_scroll_x.config(command=self.merge_summary_tree.xview)
+        for col, txt, w, anchor in (
+                ("Ligand", "Ligand", 70, "w"), ("Cell", "Cell Line", 90, "w"),
+                ("Cond", "Condition", 190, "w"), ("N", "N", 30, "center"),
+                ("Dates", "Dates", 130, "w")):
+            self.merge_summary_tree.heading(col, text=txt)
+            self.merge_summary_tree.column(col, width=w, anchor=anchor)
+        self.merge_summary_tree.pack(fill="both", expand=True)
+
+        # --- Merge action ---
+        merge_frame = tk.LabelFrame(self.tab_merge, text="Merge")
+        merge_frame.pack(fill="x", padx=10, pady=(5, 10))
+        self.btn_merge_run = tk.Button(merge_frame, text="Merge into Working Master",
+                                       state="disabled", command=self.merge_run)
+        self.btn_merge_run.pack(side="left", padx=6, pady=8)
+        tk.Label(merge_frame,
+                 text="Replaces the current working master with the merged result. "
+                      "Compatibility is checked automatically (see the log).",
+                 fg="#555555", justify="left").pack(side="left", padx=8)
+
+    # --- Source-list helpers ---
+    def _merge_unique_label(self, base):
+        """Return `base`, or `base (2)`, `base (3)`, … so labels are unique across sources.
+        merge.py keys collision suffixes and dup_keep:: resolutions off label, so duplicate
+        labels would silently corrupt resolution routing."""
+        existing = {s["label"] for s in self.merge_sources}
+        if base not in existing:
+            return base
+        i = 2
+        while f"{base} ({i})" in existing:
+            i += 1
+        return f"{base} ({i})"
+
+    def _refresh_merge_tree(self):
+        """Repopulate the Sources Treeview from self.merge_sources."""
+        if self.merge_tree is None:
+            return
+        for item in self.merge_tree.get_children():
+            self.merge_tree.delete(item)
+        for s in self.merge_sources:
+            self.merge_tree.insert("", "end",
+                                   values=(s["label"], s["kind"], s["n_files"], s["n_rows"]))
+
+    def _on_merge_sources_changed(self):
+        """Any source-list mutation: refresh the source tree, clear the now-stale summary
+        preview, and re-evaluate whether Merge is allowed (>= 2 sources). Compatibility is
+        no longer pre-checked — it runs automatically inside merge_run."""
+        self._refresh_merge_tree()
+        if self.merge_summary_tree is not None:
+            for item in self.merge_summary_tree.get_children():
+                self.merge_summary_tree.delete(item)
+        if self.merge_main_plasmids_label is not None:
+            self.merge_main_plasmids_label.config(text="")
+        self._update_merge_button_state()
+
+    # --- Adding sources (never touches self.master_df) ---
+    def merge_add_master_csv(self):
+        """Add a master CSV as a merge source. Gates enrichment strictly: a master with any
+        NaN in Donor_Raw_kinetic / Acceptor_Raw_kinetic is refused (enrich it first) — the
+        same predicate merge.py uses for RAW_CHANNELS_REQUIRED, so passing here means the
+        source will not trip that forbidden issue later."""
+        path = filedialog.askopenfilename(
+            title="Select Master CSV to add as a merge source",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
+        if not path:
+            return
+        try:
+            df, _was_modified, _was_fixed = self._load_master_df(path)
+        except Exception as e:
+            self.log(f"[MERGE] Could not add '{os.path.basename(path)}': {e}")
+            return
+
+        # Channel gate (fail fast): refuse unenriched masters.
+        donor = pd.to_numeric(df["Donor_Raw_kinetic"], errors="coerce")
+        acceptor = pd.to_numeric(df["Acceptor_Raw_kinetic"], errors="coerce")
+        if donor.isna().any() or acceptor.isna().any():
+            self.log(f"[MERGE] Refused '{os.path.basename(path)}': missing raw channel "
+                     f"values (Donor/Acceptor). Enrich this master first via the import "
+                     f"+ enrich path, then add it.")
+            messagebox.showwarning(
+                "Master not enriched",
+                f"'{os.path.basename(path)}' has missing raw channel values "
+                f"(Donor_Raw_kinetic / Acceptor_Raw_kinetic).\n\n"
+                f"Only fully enriched masters can be merged. Import it on the "
+                f"Import tab and enrich it from source files first, then add it here.")
+            return
+
+        label = self._merge_unique_label(os.path.basename(path))
+        self.merge_sources.append({
+            "label": label, "kind": "master", "path": path, "df": df,
+            "n_files": int(df['File_Name'].nunique()), "n_rows": int(len(df))})
+        self.log(f"[MERGE] Added master source '{label}' "
+                 f"({df['File_Name'].nunique()} files, {len(df)} rows).")
+        self._on_merge_sources_changed()
+
+    def merge_add_folder(self):
+        """Add an experiment folder as a merge source. Processes it into a local
+        master-shaped frame via _process_folder_to_master (no application state touched).
+        Folder sources are enriched by construction."""
+        directory = filedialog.askdirectory(
+            title="Select experiment folder to add as a merge source")
+        if not directory:
+            return
+
+        # Scan for subfolders containing xlsx/xlsm (mirror select_folder's discovery).
+        subfolder_paths = []
+        for root, _dirs, files in os.walk(directory):
+            if any(f.endswith((".xlsx", ".xlsm")) for f in files):
+                subfolder_paths.append(root)
+        if not subfolder_paths:
+            self.log(f"[MERGE] No .xlsx/.xlsm files found under '{directory}'.")
+            messagebox.showwarning("No data found",
+                                   "No .xlsx or .xlsm files found in that folder.")
+            return
+
+        # Build the processing config exactly as collect_files does (same dialogs).
+        try:
+            is_labeling = self.var_labeling_is_checked.get()
+        except tk.TclError:
+            is_labeling = False
+        lum_threshold, vehicle_threshold = self._get_thresholds()
+        config = ProcessingConfig(
+            lum_threshold=lum_threshold,
+            vehicle_warning_threshold=vehicle_threshold,
+            labeling_correction=is_labeling,
+            plate_layout=build_plate_layout(is_labeling),
+            user_input_fn=lambda **kwargs: ask_user_parameter(self.main_gi, **kwargs),
+            ligand_choice_fn=self._ask_ligand_choice_logged,
+            ligand_layout_fn=self._ask_ligand_layout_logged)
+
+        self.log(f"[MERGE] Processing folder '{os.path.basename(directory)}' "
+                 f"({len(subfolder_paths)} subfolder(s))…")
+        try:
+            df = self._process_folder_to_master(subfolder_paths, config)
+        except Exception as e:
+            self.log(f"[MERGE] Could not process '{os.path.basename(directory)}': {e}")
+            return
+
+        if df is None or df.empty:
+            self.log(f"[MERGE] '{os.path.basename(directory)}' produced no master rows; "
+                     f"not added.")
+            return
+
+        label = self._merge_unique_label(os.path.basename(directory) or directory)
+        self.merge_sources.append({
+            "label": label, "kind": "folder", "path": directory, "df": df,
+            "n_files": int(df['File_Name'].nunique()), "n_rows": int(len(df))})
+        self.log(f"[MERGE] Added folder source '{label}' "
+                 f"({df['File_Name'].nunique()} files, {len(df)} rows).")
+        self._on_merge_sources_changed()
+
+    def merge_remove_selected(self):
+        """Remove the selected source(s) from the list."""
+        if self.merge_tree is None:
+            return
+        sel = self.merge_tree.selection()
+        if not sel:
+            return
+        labels = {self.merge_tree.item(i, "values")[0] for i in sel}
+        self.merge_sources = [s for s in self.merge_sources if s["label"] not in labels]
+        self._on_merge_sources_changed()
+
+    def merge_clear_all(self):
+        """Empty the source list."""
+        if not self.merge_sources:
+            return
+        self.merge_sources = []
+        self._on_merge_sources_changed()
+
+    # --- Sources summary preview (mirrors Tab 1, with a Source column) ---
+    def _build_merge_sources(self):
+        return [merge.MergeSource(label=s["label"], df=s["df"], kind=s["kind"], path=s["path"])
+                for s in self.merge_sources]
+
+    def _master_df_to_index_records(self, df, source_str=None):
+        """Tab-1-style per-column index records from a master-shaped df: one record per
+        (File_Name, column) that is not Empty/Unknown and not fully excluded, carrying
+        Ligand/Cell_Line/Condition(=Transfection)/Date/Main_Plasmids. If source_str is given,
+        each record is tagged Source=source_str. Read-only — never mutates df."""
+        records = []
+        if df is None or df.empty:
+            return records
+        work = df.copy()
+        try:
+            work['_DateStr'] = parse_date_series(
+                work['Date'], context="merge index").dt.strftime('%d.%m.%y')
+        except Exception:
+            work['_DateStr'] = work['Date'].astype(str)
+        work['_ColIdx'] = work['Well_ID'].astype(str).str[1:]
+        work['_Excl'] = (work['Is_Excluded'].map(coerce_bool)
+                         if 'Is_Excluded' in work.columns else False)
+        work = work[~work['Transfection'].astype(str).str.contains("Empty", na=False)]
+        work = work[~work['Cell_Line'].astype(str).str.startswith("Unknown", na=False)]
+        for (fname, _col), g in work.groupby(['File_Name', '_ColIdx'], sort=False):
+            if g['_Excl'].all():
+                continue
+            first = g.iloc[0]
+            rec = {
+                "File_Name": fname,
+                "Date": first['_DateStr'],
+                "Cell_Line": first['Cell_Line'],
+                "Condition": first['Transfection'],
+                "Ligand": first['Ligand'],
+                "Main_Plasmids": (str(first['Main_Plasmids'])
+                                  if 'Main_Plasmids' in g.columns else "Unknown"),
+            }
+            if source_str is not None:
+                rec["Source"] = source_str
+            records.append(rec)
+        return records
+
+    def _compute_merge_preview(self, sources, report):
+        """Produce the merged frame for the summary preview WITHOUT touching self.master_df.
+
+        Mirrors merge_run's conflict handling so the summary reflects the ACTUAL merged
+        result: hard-forbidden (no-override) issues -> None (cannot preview); filename
+        collisions are auto-resolved by 'rename' for the preview (so both copies show);
+        conflicting exclusions are unioned (Is_Excluded only — enough for accurate N, no
+        recompute needed for counts)."""
+        hard = [i for i in report.forbidden if i["code"] != merge.FILENAME_DATA_COLLISION]
+        if hard:
+            codes = ", ".join(sorted({i["code"] for i in hard}))
+            self.log(f"[MERGE] Cannot preview merged summary — unresolved forbidden "
+                     f"issue(s): {codes}. Resolve these before merging.")
+            return None
+
+        resolutions = {}
+        if any(i["code"] == merge.FILENAME_DATA_COLLISION for i in report.forbidden):
+            resolutions["filename_collision"] = "rename"
+            self.log("[MERGE] Summary preview: same-named files with different data are "
+                     "shown as separate (renamed) copies.")
+
+        try:
+            merged_df, _r = merge.merge_masters(sources, resolutions, log_fn=None)
+        except merge.MergeForbidden as e:
+            codes = ", ".join(sorted({i["code"] for i in e.issues}))
+            self.log(f"[MERGE] Cannot preview merged summary: {codes}.")
+            return None
+
+        # Union conflicting exclusions (Is_Excluded only) so fully-excluded columns drop
+        # from N exactly as they will after a real merge.
+        file_col = merged_df['File_Name'].astype(str)
+        well_col = merged_df['Well_ID'].astype(str)
+        for iss in report.needs_input:
+            if iss["code"] != merge.FILENAME_EXCLUSION_CONFLICT:
+                continue
+            ctx = iss["context"]
+            fname = ctx.get("file_name")
+            wells = {str(w) for lst in ctx.get("excluded_wells_by_source", {}).values()
+                     for w in lst}
+            for well in wells:
+                m = (file_col == str(fname)) & (well_col == str(well))
+                if m.any():
+                    merged_df.loc[m, 'Is_Excluded'] = True
+        return merged_df
+
+    def merge_display_summary(self):
+        """Run the compatibility check (logged) and show the summary of the MERGED result —
+        one row per (Ligand, Cell Line, Condition) with the merged N + dates, plus one check
+        column per source marking which sources contribute to that row. Conflicts are
+        resolved exactly as a real merge would (dedup, collision-rename, union exclusions).
+        Read-only — does not merge into or mutate self.master_df."""
+        tree = self.merge_summary_tree
+        if tree is not None:
+            for item in tree.get_children():
+                tree.delete(item)
+        if self.merge_main_plasmids_label is not None:
+            self.merge_main_plasmids_label.config(text="")
+
+        if not self.merge_sources:
+            self.log("[MERGE] No sources to summarize.")
+            return
+
+        sources = self._build_merge_sources()
+
+        # Run compatibility (to the log), so the summary reflects a conflict-resolved merge.
+        self.log("[MERGE] Checking compatibility ...")
+        try:
+            report = merge.classify_sources(sources)
+        except Exception as e:
+            self.log(f"[MERGE] Compatibility check failed: {e}")
+            return
+        self._log_merge_report(report)
+
+        merged_df = self._compute_merge_preview(sources, report)
+        if merged_df is None:
+            return  # hard-forbidden; reason already logged
+
+        merged_records = self._master_df_to_index_records(merged_df)
+        if not merged_records:
+            self.log("[MERGE] Merged result produced no displayable rows.")
+            return
+        merged_idx = pd.DataFrame(merged_records)
+
+        # Per-source contribution keys: which (Ligand, Cell_Line, Condition) each source
+        # provides (from its own non-excluded data). Group-level attribution is robust to
+        # dedup/rename (a deduped-away copy still counts as that source contributing).
+        src_labels = [s["label"] for s in self.merge_sources]
+        source_keys = {}
+        for s in self.merge_sources:
+            recs = self._master_df_to_index_records(s["df"])
+            source_keys[s["label"]] = {(r["Ligand"], r["Cell_Line"], r["Condition"])
+                                       for r in recs}
+
+        # Main Plasmids of the merged result, same presentation as Tab 1.
+        mp_vals = [str(v) for v in pd.unique(merged_idx['Main_Plasmids'].dropna())
+                   if str(v) not in ("", "Unknown")]
+        if self.merge_main_plasmids_label is not None:
+            self.merge_main_plasmids_label.config(text=", ".join(mp_vals))
+
+        # Configure columns dynamically: fixed summary columns + one check column per source.
+        fixed = [("Ligand", "Ligand", 70, "w"), ("Cell", "Cell Line", 90, "w"),
+                 ("Cond", "Condition", 190, "w"), ("N", "N", 30, "center"),
+                 ("Dates", "Dates", 130, "w")]
+        src_col_ids = [f"src::{lbl}" for lbl in src_labels]
+        tree["columns"] = [c[0] for c in fixed] + src_col_ids
+        for cid, txt, w, anchor in fixed:
+            tree.heading(cid, text=txt)
+            tree.column(cid, width=w, anchor=anchor, stretch=False)
+        for lbl, cid in zip(src_labels, src_col_ids):
+            tree.heading(cid, text=lbl)
+            tree.column(cid, width=110, anchor="center", stretch=False)
+
+        # One row per merged (Ligand, Cell, Condition); N = unique merged files; per-source ✓.
+        grouped = merged_idx.groupby(['Ligand', 'Cell_Line', 'Condition'])
+        for (lig, cell, cond), group in grouped:
+            n_count = group['File_Name'].nunique()
+            date_str = ", ".join(sorted(group['Date'].unique()))
+            checks = ["✓" if (lig, cell, cond) in source_keys[lbl] else ""
+                      for lbl in src_labels]
+            tree.insert("", "end", values=[lig, cell, cond, n_count, date_str] + checks)
+
+        self.log(f"[MERGE] Summary displayed: merged view across "
+                 f"{len(self.merge_sources)} source(s).")
+
+    # --- Compatibility logging + Merge gate ---
+    def _log_merge_report(self, report):
+        """Send the compatibility analysis to the app log, by severity (never by code), with
+        one deliberate exception: FILENAME_EXCLUSION_CONFLICT is no longer a user-input
+        decision (it is auto-unioned, see _apply_merge_exclusion_union), so its stale
+        'pick which source...' message is suppressed here — the union handler logs its own
+        clear, per-file message instead."""
+        for iss in report.forbidden:
+            self.log(f"   [COMPAT][FORBIDDEN] {iss['message']}")
+        for iss in report.needs_input:
+            if iss["code"] == merge.FILENAME_EXCLUSION_CONFLICT:
+                continue  # auto-unioned; see merge_run / _apply_merge_exclusion_union
+            self.log(f"   [COMPAT][NEEDS INPUT] {iss['message']}")
+        for iss in report.auto:
+            self.log(f"   [COMPAT][INFO] {iss['message']}")
+        if not report.all_issues():
+            self.log("   [COMPAT] No compatibility issues detected.")
+        s = report.summary or {}
+        if s:
+            self.log(f"   [COMPAT] Projected: {s.get('total_sources', 0)} sources, "
+                     f"{s.get('total_files', 0)} files, {s.get('total_rows', 0)} rows.")
+
+    def _update_merge_button_state(self):
+        """Enable Merge iff there are >= 2 sources. Compatibility (and any forbidden block)
+        is evaluated at merge time, inside merge_run, not here."""
+        enable = len(self.merge_sources) >= 2
+        if self.btn_merge_run is not None:
+            self.btn_merge_run.config(state="normal" if enable else "disabled")
+
+    def _clear_folder_load_state(self):
+        """Clear any leftover experiment-folder display on Tab 1 (subfolders discovered by a
+        previous folder selection). Called after a master import or merge swaps in a CSV/merged
+        master so Tab 1 does not show stale folder candidates or a live Load Files button."""
+        self.subfolder_paths_with_files = []
+        self.directory = ""
+        if self.subfolders_label is not None:
+            self.subfolders_label.config(text="No folder selected.")
+        if self.load_files_button is not None:
+            self.load_files_button.config(state="disabled")
+
+    def _apply_merge_exclusion_union(self, merged_df, conflict_union):
+        """For each duplicate file with conflicting exclusions, force Is_Excluded=True on the
+        UNION of wells, add matching per-well File-pinned tokens to the Applied_Exclusions blob
+        so the added wells are shown AND revertable in the Exclude tab, then recompute the affected
+        files via the canonical engine path. """
+        file_col = merged_df['File_Name'].astype(str)
+        well_col = merged_df['Well_ID'].astype(str)
+
+        blob = "None"
+        if ('Applied_Exclusions' in merged_df.columns
+                and merged_df['Applied_Exclusions'].notna().any()):
+            blob = str(merged_df['Applied_Exclusions'].dropna().iloc[0])
+        existing_tokens = ([t.strip() for t in blob.split("||")]
+                           if blob and blob != "None" else [])
+        token_set = set(existing_tokens)
+
+        new_tokens = []
+        affected_files = set()
+        added_wells = 0
+        for fname, wells in conflict_union.items():
+            for well in sorted(wells):
+                row_mask = (file_col == str(fname)) & (well_col == str(well))
+                if not row_mask.any():
+                    continue
+                already = bool(merged_df.loc[row_mask, 'Is_Excluded'].map(coerce_bool).all())
+                if already:
+                    continue  # keeper already excludes this well; its rule is in the blob
+                merged_df.loc[row_mask, 'Is_Excluded'] = True
+                affected_files.add(str(fname))
+                added_wells += 1
+                tok = well_token(merged_df, str(fname), str(well))
+                if tok not in token_set:
+                    token_set.add(tok)
+                    new_tokens.append(tok)
+
+        if new_tokens:
+            merged_df['Applied_Exclusions'] = " || ".join(existing_tokens + new_tokens)
+
+        if affected_files:
+            config = self._build_recompute_config()
+            merged_df = recompute_master_after_exclusion(
+                merged_df, sorted(affected_files), config)
+            self.log(f"   [MERGE] Applied union exclusions: {added_wells} added well(s) across "
+                     f"{len(affected_files)} file(s); recomputed.")
+        return merged_df
+
+    # --- Merge action ---
+    def merge_run(self):
+        """Auto-check compatibility (to the log), resolve any filename collision via dialog,
+        union conflicting exclusions (no prompt), call merge.merge_masters once
+        (defensively), and on success swap in the merged master and run the refresh trio."""
+        if len(self.merge_sources) < 2:
+            self.log("[MERGE] Need at least two sources to merge.")
+            return
+
+        sources = self._build_merge_sources()
+
+        self.log("[MERGE] Checking compatibility ...")
+        try:
+            report = merge.classify_sources(sources)
+        except Exception as e:
+            self.log(f"[MERGE] Compatibility check failed: {e}")
+            return
+        self._log_merge_report(report)
+
+        resolutions = {}
+
+        # FILENAME_DATA_COLLISION
+        collision_issues = [i for i in report.forbidden
+                            if i["code"] == merge.FILENAME_DATA_COLLISION]
+        if collision_issues:
+            colliding = sorted({i["context"].get("file_name")
+                                for i in collision_issues if i["context"].get("file_name")})
+            choice = ask_filename_collision(self.main_gi, colliding)
+            if choice == "rename":
+                resolutions["filename_collision"] = "rename"
+            else:
+                self.log("[MERGE] Aborted: filename collision left unresolved.")
+                return
+
+        # Any OTHER forbidden code (no override) -> generic warn_and_abort sink + abort.
+        other_forbidden = [i for i in report.forbidden
+                          if i["code"] != merge.FILENAME_DATA_COLLISION]
+        if other_forbidden:
+            iss = other_forbidden[0]
+            warn_and_abort(self.main_gi, iss["code"], iss["message"])
+            self.log(f"[MERGE] Aborted: {iss['code']}.")
+            return
+
+        # FILENAME_EXCLUSION_CONFLICT
+        conflict_union = {}  # file_name -> set(well_id)
+        for iss in report.needs_input:
+            if iss["code"] != merge.FILENAME_EXCLUSION_CONFLICT:
+                continue
+            ctx = iss["context"]
+            fname = ctx.get("file_name")
+            by_source = ctx.get("excluded_wells_by_source", {})
+            wells = {str(w) for lst in by_source.values() for w in lst}
+            if fname is not None and wells:
+                conflict_union[fname] = wells
+                self.log(f"   [MERGE] Exclusion conflict on '{fname}': applying the UNION of "
+                         f"all sources' exclusions ({len(wells)} well(s): "
+                         f"{', '.join(sorted(wells))}). These remain revertable in the "
+                         f"Exclude tab.")
+
+        # Call the backend exactly once, defensively.
+        try:
+            merged_df, report = merge.merge_masters(sources, resolutions, log_fn=self.log)
+        except merge.MergeForbidden as e:
+            for iss in e.issues:
+                self.log(f"[MERGE BLOCKED] {iss['code']}: {iss['message']}")
+            return
+
+        # Apply the union of exclusions for conflicting duplicates (rows + blob), recompute.
+        if conflict_union:
+            merged_df = self._apply_merge_exclusion_union(merged_df, conflict_union)
+
+        # Swap in the merged master + run the documented refresh trio (mirror import_master_csv)
+        self.master_df = merged_df
+        self.experiment = []                       # CSV/merged mode, no live objects
+        self.master_index = pd.DataFrame()
+        self._sync_rule_history_from_master()
+        self._set_data_source(f"Merged: {len(self.merge_sources)} sources")
+        self._set_csv_label(None)                  # merged result is not a CSV import
+        self._clear_folder_load_state()            # clear any leftover Tab-1 folder display
+        if 'Main_Plasmids' in merged_df.columns:
+            mp_vals = [str(v) for v in pd.unique(merged_df['Main_Plasmids'].dropna())]
+            self.main_plasmids_label.config(text=", ".join(mp_vals))
+        else:
+            self.main_plasmids_label.config(text="")
+        self.built_master_index(source="master")
+        self._update_quality_buttons_state()
+        self.refresh_active_exclusions()
+        self.refresh_plot_helper_options()
+        self.btn_export_master.config(state="normal")
+        self.btn_export_excel.config(state="normal")
+
+        # Concise human summary; offer to export.
+        s = report.summary
+        self.log(f"[MERGE] Merged {s['total_sources']} sources -> {s['total_files']} files, "
+                 f"{s['total_rows']} rows "
+                 f"({s['collisions_handled']} renamed, {s['duplicates_dropped']} deduped).")
+        if messagebox.askyesno("Merge complete",
+                               "Merged into the working master.\n\n"
+                               "Export the merged master to CSV now?"):
+            self.export_master_csv()
+
     def import_master_csv(self):
         """Loads a master csv file directly into the memory for the plot helper."""
         file_path = filedialog.askopenfilename(
@@ -1816,22 +2476,9 @@ class NCollectorApp:
         if not file_path: return
 
         try:
-            df = pd.read_csv(file_path, low_memory=False)
-
-            # Validation
-            required = ["Transfection", "Cell_Line", "Ligand", "Kinetic_Mean"]
-            if not all(col in df.columns for col in required):
-                self.log("[ERROR] Invalid CSV format. Columns missing.")
-                return
-
             self.log(f"Loading Master CSV: {os.path.basename(file_path)}")
-            # Backward compatibility: fill missing columns and clean legacy data
-            df, was_modified, was_fixed = ensure_master_csv_schema(df, log_fn=self.log)
-
-            # Normalize Is_Excluded to real booleans (CSV may carry "True"/"False"
-            # strings, 1/0, etc.) so the unified engine path can trust it directly.
-            if 'Is_Excluded' in df.columns:
-                df['Is_Excluded'] = df['Is_Excluded'].map(coerce_bool)
+            # Shared read + validate + schema-migrate + Is_Excluded coercion.
+            df, was_modified, was_fixed = self._load_master_df(file_path)
 
             # Store in the unified variable
             self.master_df = df
@@ -1844,6 +2491,7 @@ class NCollectorApp:
             self._sync_rule_history_from_master()
 
             # Update GUI
+            self._clear_folder_load_state()
             self._set_data_source(f"CSV: {os.path.basename(file_path)}")
             self._set_csv_label(os.path.basename(file_path))
             # Populate the Loaded Data "Main Plasmids" label from the imported master
@@ -1863,15 +2511,6 @@ class NCollectorApp:
             # Enable exports for the imported master (both run purely off master_df)
             self.btn_export_master.config(state="normal")
             self.btn_export_excel.config(state="normal")
-
-            # HOOK (merge / multi-import): when the merge / multi-import path
-            # lands, it ALSO swaps/mutates master_df, so it must call the same trio after
-            # the merged master is in place:
-            #     self.built_master_index(source="master")
-            #     self.refresh_active_exclusions()
-            #     self.refresh_plot_helper_options()  (+ self._update_quality_buttons_state())
-            # so the comboboxes, both Active-Exclusions boxes, and the Revert-mode state all
-            # reflect the merged data.
 
             # If schema was updated, offer to save and optionally enrich
             if was_modified:
@@ -2672,20 +3311,29 @@ class NCollectorApp:
         self.btn_export_master.config(state="normal")
         self.btn_export_excel.config(state="normal")
 
-    def compile_master_dataframe(self):
+    def compile_master_dataframe(self, experiment=None, directory=None, rule_history_text=None):
         """
         Compiles all processing steps into one Master DataFrame.
         Structure: 1 row per well per timepoint.
         Means are repeated for respective technical replicates as AUCs for all timepoints.
         Empty wells (unknwon cell line or empty condition) are dropped.
+
+        Defaults pull from application state (self.experiment / self.directory /
+        self.rule_history_text) for the normal object pipeline. The Merge tab passes a
+        LOCAL experiment, its source directory, and an empty rule history so a folder can
+        be compiled into a master-shaped frame without mutating any application state.
         """
-        if not self.experiment:
+        experiment = self.experiment if experiment is None else experiment
+        directory = self.directory if directory is None else directory
+        rule_history_text = self.rule_history_text if rule_history_text is None else rule_history_text
+
+        if not experiment:
             return None
         self.log("\n--- Building Master CSV ---")
 
         all_files_data = []
 
-        for folder in self.experiment:
+        for folder in experiment:
             if folder.protocol.main_plasmids:
                 main_plasmids = " + ".join(folder.protocol.main_plasmids)
             else:
@@ -2839,14 +3487,14 @@ class NCollectorApp:
 
                 # --- ADD METADATA ---
                 merged_df["NCollector_version"] = APP_VERSION
-                merged_df["Path"] = self.directory
+                merged_df["Path"] = directory
                 merged_df["Info_Sheet"] = str(res.info_sheet) if res.info_sheet else ""
                 merged_df["File_Name"] = res.file_name
                 merged_df["Date"] = res.measurement_date
                 merged_df["Main_Plasmids"] = main_plasmids
 
                 # Get the exclusion text (handle empty case)
-                exclusion_text = self.rule_history_text if self.rule_history_text else "None"
+                exclusion_text = rule_history_text if rule_history_text else "None"
                 # v2.0.5: join rules with " || "
                 exclusion_text_clean = exclusion_text.replace("\n", " || ")
                 merged_df["Applied_Exclusions"] = exclusion_text_clean
