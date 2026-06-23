@@ -21,6 +21,7 @@ from restore import (list_active_exclusions, restore_rule, restore_wells,
                      build_resolve_ctx, well_token)
 from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
                      ask_filename_collision, warn_and_abort)
+from plasmid_selection import (group_by_main_plasmids, resolve_selection)
 import merge
 
 logger = logging.getLogger("NCollector")
@@ -1857,11 +1858,15 @@ class NCollectorApp:
 
         Mirrors the object pipeline (scan -> process_bret_measurement -> compile) but
         writes to a LOCAL frame and returns it: it does NOT assign self.master_df, does NOT
-        flip the warning/export buttons, does NOT run the interactive main-plasmids filter
-        or the warning-review dialog. Ligand dialogs are reused via the passed
-        ProcessingConfig callbacks, exactly as collect_files builds them. A folder source is
-        enriched by construction (Donor/Acceptor raw channels are always populated by
-        compile), so it always passes the merge channel gate.
+        flip the warning/export buttons.
+        It DOES run the interactive main-plasmids selection — but purely on the local experiment
+        list (it never reads or mutates self.experiment). Ligand dialogs are reused via the
+        passed ProcessingConfig callbacks, exactly as collect_files builds them. A folder
+        source is enriched by construction (Donor/Acceptor raw channels are always populated
+        by compile), so it always passes the merge channel gate.
+
+        Returns the compiled master-shaped DataFrame, an empty DataFrame if there is nothing
+        to process, or ``None`` if the user cancels the main-plasmids selection.
         """
         if not folder_paths:
             return pd.DataFrame()
@@ -1869,6 +1874,13 @@ class NCollectorApp:
         experiment = scan_and_load_folders(folder_paths, log_fn=self.log)
         if not experiment:
             return pd.DataFrame()
+
+        # Prompt user to pick main plasmids, folder spans more than one main_plasmids set
+        selected_experiment, _selected_str = self._select_main_plasmids(experiment)
+        if selected_experiment is None:
+            self.log("[MERGE] Folder add cancelled at main-plasmids selection.")
+            return None
+        experiment = selected_experiment
 
         for folder in experiment:
             if not folder.protocol:
@@ -2083,7 +2095,11 @@ class NCollectorApp:
             self.log(f"[MERGE] Could not process '{os.path.basename(directory)}': {e}")
             return
 
-        if df is None or df.empty:
+        if df is None:
+            # User cancelled at the main-plasmids selection; abort without adding a source.
+            return
+
+        if df.empty:
             self.log(f"[MERGE] '{os.path.basename(directory)}' produced no master rows; "
                      f"not added.")
             return
@@ -2985,65 +3001,101 @@ class NCollectorApp:
                 self.load_files_button.config(state="disabled")
                 logger.warning(f"No .xlsx or .xlsm files found starting from: {self.directory}")
 
-    def handle_main_plasmids_selection(self):
+    def _select_main_plasmids(self, experiment):
+        """Group ``experiment`` by ``tuple(protocol.main_plasmids)`` and, when more than
+        one set is present, prompt the user (same modal as before) to pick one.
+
+        This is the reusable core shared by the Import tab and the Merge tab. It operates
+        purely on the passed ``experiment`` and NEVER reads or mutates ``self.experiment``;
+        only ``self.main_gi`` is used, as the dialog's parent.
+
+        Returns:
+            ``(filtered_experiment, selected_str)`` on success:
+              * no set declared    -> ``(experiment, "No Common Plasmids Detected")``
+              * exactly one set     -> ``(experiment, "<a + b>")`` (no prompt)
+              * multiple, confirmed -> ``(folders_for_chosen_set, "<a + b>")``
+            ``(None, None)`` if the user cancels/closes the selection dialog.
         """
-        Checks main_plasmids consistency. If multiple sets found, user selects one.
-        Filters self.experiment to keep only the selected group.
-        Returns the string representation of the selected set.
+        return resolve_selection(experiment, self._prompt_main_plasmids_choice)
+
+    def _prompt_main_plasmids_choice(self, groups):
+        """Open the modal main-plasmids picker for the given ``{tuple: [folders]}`` map.
+
+        Returns the chosen tuple key, or ``None`` if the user cancels or closes the
+        dialog. Called by ``resolve_selection`` only when more than one set exists.
         """
-        # Group experiments by their main_plasmids (convert list to tuple for dictionary key)
-        main_plasmids_groups = {}
-        for folder in self.experiment:
-            if folder.protocol and folder.protocol.main_plasmids:
-                key = tuple(folder.protocol.main_plasmids)
-                if key not in main_plasmids_groups:
-                    main_plasmids_groups[key] = []
-                main_plasmids_groups[key].append(folder)
-
-        if not main_plasmids_groups:
-            return "No Common Plasmids Detected"
-
-        # If only one set exists, return it immediately
-        if len(main_plasmids_groups) == 1:
-            return " + ".join(list(main_plasmids_groups.keys())[0])
-
-        # --- Multiple Sets Detected: Ask User ---
-        # Create a modal dialog window
         dialog = tk.Toplevel(self.main_gi)
         dialog.title("Select Experiment")
 
-        tk.Label(dialog, text="Different experiment set ups detected across folders.\nSelect one to process:",
+        tk.Label(dialog,
+                 text="Different experiment set ups detected across folders.\n"
+                      "Select one to process:",
                  font=("Arial", 11, "bold")).pack(pady=10)
 
         selected_var = tk.StringVar()
-        first_key = list(main_plasmids_groups.keys())[0]
+        first_key = next(iter(groups))
         selected_var.set(str(first_key))  # Set default
 
-        # Helper to map string back to tuple key
+        # Map the StringVar's string form back to the real tuple key.
         str_to_key_map = {}
-
-        for key in main_plasmids_groups:
-            pair_str = " + ".join(key)
+        for key in groups:
             key_val_str = str(key)
             str_to_key_map[key_val_str] = key
+            text_label = f"{' + '.join(key)} ({len(groups[key])} folders)"
+            tk.Radiobutton(dialog, text=text_label, variable=selected_var,
+                           value=key_val_str).pack(anchor="w", padx=20)
 
-            text_label = f"{pair_str} ({len(main_plasmids_groups[key])} folders)"
-            tk.Radiobutton(dialog, text=text_label, variable=selected_var, value=key_val_str).pack(anchor="w", padx=20)
+        # Cancel or closing the window aborts, so the merge path can bail cleanly.
+        outcome = {"confirmed": False}
 
         def on_confirm():
+            outcome["confirmed"] = True
             dialog.destroy()
-        tk.Button(dialog, text="Confirm", command=on_confirm).pack(pady=20)
-        self.main_gi.wait_window(dialog) # Wait until the window is closed
 
-        # Retrieve selection
-        selected_key_str = selected_var.get()
-        selected_key = str_to_key_map.get(selected_key_str, first_key)
+        def on_cancel():
+            outcome["confirmed"] = False
+            dialog.destroy()
 
-        # Filter the experiment list
-        self.experiment = main_plasmids_groups[selected_key]
-        logger.info(f"Keeping {len(self.experiment)} folders matching main plasmids: {selected_key}")
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=20)
+        tk.Button(btn_frame, text="Confirm", command=on_confirm).pack(side="left", padx=10)
+        tk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side="left", padx=10)
 
-        return " + ".join(selected_key)
+        self.main_gi.wait_window(dialog)  # Wait until the window is closed
+
+        if not outcome["confirmed"]:
+            return None
+        return str_to_key_map.get(selected_var.get(), first_key)
+
+    def handle_main_plasmids_selection(self):
+        """
+        Checks main_plasmids consistency across ``self.experiment``. If multiple sets are
+        found, the user selects one and ``self.experiment`` is filtered to that set.
+        Returns the string representation of the selected set.
+
+        Thin Import-tab wrapper over ``_select_main_plasmids``. The Import tab has no abort
+        path: if the user cancels/closes the dialog, we preserve the historical behaviour
+        and default to the first detected set (matching the old "closed window -> first key"
+        fallback).
+        """
+        passed = self.experiment
+        filtered, selected_str = self._select_main_plasmids(passed)
+
+        if filtered is None:
+            # User cancelled. Import has no abort path: default to the first set.
+            groups = group_by_main_plasmids(passed)
+            first_key = next(iter(groups))
+            self.experiment = groups[first_key]
+            logger.info(f"Keeping {len(self.experiment)} folders matching main plasmids: "
+                        f"{first_key}")
+            return " + ".join(first_key)
+
+        self.experiment = filtered
+        # Only an actual multi-set filter returns a new list object
+        if filtered is not passed:
+            logger.info(f"Keeping {len(self.experiment)} folders matching main plasmids: "
+                        f"{selected_str}")
+        return selected_str
 
     def built_master_index(self, source="auto"):
         """
