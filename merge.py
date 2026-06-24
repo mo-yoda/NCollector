@@ -22,14 +22,31 @@ Safety taxonomy:
                   TIME_VECTOR_DIVERGENCE   (no override)
                   FILENAME_DATA_COLLISION  (resolution: filename_collision = rename|cancel)
                   RAW_CHANNELS_REQUIRED    (no override)
+                  NO_PLASMID_OVERLAP       (sources share no plasmid token (main_plasmids or transfection
+                                            at all — different experiments; no override)
+                  MULTIPLE_MAIN_PLASMIDS   (overlapping sources need confirmed selected Main_Plasmids;
+                                            resolution: main_plasmids = [selected tokens] —
+                                            see Main_Plasmids canonicalization)
     NEEDS_INPUT   FILENAME_EXCLUSION_CONFLICT  (same file, sources disagree on excluded
                                                 wells; resolution: dup_keep::<File_Name>
                                                 = <src label>, default keep-first)
     INFO/AUTO     SCHEMA_MIGRATED, NEW_CONDITIONS, EXTRA_COLUMNS_DROPPED, FILENAME_DUPLICATE
-                  (identical copies deduped), FILENAME_COLLISION_RENAMED.
+                  (identical copies deduped), FILENAME_COLLISION_RENAMED,
+                  CONDITION_PARTITION_OVERLAP (canonicalization-unresolved conditions dropped
+                  as no-metadata).
 
-CONDITION_PARTITION_OVERLAP is reserved for a planned condition-canonicalization pass and is
-currently emitted by no path (see _detect_condition_partition_overlap).
+Main_Plasmids canonicalization (plan_canonicalization / apply_canonicalization) reconciles
+the cosmetic Main_Plasmids/Transfection split:
+  * Main_Plasmids MATCH across sources -> nothing to reconcile: no prompt, merge as-is.
+  * Main_Plasmids DIFFER -> judge overlap over each source's FULL token set
+    (Main_Plasmids ∪ Transfection, role-agnostic):
+      - share >=1 token -> the user MUST pick a global Main_Plasmids backbone
+        (resolutions["main_plasmids"]).
+      - share NO token  -> NO_PLASMID_OVERLAP (forbidden, different experiments).
+The chosen tokens become the global Main_Plasmids; Transfection is re-derived per condition
+as the remaining tokens. Conditions that do not contain selected plasmids are dropped as no-metadata
+(CONDITION_PARTITION_OVERLAP). Exclusion state (Is_Excluded) is preserved; the unified blob is
+re-scoped + backstopped so it re-resolves to the identical excluded-well set.
 
 merge_masters runs the analysis; if any FORBIDDEN issue is present and its matching
 override/resolution is not supplied, it raises MergeForbidden (with the report attached).
@@ -45,7 +62,8 @@ import pandas as pd
 from models import MASTER_COLUMNS, LEGACY_COLUMN_DEFAULTS, APP_VERSION
 from export import ensure_master_csv_schema
 from processing import coerce_bool
-from restore import scope_blob_for_merge, remap_blob_file_names
+from restore import (scope_blob_for_merge, remap_blob_file_names,
+                     well_token, build_resolve_ctx, parse_exclusion_blob)
 
 logger = logging.getLogger("NCollector")
 
@@ -61,7 +79,9 @@ FILENAME_DATA_COLLISION = "FILENAME_DATA_COLLISION"
 RAW_CHANNELS_REQUIRED = "RAW_CHANNELS_REQUIRED"
 FILENAME_DUPLICATE = "FILENAME_DUPLICATE"
 FILENAME_EXCLUSION_CONFLICT = "FILENAME_EXCLUSION_CONFLICT"
-CONDITION_PARTITION_OVERLAP = "CONDITION_PARTITION_OVERLAP"   # planned feature
+CONDITION_PARTITION_OVERLAP = "CONDITION_PARTITION_OVERLAP"   # emitted for unresolved canon conditions
+MULTIPLE_MAIN_PLASMIDS = "MULTIPLE_MAIN_PLASMIDS"            # forbidden unless main_plasmids resolved
+NO_PLASMID_OVERLAP = "NO_PLASMID_OVERLAP"                    # sources share no plasmid token (no override)
 SCHEMA_MIGRATED = "SCHEMA_MIGRATED"
 NEW_CONDITIONS = "NEW_CONDITIONS"
 EXTRA_COLUMNS_DROPPED = "EXTRA_COLUMNS_DROPPED"
@@ -95,6 +115,8 @@ class MergeReport:
     needs_input: list = field(default_factory=list)
     auto: list = field(default_factory=list)
     summary: dict = field(default_factory=dict)
+    # Main_Plasmids canonicalization plan (set by _analyze)
+    canon_plan: "CanonPlan | None" = None
 
     def add(self, issue: dict):
         sev = issue["severity"]
@@ -194,16 +216,366 @@ def _excluded_wells(file_rows: pd.DataFrame) -> frozenset:
 
 
 # --------------------------------------------------------------------------- #
+# Main_Plasmids canonicalization
+# --------------------------------------------------------------------------- #
+# The Main_Plasmids / Transfection split is cosmetic. Canonicalization lets the user
+# pick a global Main_Plasmids backbone and re-derives Transfection per condition.
+# Trigger: sources disagree on Main_Plasmids
+# Tokenization: split on " + ", strip, drop empties. Case-fold for identity/ordering;
+# preserve original casing in emitted strings.
+
+# Unresolved conditions (those that cannot honor the chosen backbone) are relabelled into
+# this Transfection sink so the existing "Empty" drop/index/N logic removes them.
+_CANON_DROP_SINK = "Empty (no selected plasmid)"
+
+
+@dataclass
+class CanonPlan:
+    """Plan describing a Main_Plasmids canonicalization (see plan_canonicalization).
+
+    requires_selection : the sources' Main_Plasmids DIFFER and they still overlap (share >=1
+                         plasmid token across Main_Plasmids ∪ Transfection) -> the user must
+                         pick plasmid(s) for the Main_Plasmids (the GUI shows the selection dialog).
+                         False when the backbones already match (nothing to reconcile).
+    candidate_tokens   : [(token, count), ...] every plasmid token across all sources,
+                         ordered by descending MEASUREMENT count (distinct File_Name carrying
+                         the token), then alphabetically (case-insensitive). Drives the dialog.
+    preselected        : default plasmid(s) for the Main_Plasmids = the single top
+                         candidate (most measurements, then alphabetical).
+    selected_main      : the chosen tokens (None until provided), used by apply_canonicalization.
+    rewrites           : concrete per-condition rewrites (only when selected_main given):
+                         [{match: (cell, ligand, sorted_tokens),
+                           from: (main, transf), to: (main, transf), affected_files: [...]}].
+    unresolved         : conditions whose token set does NOT contain all selected-main tokens
+                         (dropped as no-metadata): [{cell, ligand, from, tokens, affected_files}].
+    """
+    requires_selection: bool = False
+    candidate_tokens: list = field(default_factory=list)
+    preselected: list = field(default_factory=list)
+    selected_main: "list | None" = None
+    rewrites: list = field(default_factory=list)
+    unresolved: list = field(default_factory=list)
+
+
+def _tokens(value) -> list:
+    """Split a Main_Plasmids / Transfection string into plasmid tokens (' + ' separated,
+    stripped, empties dropped). Casing is preserved here; callers case-fold for identity."""
+    if value is None:
+        return []
+    return [t.strip() for t in str(value).split(" + ") if t.strip()]
+
+
+def _build_casing(selected_main, *value_iterables) -> dict:
+    """Map case-folded token -> canonical original casing (first occurrence wins). The
+    selected_main casing is registered first so the emitted backbone uses the user's casing."""
+    casing = {}
+
+    def reg(tok):
+        k = tok.casefold()
+        if k not in casing:
+            casing[k] = tok
+
+    for t in (selected_main or []):
+        s = str(t).strip()
+        if s:
+            reg(s)
+    for it in value_iterables:
+        for v in it:
+            for tok in _tokens(v):
+                reg(tok)
+    return casing
+
+
+def _full_tokens(df) -> set:
+    """Case-folded set of every plasmid token in a source — the union over all rows of
+    tokens(Main_Plasmids) ∪ tokens(Transfection). Role-agnostic: a token counts whether it
+    appears as a Main or a per-condition (Transfection) plasmid."""
+    if df is None or df.empty:
+        return set()
+    out = set()
+    for col in ('Main_Plasmids', 'Transfection'):
+        if col in df.columns:
+            for v in df[col].astype(str).unique():
+                for t in _tokens(v):
+                    out.add(t.casefold())
+    return out
+
+
+def _declared_main_tokens(df) -> set:
+    """Case-folded token set of a source's declared Main_Plasmids column only."""
+    if df is None or df.empty or 'Main_Plasmids' not in df.columns:
+        return set()
+    out = set()
+    for v in df['Main_Plasmids'].astype(str).unique():
+        for t in _tokens(v):
+            out.add(t.casefold())
+    return out
+
+
+def _mains_match(frames) -> bool:
+    """True if every source declares the SAME Main_Plasmids (case-/order-insensitive
+    token-set equality). When the Main_Plasmids already agree there is nothing to reconcile,
+    so the merge neither prompts nor is forbidden."""
+    return len({frozenset(_declared_main_tokens(df)) for df in frames}) <= 1
+
+
+def _overlap_status(token_sets):
+    """Cross-source plasmid-token overlap status over full (Main ∪ Transfection) token sets.
+
+      None  -> fewer than 2 non-empty sources (overlap not applicable).
+      True  -> every source shares >=1 token with the union of the others (connected) ->
+               the sources are related; the merge must pick ONE Main_Plasmids backbone.
+      False -> at least one source is token-disjoint from all others -> different
+               experiments; the merge is forbidden (NO_PLASMID_OVERLAP, no override).
+    """
+    ne = [s for s in token_sets if s]
+    if len(ne) < 2:
+        return None
+    for i, s in enumerate(ne):
+        others = set().union(*[o for j, o in enumerate(ne) if j != i])
+        if s.isdisjoint(others):
+            return False
+    return True
+
+
+def _as_source_frames(obj) -> list:
+    """Normalize plan_canonicalization input to a list of DataFrames. Accepts a single
+    DataFrame, a list of DataFrames, or a list of MergeSource."""
+    if isinstance(obj, pd.DataFrame):
+        return [obj]
+    frames = []
+    for it in obj:
+        if isinstance(it, pd.DataFrame):
+            frames.append(it)
+        elif hasattr(it, "df"):
+            frames.append(it.df)
+        else:
+            raise TypeError("plan_canonicalization expects a DataFrame, a list of "
+                            "DataFrames, or a list of MergeSource.")
+    return frames
+
+
+def plan_canonicalization(sources_or_merged_df, selected_main=None) -> CanonPlan:
+    """Analyse sources for a Main_Plasmids mismatch and (optionally) plan the rewrite.
+    Pure analysis — never mutates the input.
+
+    requires_selection is True when sources disagree on the Main_Plasmids backbone AND that
+    disagreement is reconcilable: either a true content collision (same Cell_Line/Ligand/
+    full-token-set under different Main strings) OR the declared Main Plasmids overlap (share a
+    token), e.g. "b2AR-nLuc" vs "b2AR-nLuc + miniG". Genuinely disjoint sources (no shared
+    token) do not require a selection and merge untouched.
+
+      * No reconcilable mismatch -> requires_selection=False, no rewrites (no-op).
+      * Mismatch + selected_main is None -> requires_selection=True with candidate_tokens
+        (descending occurrence) and preselected (declared-main intersection); NO rewrites.
+      * selected_main provided -> concrete rewrites + unresolved using that backbone.
+    """
+    frames = _as_source_frames(sources_or_merged_df)
+
+    casing = {}
+
+    def reg(tok):
+        k = tok.casefold()
+        if k not in casing:
+            casing[k] = tok
+
+    for t in (selected_main or []):
+        s = str(t).strip()
+        if s:
+            reg(s)
+
+    declared_main_sets = []          # per source: set of case-folded declared-main tokens
+    cond_agg = {}                    # (main, transf, cell, ligand) -> {cf:set, files:set}
+    token_to_files = {}              # cf token -> set(File_Name), for candidate ordering/count
+
+    full_token_sets = []             # per source: case-folded Main_Plasmids ∪ Transfection
+
+    for df in frames:
+        if df is None or df.empty or 'Main_Plasmids' not in df.columns:
+            declared_main_sets.append(set())
+            full_token_sets.append(set())
+            continue
+        cols = [c for c in ('Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand', 'File_Name')
+                if c in df.columns]
+        sub = df[cols].astype(str)
+        dmain = set()
+        for mv in sub['Main_Plasmids'].unique():
+            for t in _tokens(mv):
+                reg(t)
+                dmain.add(t.casefold())
+        declared_main_sets.append(dmain)
+        full_token_sets.append(_full_tokens(df))
+
+        grp = (sub.groupby(['Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand'])['File_Name']
+               .apply(lambda s: set(s)).reset_index())
+        for _, r in grp.iterrows():
+            main, transf = r['Main_Plasmids'], r['Transfection']
+            cell, lig = r['Cell_Line'], r['Ligand']
+            toks = _tokens(main) + _tokens(transf)
+            for t in toks:
+                reg(t)
+            cf = frozenset(t.casefold() for t in toks)
+            agg = cond_agg.setdefault((main, transf, cell, lig), {'cf': set(cf), 'files': set()})
+            agg['files'] |= r['File_Name']
+            for t in cf:
+                token_to_files.setdefault(t, set()).update(r['File_Name'])
+
+    # Candidate tokens ordered by descending MEASUREMENT count, then alphabetically
+    ordered = sorted(token_to_files.keys(),
+                     key=lambda k: (-len(token_to_files[k]), k))
+    candidate_tokens = [(casing.get(k, k), len(token_to_files[k])) for k in ordered]
+
+    # Default = the top candidate
+    preselected = [candidate_tokens[0][0]] if candidate_tokens else []
+
+    # Trigger (per the user-confirmed definition):
+    #   * Main_Plasmids already MATCH across sources -> nothing to reconcile: NO prompt.
+    #   * Main_Plasmids DIFFER -> look for any shared plasmid token across the FULL
+    #     Main_Plasmids ∪ Transfection set (role-agnostic: "b2AR" as Main in one source and
+    #     Transfection in another counts):
+    #         - overlap -> PROMPT the user to choose the backbone (requires_selection).
+    #         - no overlap -> different experiments -> forbidden (NO_PLASMID_OVERLAP, emitted
+    #           in _analyze).
+    mains_match = len({frozenset(s) for s in declared_main_sets}) <= 1
+    requires_selection = (not mains_match) and (_overlap_status(full_token_sets) is True)
+
+    rewrites, unresolved = [], []
+    sel_cf = {str(t).casefold() for t in selected_main if str(t).strip()} \
+        if selected_main is not None else None
+    if sel_cf:
+        global_main = " + ".join(casing.get(k, k) for k in sorted(sel_cf))
+        for (main, transf, cell, lig), agg in cond_agg.items():
+            cf = agg['cf']
+            if sel_cf <= cf:
+                remaining = sorted(cf - sel_cf)
+                new_transf = " + ".join(casing.get(k, k) for k in remaining)
+                if (global_main, new_transf) != (main, transf):
+                    rewrites.append({
+                        "match": (cell, lig, tuple(sorted(cf))),
+                        "from": (main, transf),
+                        "to": (global_main, new_transf),
+                        "affected_files": sorted(agg['files'])})
+            else:
+                unresolved.append({
+                    "cell": cell, "ligand": lig,
+                    "from": (main, transf),
+                    "tokens": sorted(cf),
+                    "affected_files": sorted(agg['files'])})
+
+    return CanonPlan(
+        requires_selection=requires_selection,
+        candidate_tokens=candidate_tokens,
+        preselected=preselected,
+        selected_main=list(selected_main) if selected_main is not None else None,
+        rewrites=rewrites,
+        unresolved=unresolved)
+
+
+def apply_canonicalization(df: pd.DataFrame, plan: CanonPlan, log_fn=None) -> pd.DataFrame:
+    """Apply a CanonPlan to a master-shaped frame, rewriting ONLY Main_Plasmids and
+    Transfection. Resolved conditions get the global Main_Plasmids + the remaining tokens
+    (Transfection); unresolved conditions get the _CANON_DROP_SINK Transfection so downstream
+    "Empty" handling drops them. No recompute — every numeric / identity / exclusion column
+    is preserved. A no-op (returns an equal copy) when the plan carries no Main_plasmids."""
+    if df is None or df.empty or plan is None or not getattr(plan, "selected_main", None):
+        return df.copy() if df is not None else df
+
+    sel_cf = {str(t).casefold() for t in plan.selected_main if str(t).strip()}
+    if not sel_cf:
+        return df.copy()
+
+    casing = _build_casing(plan.selected_main,
+                           df['Main_Plasmids'].astype(str).unique(),
+                           df['Transfection'].astype(str).unique())
+    global_main = " + ".join(casing.get(k, k) for k in sorted(sel_cf))
+
+    out = df.copy()
+    combo_map = {}
+    for _, r in out[['Main_Plasmids', 'Transfection']].astype(str).drop_duplicates().iterrows():
+        main, transf = r['Main_Plasmids'], r['Transfection']
+        cf = {t.casefold() for t in (_tokens(main) + _tokens(transf))}
+        if sel_cf <= cf:
+            remaining = sorted(cf - sel_cf)
+            combo_map[(main, transf)] = (global_main,
+                                         " + ".join(casing.get(k, k) for k in remaining))
+        else:
+            combo_map[(main, transf)] = (None, _CANON_DROP_SINK)   # unresolved -> sink
+
+    keys = list(zip(out['Main_Plasmids'].astype(str), out['Transfection'].astype(str)))
+    new_main, new_transf = [], []
+    for (m, t) in keys:
+        nm, nt = combo_map[(m, t)]
+        new_main.append(m if nm is None else nm)   # unresolved keeps its original Main
+        new_transf.append(nt)
+    out['Main_Plasmids'] = new_main
+    out['Transfection'] = new_transf
+
+    if log_fn and plan.rewrites:
+        log_fn(f"   [MERGE] Canonicalized Main_Plasmids to '{global_main}' "
+               f"({len(plan.rewrites)} condition rewrite(s)).")
+    return out
+
+
+def _canonical_conditions(df: pd.DataFrame, selected_main) -> set:
+    """Distinct (Main_Plasmids, Transfection, Cell_Line, Ligand) tuples AFTER canonicalizing
+    with selected_main (unresolved conditions excluded). With no selected_main, falls back to
+    the raw _conditions(df) — so the NEW_CONDITIONS count is computed on the canonical view."""
+    if df is None or df.empty:
+        return set()
+    if not selected_main:
+        return _conditions(df)
+
+    sel_cf = {str(t).casefold() for t in selected_main if str(t).strip()}
+    casing = _build_casing(selected_main,
+                           df['Main_Plasmids'].astype(str).unique(),
+                           df['Transfection'].astype(str).unique())
+    global_main = " + ".join(casing.get(k, k) for k in sorted(sel_cf))
+
+    out = set()
+    sub = df[['Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand']].astype(str).drop_duplicates()
+    for _, r in sub.iterrows():
+        main, transf = r['Main_Plasmids'], r['Transfection']
+        cf = {t.casefold() for t in (_tokens(main) + _tokens(transf))}
+        if sel_cf <= cf:
+            remaining = sorted(cf - sel_cf)
+            new_transf = " + ".join(casing.get(k, k) for k in remaining)
+            out.add((global_main, new_transf, r['Cell_Line'], r['Ligand']))
+        # unresolved conditions are dropped -> excluded from the count
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Core analysis (shared logic behind classify_sources and merge_masters)
 # --------------------------------------------------------------------------- #
-def _detect_condition_partition_overlap(norm: list, report: "MergeReport") -> None:
-    """HOOK for planned condition canonicalization."""
+def _detect_condition_partition_overlap(canon_plan: "CanonPlan | None",
+                                        report: "MergeReport") -> None:
+    """Emit CONDITION_PARTITION_OVERLAP (info) for canonicalization-unresolved conditions —
+    conditions whose token set lacks the selected Main_Plasmids, which are dropped
+    as no-metadata (never merged). No-op when there is nothing unresolved."""
+    if canon_plan is None or not canon_plan.unresolved:
+        return None
+    conds = [{"cell": u["cell"], "ligand": u["ligand"],
+              "main_plasmids": u["from"][0], "transfection": u["from"][1],
+              "files": u["affected_files"]}
+             for u in canon_plan.unresolved]
+    report.add(Issue(
+        CONDITION_PARTITION_OVERLAP, INFO,
+        f"{len(conds)} condition(s) lack the selected Main_Plasmids and were "
+        f"dropped as no-metadata (not merged).",
+        {"count": len(conds), "conditions": conds}))
     return None
 
 
-def _analyze(sources: list):
+def _analyze(sources: list, selected_main=None):
     """Normalize all sources and compute the full issue report + the facts the merge
     builder needs. Does not mutate the input DataFrames and does not concatenate.
+
+    selected_main: the chosen Main_Plasmids (from resolutions["main_plasmids"]). When the
+    sources share no plasmid token, a forbidden NO_PLASMID_OVERLAP is emitted. When
+    they overlap and selected_main is None, a forbidden MULTIPLE_MAIN_PLASMIDS is emitted (the
+    merge is blocked until the user picks a backbone); when provided, the canonicalization
+    rewrites are planned and NEW_CONDITIONS / the unresolved-condition hook are computed on the
+    canonical view.
 
     Returns (norm, report, facts) where:
       norm  = [{label, df, kind, path, was_modified, extras, blob, files{name->rows}}...]
@@ -238,6 +610,38 @@ def _analyze(sources: list):
                              f"Source '{n['label']}' had non-schema columns dropped: "
                              f"{', '.join(n['extras'])}.",
                              {"source": n["label"], "columns": list(n["extras"])}))
+
+    # --- Main_Plasmids canonicalization plan ---
+    canon_plan = plan_canonicalization([n["df"] for n in norm], selected_main=selected_main)
+
+    # --- NO_PLASMID_OVERLAP (forbidden, NO override) ---
+    if not _mains_match([n["df"] for n in norm]):
+        overlap = _overlap_status([_full_tokens(n["df"]) for n in norm])
+        if overlap is False:
+            per_source = {n["label"]: sorted(_full_tokens(n["df"])) for n in norm}
+            report.add(Issue(
+                NO_PLASMID_OVERLAP, FORBIDDEN,
+                "Sources have different Main_Plasmids and share no common plasmid (no "
+                "overlapping token across Main_Plasmids / Transfection). They look like "
+                "different experiments and cannot be merged.",
+                {"tokens_by_source": per_source}))
+
+    if canon_plan.requires_selection and not selected_main:
+        # Overlapping sources, no Main_Plasmids chosen yet -> block until the user picks one
+        distinct = {}
+        for n in norm:
+            if 'Main_Plasmids' not in n["df"].columns:
+                continue
+            for mv in pd.unique(n["df"]['Main_Plasmids'].dropna()):
+                distinct.setdefault(str(mv), set()).add(n["label"])
+        report.add(Issue(
+            MULTIPLE_MAIN_PLASMIDS, FORBIDDEN,
+            "Choose a single Main_Plasmids backbone for the merged data (the sources overlap "
+            "but you must confirm which plasmid tokens are the shared backbone).",
+            {"distinct_main_plasmids": {k: sorted(v) for k, v in distinct.items()},
+             "candidate_tokens": canon_plan.candidate_tokens,
+             "preselected": canon_plan.preselected,
+             "resolution_key": "main_plasmids"}))
 
     # --- LABELING_MISMATCH (forbidden, NO override) ---
     labeling_flags = {n["label"]: _has_labeling(n["df"]) for n in norm}
@@ -360,11 +764,15 @@ def _analyze(sources: list):
                 f"may be merged — enrich this master first via the enrich path before merging.",
                 {"source": n["label"], "files": ctx_files}))
 
-    # --- NEW_CONDITIONS (info) ---
-    base_conditions = _conditions(norm[0]["df"]) if norm else set()
+    # --- NEW_CONDITIONS (info) — computed on the CANONICALIZED view ---
+    # Use the chosen backbone (or, pre-selection, the provisional preselected one) so cosmetic
+    # split differences no longer inflate the count, and dropped/unresolved rows are excluded.
+    eff_selected = selected_main if selected_main else (
+        canon_plan.preselected if canon_plan.requires_selection else None)
+    base_conditions = _canonical_conditions(norm[0]["df"], eff_selected) if norm else set()
     later_conditions = set()
     for n in norm[1:]:
-        later_conditions |= _conditions(n["df"])
+        later_conditions |= _canonical_conditions(n["df"], eff_selected)
     new_conditions = later_conditions - base_conditions
     if new_conditions:
         report.add(Issue(
@@ -373,8 +781,10 @@ def _analyze(sources: list):
             {"count": len(new_conditions),
              "conditions": sorted(new_conditions)}))
 
-    # --- CONDITION_PARTITION_OVERLAP (needs_input) — HOOK ---
-    _detect_condition_partition_overlap(norm, report)
+    # --- CONDITION_PARTITION_OVERLAP (info) — unresolved canonicalization conditions ---
+    _detect_condition_partition_overlap(canon_plan, report)
+
+    report.canon_plan = canon_plan
 
     facts = {
         "labeling_ok": labeling_ok,
@@ -414,6 +824,8 @@ def _unresolved_forbidden(report: MergeReport, resolutions: dict) -> list:
         code = iss["code"]
         if code == FILENAME_DATA_COLLISION and resolutions.get("filename_collision") == "rename":
             continue
+        if code == MULTIPLE_MAIN_PLASMIDS and resolutions.get("main_plasmids"):
+            continue   # resolved by the chosen backbone (defensive: _analyze omits it then)
         # LABELING_MISMATCH, TIME_VECTOR_DIVERGENCE and RAW_CHANNELS_REQUIRED have no override
         out.append(iss)
     return out
@@ -422,14 +834,16 @@ def _unresolved_forbidden(report: MergeReport, resolutions: dict) -> list:
 def merge_masters(sources: list, resolutions: dict | None = None, log_fn=None):
     """Merge two or more master DataFrames into one.
 
-    Runs the shared analysis (`_analyze`); if any FORBIDDEN issue lacks its override/resolution,
-    raises MergeForbidden (report attached). Otherwise concatenates the normalized, collision-resolved,
-    deduped sources, re-scopes every source's exclusion rules so each re-resolves to exactly its origin
-    well-set, writes the unified Applied_Exclusions blob to all rows, stamps NCollector_version, and
-    returns (merged_df, report).
+    Runs the shared analysis (`_analyze`, passing resolutions["main_plasmids"] as the backbone);
+    if any FORBIDDEN issue lacks its override/resolution, raises MergeForbidden (report attached).
+    Otherwise concatenates the normalized, collision-resolved, deduped sources, applies the
+    Main_Plasmids canonicalization (dropping unresolved conditions as no-metadata), re-scopes every
+    source's exclusion rules + backstops so the unified Applied_Exclusions blob re-resolves to the
+    identical excluded-well set, stamps NCollector_version, and returns (merged_df, report).
     """
     resolutions = resolutions or {}
-    norm, report, facts = _analyze(sources)
+    selected_main = resolutions.get("main_plasmids")
+    norm, report, facts = _analyze(sources, selected_main=selected_main)
 
     blocking = _unresolved_forbidden(report, resolutions)
     if blocking:
@@ -489,6 +903,22 @@ def merge_masters(sources: list, resolutions: dict | None = None, log_fn=None):
     merged = pd.concat(work, ignore_index=True)
     merged = merged.reindex(columns=MASTER_COLUMNS + ["_src_idx"])
 
+    # --- Canonicalize Main_Plasmids / Transfection BEFORE re-scoping exclusion blobs ---
+    # Is_Excluded is untouched by canonicalization, so per-row exclusion truth survives.
+    # Doing this BEFORE scope_blob_for_merge means the blob is re-scoped against the
+    # canonical columns; the coverage backstop below then guarantees every excluded well
+    # still re-resolves (rules whose stale Cond:/Main: no longer match are backfilled).
+    canon_dropped = 0
+    if selected_main and report.canon_plan is not None and report.canon_plan.selected_main:
+        merged = apply_canonicalization(merged, report.canon_plan, log_fn=log_fn)
+        before = len(merged)
+        merged = merged[~merged['Transfection'].astype(str)
+                        .str.contains("Empty", na=False)].copy()
+        canon_dropped = before - len(merged)
+        if canon_dropped:
+            _log(f"   [MERGE] Canonicalization dropped {canon_dropped} row(s) in "
+                 f"unresolved condition(s) (no selected backbone).")
+
     # --- Re-scope every source's exclusion rules against the provisional merged frame ---
     all_tokens = []
     for i, n in enumerate(norm):
@@ -505,6 +935,27 @@ def merge_masters(sources: list, resolutions: dict | None = None, log_fn=None):
         if t not in seen:
             seen.add(t)
             uniq.append(t)
+
+    # --- Coverage backstop: the unified blob MUST re-resolve to every excluded well ---
+    # Is_Excluded is authoritative and untouched, but canonicalization can strand a manual rule,
+    # so scope_blob_for_merge would drop it and silently lose those exclusions.
+    # Any currently-excluded well not covered  by the scoped tokens gets a per-well File-pinned token
+    # built from the LIVE canonical row (carrying canonical Cell/Cond/Date).
+    if 'Is_Excluded' in merged.columns and 'Well_ID' in merged.columns:
+        ctx = build_resolve_ctx(merged)
+        covered = set()
+        for t in uniq:
+            for e in parse_exclusion_blob(t):
+                covered |= ctx.rule_wells(e, only_excluded=True)
+        excl_mask = merged['Is_Excluded'].map(coerce_bool)
+        all_excl = set(zip(merged.loc[excl_mask, 'File_Name'].astype(str),
+                           merged.loc[excl_mask, 'Well_ID'].astype(str)))
+        for (f, w) in sorted(all_excl - covered):
+            tok = well_token(merged, f, w)
+            if tok not in seen:
+                seen.add(tok)
+                uniq.append(tok)
+
     unified_blob = " || ".join(uniq) if uniq else "None"
 
     # --- Finalize: drop temp tag, write blob, stamp version, reorder ---
