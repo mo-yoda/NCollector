@@ -20,7 +20,7 @@ from export import (apply_export_filters, build_row_info, generate_header_key,
 from restore import (list_active_exclusions, restore_rule, restore_wells,
                      build_resolve_ctx, well_token)
 from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
-                     ask_filename_collision, warn_and_abort)
+                     ask_filename_collision, warn_and_abort, ask_main_plasmids_selection)
 from plasmid_selection import (group_by_main_plasmids, resolve_selection)
 import merge
 
@@ -142,6 +142,7 @@ class NCollectorApp:
         self.merge_summary_tree = None
         self.merge_main_plasmids_label = None
         self.btn_merge_run = None
+        self.merge_main_plasmids_choice = None # Selection by user if needed
 
         # --- Setup GUI ---
         self.setup_logging()
@@ -2010,6 +2011,7 @@ class NCollectorApp:
                 self.merge_summary_tree.delete(item)
         if self.merge_main_plasmids_label is not None:
             self.merge_main_plasmids_label.config(text="")
+        self.merge_main_plasmids_choice = None
         self._update_merge_button_state()
 
     # --- Adding sources (never touches self.master_df) ---
@@ -2180,7 +2182,9 @@ class NCollectorApp:
         collisions are auto-resolved by 'rename' for the preview (so both copies show);
         conflicting exclusions are unioned (Is_Excluded only — enough for accurate N, no
         recompute needed for counts)."""
-        hard = [i for i in report.forbidden if i["code"] != merge.FILENAME_DATA_COLLISION]
+        hard = [i for i in report.forbidden
+                if i["code"] not in (merge.FILENAME_DATA_COLLISION,
+                                     merge.MULTIPLE_MAIN_PLASMIDS)]
         if hard:
             codes = ", ".join(sorted({i["code"] for i in hard}))
             self.log(f"[MERGE] Cannot preview merged summary — unresolved forbidden "
@@ -2192,6 +2196,15 @@ class NCollectorApp:
             resolutions["filename_collision"] = "rename"
             self.log("[MERGE] Summary preview: same-named files with different data are "
                      "shown as separate (renamed) copies.")
+
+        # MULTIPLE_MAIN_PLASMIDS: use selected main plasmids for display summary
+        canon = getattr(report, "canon_plan", None)
+        if canon is not None and canon.requires_selection:
+            selected_mp = self.merge_main_plasmids_choice or list(canon.preselected)
+            if not selected_mp:
+                self.log("[MERGE] Cannot preview merged summary — no Main Plasmids chosen.")
+                return None
+            resolutions["main_plasmids"] = list(selected_mp)
 
         try:
             merged_df, _r = merge.merge_masters(sources, resolutions, log_fn=None)
@@ -2245,6 +2258,20 @@ class NCollectorApp:
             return
         self._log_merge_report(report)
 
+        # MULTIPLE_MAIN_PLASMIDS: if Main_Plasmids selection is needed, ask here (on Display Summary)
+        canon = getattr(report, "canon_plan", None)
+        if canon is not None and canon.requires_selection:
+            default = self.merge_main_plasmids_choice or canon.preselected
+            selection = ask_main_plasmids_selection(
+                self.main_gi, canon.candidate_tokens, default,
+                context=("Sources use different Main Plasmids. Choose the shared plasmids "
+                         "for the merged data."))
+            if not selection:
+                self.log("[MERGE] Summary cancelled: no Main Plasmids chosen.")
+                return
+            self.merge_main_plasmids_choice = selection # selection is stored and reused by merge
+            self.log(f"[MERGE] Main Plasmids selected: {', '.join(selection)}.")
+
         merged_df = self._compute_merge_preview(sources, report)
         if merged_df is None:
             return  # hard-forbidden; reason already logged
@@ -2259,9 +2286,15 @@ class NCollectorApp:
         # provides (from its own non-excluded data). Group-level attribution is robust to
         # dedup/rename (a deduped-away copy still counts as that source contributing).
         src_labels = [s["label"] for s in self.merge_sources]
+        # Canonicalize each source the SAME way as the merged frame before building the keys
+        canon_plan = (merge.CanonPlan(selected_main=list(self.merge_main_plasmids_choice))
+                      if self.merge_main_plasmids_choice else None)
         source_keys = {}
         for s in self.merge_sources:
-            recs = self._master_df_to_index_records(s["df"])
+            src_df = s["df"]
+            if canon_plan is not None:
+                src_df = merge.apply_canonicalization(src_df, canon_plan)
+            recs = self._master_df_to_index_records(src_df)
             source_keys[s["label"]] = {(r["Ligand"], r["Cell_Line"], r["Condition"])
                                        for r in recs}
 
@@ -2403,6 +2436,26 @@ class NCollectorApp:
 
         resolutions = {}
 
+        # MULTIPLE_MAIN_PLASMIDS: if user merged without viewing summary, prompt here
+        canon = getattr(report, "canon_plan", None)
+        if canon is not None and canon.requires_selection:
+            selection = self.merge_main_plasmids_choice
+            if not selection:
+                selection = ask_main_plasmids_selection(
+                    self.main_gi, canon.candidate_tokens, canon.preselected,
+                    context=("Sources use different Main Plasmids. Choose the shared plasmids "
+                             "for the merged data."))
+                if not selection:
+                    warn_and_abort(
+                        self.main_gi, merge.MULTIPLE_MAIN_PLASMIDS,
+                        "Merge cancelled: a Main Plasmids must be chosen to "
+                        "reconcile the sources.")
+                    self.log("[MERGE] Aborted: Main Plasmids selection cancelled.")
+                    return
+                self.merge_main_plasmids_choice = selection
+            resolutions["main_plasmids"] = selection
+            self.log(f"[MERGE] Main Plasmids: {', '.join(selection)}.")
+
         # FILENAME_DATA_COLLISION
         collision_issues = [i for i in report.forbidden
                             if i["code"] == merge.FILENAME_DATA_COLLISION]
@@ -2418,7 +2471,8 @@ class NCollectorApp:
 
         # Any OTHER forbidden code (no override) -> generic warn_and_abort sink + abort.
         other_forbidden = [i for i in report.forbidden
-                          if i["code"] != merge.FILENAME_DATA_COLLISION]
+                          if i["code"] not in (merge.FILENAME_DATA_COLLISION,
+                                               merge.MULTIPLE_MAIN_PLASMIDS)]
         if other_forbidden:
             iss = other_forbidden[0]
             warn_and_abort(self.main_gi, iss["code"], iss["message"])

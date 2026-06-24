@@ -249,6 +249,86 @@ def ask_filename_collision(parent, colliding_files):
     return result[0]
 
 
+def ask_main_plasmids_selection(parent, ordered_tokens, preselected, context=""):
+    """
+    Multi-select dialog for choosing the global Main_Plasmids when merging
+    sources that encode the same plasmids under different Main_Plasmids/Transfection splits.
+
+    Args:
+        parent:         Tkinter parent window.
+        ordered_tokens: list of (token, count) ordered highest-occurrence first. `count` is
+                        shown as a hint (how many distinct conditions contain the token).
+        preselected:    list of tokens to check by default (the declared-main intersection).
+        context:        optional explanatory line shown above the list.
+
+    Returns:
+        The selected list of tokens (original casing) on confirm, or None on skip/close.
+    """
+    result = [None]
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("Select Main Plasmids")
+    dialog.geometry("520x420")
+    dialog.transient(parent)
+    dialog.grab_set()
+
+    msg = ("Select the plasmid(s) that form the shared Main Plasmids for the "
+           "merged data. The remaining plasmids become each condition's Transfection.")
+    if context:
+        msg = context + "\n\n" + msg
+    tk.Label(dialog, text=msg, wraplength=480, justify="left",
+             font=("Arial", 10)).pack(pady=(15, 10), padx=15, side="top")
+
+    token_vars = []  # list of (token, BooleanVar)
+
+    def on_confirm():
+        chosen = [tok for tok, var in token_vars if var.get()]
+        if not chosen:
+            error_label.config(text="Select at least one plasmid for the backbone.")
+            return
+        result[0] = chosen
+        dialog.destroy()
+
+    def on_skip():
+        result[0] = None
+        dialog.destroy()
+
+    # Buttons
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(side="bottom", pady=15)
+    tk.Button(btn_frame, text="Confirm", command=on_confirm,
+              padx=10).pack(side="left", padx=10)
+    tk.Button(btn_frame, text="Cancel", command=on_skip,
+              padx=10).pack(side="left", padx=10)
+
+    error_label = tk.Label(dialog, text="", fg="red", font=("Arial", 9))
+    error_label.pack(side="bottom")
+
+    # Scrollable checkbutton list (one token per row, highest-occurrence first)
+    list_frame = tk.Frame(dialog)
+    list_frame.pack(side="top", fill="both", expand=True, padx=20, pady=5)
+    canvas = tk.Canvas(list_frame, highlightthickness=0)
+    scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas)
+    inner.bind("<Configure>",
+               lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    preselected_cf = {str(t).casefold() for t in (preselected or [])}
+    for token, count in ordered_tokens:
+        var = tk.BooleanVar(value=str(token).casefold() in preselected_cf)
+        label = f"{token}   ({count} measurement{'s' if count != 1 else ''})"
+        tk.Checkbutton(inner, text=label, variable=var,
+                       font=("Arial", 10), anchor="w").pack(anchor="w", fill="x")
+        token_vars.append((token, var))
+
+    parent.wait_window(dialog)
+    return result[0]
+
+
 def warn_and_abort(parent, title, message):
     """
     Simple warning dialog with no proceed option. Generic sink for every no-override
