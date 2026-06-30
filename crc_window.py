@@ -5,19 +5,24 @@ Opened from the Exclude tab. Reads the CURRENT master via a get_master_df callba
 app reassigns master_df on every recompute, so we must fetch it live, never cache it), so
 calling refresh() after an exclude/restore redraws and refits against the new data.
 
-UI: ligand / cell-line / transfection dropdowns on top (kept in sync), an embedded figure,
-and < / > arrows that step through every condition present in the data, plus a Save button.
+UI: ligand / cell-line / transfection dropdowns on top (kept in sync), a split middle with
+the embedded figure on the left and a data-preview table on the right (the Plot Helper CRC
+for the selected condition, with a subtype selector AUC_Mean / Veh_Norm_AUC), and < / > arrows
+that step through every condition present in the data, plus Save buttons.
 """
 
 import logging
 import tkinter as tk
 from tkinter import ttk, filedialog
 
+import pandas as pd
 import matplotlib
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 import crc_plot
+import export
+from models import DATA_TYPE_MAP
 
 logger = logging.getLogger("NCollector")
 logging.getLogger("matplotlib").setLevel(logging.WARNING) # do not show warnings from matplotlib
@@ -33,17 +38,24 @@ def _colors_for(n):
     return [cmap(i / (n - 1)) for i in range(n)]
 
 
+# Only allow AUC subtype selection
+_AUC_SUBTYPES = {k: v for k, v in DATA_TYPE_MAP["CRC"].items() if "AUC" in k}
+
 class CRCWindow:
-    def __init__(self, parent, get_master_df, on_close=None, log_fn=None):
+    def __init__(self, parent, get_master_df, on_close=None, log_fn=None, export_fn=None):
         self.get_master_df = get_master_df
         self.on_close = on_close
         self.log = log_fn or (lambda m: None)
+        # export_fn(file_path, master_df, config) assigned with write_excel_export by app
+        # this way, shared engine with plot helper export
+        self.export_fn = export_fn
         self.conditions = []
         self.index = 0
 
         self.win = tk.Toplevel(parent)
         self.win.title("Concentration-Response")
-        self.win.geometry("820x680")
+        self.win.geometry("1180x680")
+        # Intercept the window's "X" to run cleanup (on_close) before destroying the window
         self.win.protocol("WM_DELETE_WINDOW", self._close)
 
         # --- Top: selectors ---
@@ -57,23 +69,55 @@ class CRCWindow:
         self.cb_trans = self._add_selector(top, "Transfection:", self.var_trans,
                                            "transfection", width=22)
 
-        # --- Bottom: navigation (packed before the figure so it's always visible) ---
+        # --- Bottom bar (packed before the figure so it's always visible):
+        #     Save plot (left) · condition arrows (center) · Export Table (right) ---
         bottom = tk.Frame(self.win)
         bottom.pack(side="bottom", fill="x", padx=8, pady=(4, 8))
-        tk.Button(bottom, text="◀", width=4,
+        tk.Button(bottom, text="Save plot", command=self._save).pack(side="left")
+        tk.Button(bottom, text="Export Table", command=self._export_table).pack(side="right")
+        center = tk.Frame(bottom)
+        center.pack(side="left", expand=True)        # expands into the middle
+        tk.Button(center, text="◀", width=4,
                   command=lambda: self._step(-1)).pack(side="left")
-        self.lbl_pos = tk.Label(bottom, text="")
+        self.lbl_pos = tk.Label(center, text="")
         self.lbl_pos.pack(side="left", padx=10)
-        tk.Button(bottom, text="▶", width=4,
+        tk.Button(center, text="▶", width=4,
                   command=lambda: self._step(1)).pack(side="left")
-        tk.Button(bottom, text="Save plot", command=self._save).pack(side="right")
 
-        # --- Middle: matplotlib figure fills the rest ---
-        self.fig = Figure(figsize=(7.5, 5.2), dpi=100)
+        # --- Middle: figure (left) | data preview table (right), resizable split ---
+        mid = ttk.PanedWindow(self.win, orient="horizontal")
+        mid.pack(side="top", fill="both", expand=True, padx=8, pady=4)
+
+        left = tk.Frame(mid)
+        self.fig = Figure(figsize=(7.0, 5.2), dpi=100)
         self.ax = self.fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.win)
-        self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True,
-                                         padx=8, pady=4)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=left)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        mid.add(left, weight=3)
+
+        right = tk.Frame(mid)
+        sel = tk.Frame(right)
+        sel.pack(side="top", fill="x", pady=(0, 4))
+        tk.Label(sel, text="Plotted data:").pack(side="left")
+        default_key = next(k for k, v in _AUC_SUBTYPES.items() if v == "AUC_Mean")
+        self.var_subtype = tk.StringVar(value = default_key)
+        cb_sub = ttk.Combobox(sel, textvariable=self.var_subtype, state="readonly",
+                              values=list(_AUC_SUBTYPES), width=60)
+        cb_sub.pack(side="left", padx=(4, 0))
+        cb_sub.bind("<<ComboboxSelected>>", lambda e: self._draw_preview_table())
+
+        tvf = tk.Frame(right)
+        tvf.pack(side="top", fill="both", expand=True)
+        self.table = ttk.Treeview(tvf, show="headings")
+        vsb = ttk.Scrollbar(tvf, orient="vertical", command=self.table.yview)
+        hsb = ttk.Scrollbar(tvf, orient="horizontal", command=self.table.xview)
+        self.table.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.table.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tvf.grid_rowconfigure(0, weight=1)
+        tvf.grid_columnconfigure(0, weight=1)
+        mid.add(right, weight=2)
 
         self.refresh()
 
@@ -148,6 +192,8 @@ class CRCWindow:
         self.ax.set_axis_off()
         self.lbl_pos.config(text="")
         self.canvas.draw()
+        if getattr(self, "table", None) is not None:
+            self._populate_table(None)
 
     def _draw(self):
         c = self.conditions[self.index]
@@ -196,6 +242,50 @@ class CRCWindow:
         self.fig.tight_layout()
         self.canvas.draw()
 
+        self._draw_preview_table()
+
+    # --- Preview table (Plot Helper CRC "second sheet") ---
+    def _draw_preview_table(self):
+        """Rebuild the right-hand preview table for the current condition + selected subtype.
+        Reuses the export builder (build_crc_preview_table), reading the live master so it
+        reflects the current exclusion state."""
+        if not self.conditions:
+            self._populate_table(None)
+            return
+        c = self.conditions[self.index]
+        value_col = _AUC_SUBTYPES.get(self.var_subtype.get(), "AUC_Mean")
+        config = {"ligands": [c['ligand']], "cells": [c['cell_line']],
+                  "transfections": [c['transfection']]}
+        try:
+            df_sub = export.apply_export_filters(self.get_master_df(), config)
+            pivot = export.build_crc_preview_table(df_sub, value_col)
+        except Exception as e:
+            logger.debug(f"CRC preview table failed: {e}")
+            pivot = None
+        self._populate_table(pivot)
+
+    def _populate_table(self, pivot):
+        tv = self.table
+        tv.delete(*tv.get_children())
+        if pivot is None or pivot.empty or len(pivot.columns) == 0:
+            tv["columns"] = ("_msg",)
+            tv.heading("_msg", text="")
+            tv.column("_msg", width=160, anchor="w")
+            tv.insert("", "end", values=("No data",))
+            return
+        col_ids = ["_idx"] + [f"c{i}" for i in range(len(pivot.columns))]
+        tv["columns"] = col_ids
+        tv.heading("_idx", text=str(pivot.index.name or "Row"))
+        tv.column("_idx", width=120, anchor="w", stretch=False)
+        for i, col in enumerate(pivot.columns):
+            cid = f"c{i}"
+            tv.heading(cid, text=str(col))
+            tv.column(cid, width=95, anchor="center", stretch=False)
+        for idx, row in pivot.iterrows():
+            cells = ["" if (isinstance(idx, float) and pd.isna(idx)) else idx]
+            cells += ["" if pd.isna(v) else f"{v:.3f}" for v in row]
+            tv.insert("", "end", values=cells)
+
     # --- Actions ---
     def _save(self):
         if not self.conditions:
@@ -211,6 +301,30 @@ class CRCWindow:
             self.log(f"[CRC] Saved plot: {path}")
         except Exception as e:
             self.log(f"[CRC] Could not save plot: {e}")
+
+    def _export_table(self):
+        """Run the Plot-Helper export for the current condition, category CRC, and the
+        selected subtype — i.e. the same workbook the Plot Helper tab would produce."""
+        if not self.conditions or self.export_fn is None:
+            return
+        c = self.conditions[self.index]
+        value_col = _AUC_SUBTYPES.get(self.var_subtype.get(), "AUC_Mean")
+        config = {
+            "category": "CRC",
+            "cells": [c['cell_line']],
+            "transfections": [c['transfection']],
+            "ligands": [c['ligand']],
+            "data_types": [value_col],
+            "group_by": "None",
+            "conc_mode": [],
+        }
+        path = filedialog.asksaveasfilename(
+            parent=self.win, defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")], title="Export CRC table")
+        if not path:
+            return
+        # write_excel_export logs its own success/failure.
+        self.export_fn(path, self.get_master_df(), config)
 
     def _close(self):
         if self.on_close:

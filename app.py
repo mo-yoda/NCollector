@@ -16,7 +16,7 @@ from processing import (process_bret_measurement, calculate_relative_time, map_p
 from mapping import infer_ligand_info_from_master
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
-                    ensure_master_csv_schema)
+                    ensure_master_csv_schema, build_crc_table)
 from restore import (list_active_exclusions, restore_rule, restore_wells,
                      build_resolve_ctx, well_token)
 from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
@@ -851,7 +851,8 @@ class NCollectorApp:
             self.main_gi,
             get_master_df=lambda: self.master_df,
             on_close=lambda: setattr(self, "crc_window", None),
-            log_fn=self.log)
+            log_fn=self.log,
+            export_fn=self.write_excel_export)
 
     def _refresh_crc_window(self):
         """Redraw the open CRC plot (if any) against the current master — called after every
@@ -3901,31 +3902,12 @@ class NCollectorApp:
 
                         # --- CRC ---
                         elif cat == "CRC":
-                            df_crc = df_group.drop_duplicates(
-                                subset=["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]).copy()
-                            if df_crc.empty: continue
-                            df_crc = generate_header_key(df_crc, group_by)
-
-                            if dtype not in df_crc.columns: continue
-
-                            # Always pivot on plate row
-                            crc_pivot = create_clean_pivot(df_crc, "Plate_Row",
-                                                           dtype, "Mean" in dtype,
-                                                           drop_labeling_col)
-
-                            # Display ligand conc instead of plate row if there is one ligand
-                            if df_crc['Ligand'].nunique() == 1:
-                                deduplicated = df_crc.drop_duplicates("Plate_Row").set_index("Plate_Row")
-                                row_map = deduplicated["Ligand_Conc"].copy().astype(object)
-                                # astype(object) to handle float and str (vehicle)
-                                vehicle_rows = deduplicated["Is_Vehicle"].astype(bool)
-                                row_map[vehicle_rows] = "Vehicle"
-                                crc_pivot.index = crc_pivot.index.map(row_map)
-                                crc_pivot.index.name = f"{df_crc['Ligand'].iloc[0]} (logM)"
-
-                            else:
-                                crc_pivot.index.name = "Plate Row"
-
+                            # Shared helper (also used by the CRC-window preview)
+                            # pivot on plate row, conc-index for single-ligand.
+                            crc_pivot = build_crc_table(df_group, dtype, group_by,
+                                                        drop_labeling_col)
+                            if crc_pivot is None:
+                                continue
                             base = f"{group_name}_AUC" if group_name else f"AUC_{dtype}"
                             crc_pivot.to_excel(writer, sheet_name=base[:31], index=True)
                             sheets_written = True
