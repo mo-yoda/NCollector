@@ -515,6 +515,89 @@ def create_clean_pivot(df_input, index_col, value_col, disregard_well_id, drop_l
     return pivot
 
 
+def _crc_conc_index(df_crc, pivot):
+    """Relabel a Plate_Row-indexed CRC pivot's index: for a single-ligand condition map each
+    plate row to its ligand concentration (logM), with the vehicle row -> "Vehicle" and the
+    index named "<Ligand> (logM)"; otherwise keep plate rows and name the index "Plate Row".
+    Shared by build_crc_table (export) and build_crc_preview_table (window)."""
+    pivot = pivot.copy()
+    if df_crc['Ligand'].nunique() == 1:
+        dedup = df_crc.drop_duplicates("Plate_Row").set_index("Plate_Row")
+        row_map = dedup["Ligand_Conc"].copy().astype(object)
+        row_map[dedup["Is_Vehicle"].astype(bool)] = "Vehicle"
+        pivot.index = pivot.index.map(row_map)
+        pivot.index.name = f"{df_crc['Ligand'].iloc[0]} (logM)"
+    else:
+        pivot.index.name = "Plate Row"
+    return pivot
+
+
+def build_crc_table(df_condition, value_col="AUC_Mean", group_by="None",
+                    drop_labeling_control=True):
+    """Build the CRC export table (the Plot Helper "second sheet") for a condition/group.
+
+    Index = ligand concentration (logM, single-ligand) or plate row; columns = Header_Key
+    (one per file for *_Mean values, one per technical-replicate well otherwise); values =
+    `value_col`. Returns None when there is nothing to pivot. SINGLE SOURCE OF TRUTH shared by
+    write_excel_export and the CRC-window preview."""
+    df_crc = df_condition.drop_duplicates(
+        subset=["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]).copy()
+    if df_crc.empty or value_col not in df_crc.columns:
+        return None
+    df_crc = generate_header_key(df_crc, group_by)
+    pivot = create_clean_pivot(df_crc, "Plate_Row", value_col, "Mean" in value_col,
+                               drop_labeling_control)
+    return _crc_conc_index(df_crc, pivot)
+
+
+def build_crc_preview_table(df_condition, value_col="AUC_Mean", drop_labeling_control=True):
+    """CRC table for the window preview: the SAME per-row values as build_crc_table for one
+    condition, ordered by date. For *_Mean values there is one column per file (biological
+    replicate), labelled by measurement date; otherwise one column per technical-replicate
+    well, labelled "<date> (<replicate #>)". Returns None when empty / value_col absent."""
+    df = df_condition.drop_duplicates(
+        subset=["File_Name", "Transfection", "Cell_Line", "Well_ID", "Ligand"]).copy()
+    if drop_labeling_control:
+        df = df[df["Replicate"].astype(str) != "labeling control"]
+    if df.empty or value_col not in df.columns:
+        return None
+
+    # File -> parsed date (for ordering + labels).
+    fd = df.drop_duplicates("File_Name")[["File_Name", "Date"]].copy()
+    fd["_dt"] = parse_date_series(fd["Date"], context="crc preview")
+    dt_by_file = dict(zip(fd["File_Name"].astype(str), fd["_dt"]))
+
+    def _date_key(f):
+        dt = dt_by_file.get(str(f))
+        return (pd.Timestamp.max if (dt is None or pd.isna(dt)) else pd.Timestamp(dt), str(f))
+
+    def _date_label(f):
+        dt = dt_by_file.get(str(f))
+        return pd.Timestamp(dt).strftime("%d.%m.%y") if (dt is not None and pd.notna(dt)) else "?"
+
+    if "Mean" in value_col:                       # one column per file (biological replicate)
+        pivot = df.pivot_table(index="Plate_Row", columns="File_Name",
+                               values=value_col, aggfunc="first", dropna=False)
+        units = sorted(pivot.columns, key=_date_key)
+        pivot = pivot.reindex(columns=units)
+        labels = [_date_label(f) for f in units]                       # date only
+    else:                                         # one column per technical-replicate well
+        df["_col"] = df["Well_ID"].astype(str).str[1:]
+        rep_by_unit = {(str(r["File_Name"]), str(r["_col"])): str(r["Replicate"])
+                       for _, r in df.drop_duplicates(["File_Name", "_col"]).iterrows()}
+        pivot = df.pivot_table(index="Plate_Row", columns=["File_Name", "_col"],
+                               values=value_col, aggfunc="first", dropna=False)
+        units = sorted(pivot.columns,
+                       key=lambda fc: (_date_key(fc[0]),
+                                       int(fc[1]) if str(fc[1]).isdigit() else str(fc[1])))
+        pivot = pivot.reindex(columns=units)
+        labels = [f"{_date_label(f)} ({rep_by_unit.get((str(f), str(c)), '?')})"  # date (rep #)
+                  for (f, c) in units]
+
+    pivot.columns = labels
+    return _crc_conc_index(df, pivot)
+
+
 def filter_by_conc(df_in, criteria_list):
     """Filters a DataFrame to rows matching the given concentration criteria."""
     filtered = []
