@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from models import MASTER_COLUMNS, LEGACY_COLUMN_DEFAULTS, APP_VERSION
-from export import ensure_master_csv_schema
+from export import ensure_master_csv_schema, MAIN_ONLY_CONDITION
 from processing import coerce_bool
 from restore import (scope_blob_for_merge, remap_blob_file_names,
                      well_token, build_resolve_ctx, parse_exclusion_blob)
@@ -265,6 +265,18 @@ def _tokens(value) -> list:
     return [t.strip() for t in str(value).split(" + ") if t.strip()]
 
 
+def _join_transfection(remaining_cf, casing) -> str:
+    """Join the remaining (case-folded) tokens into a canonical Transfection string.
+
+    The main plasmid-only sentinel (MAIN_ONLY_CONDITION, "-") is meaningful ONLY when it
+    stands alone — once canonicalization leaves the well with a construct, drop the sentinel"""
+    toks = sorted(remaining_cf)
+    sentinel = MAIN_ONLY_CONDITION.casefold()
+    if sentinel in toks and len(toks) > 1:
+        toks = [t for t in toks if t != sentinel]
+    return " + ".join(casing.get(k, k) for k in toks)
+
+
 def _build_casing(selected_main, *value_iterables) -> dict:
     """Map case-folded token -> canonical original casing (first occurrence wins). The
     selected_main casing is registered first so the emitted backbone uses the user's casing."""
@@ -447,8 +459,7 @@ def plan_canonicalization(sources_or_merged_df, selected_main=None) -> CanonPlan
         for (main, transf, cell, lig), agg in cond_agg.items():
             cf = agg['cf']
             if sel_cf <= cf:
-                remaining = sorted(cf - sel_cf)
-                new_transf = " + ".join(casing.get(k, k) for k in remaining)
+                new_transf = _join_transfection(cf - sel_cf, casing)
                 if (global_main, new_transf) != (main, transf):
                     rewrites.append({
                         "match": (cell, lig, tuple(sorted(cf))),
@@ -495,9 +506,7 @@ def apply_canonicalization(df: pd.DataFrame, plan: CanonPlan, log_fn=None) -> pd
         main, transf = r['Main_Plasmids'], r['Transfection']
         cf = {t.casefold() for t in (_tokens(main) + _tokens(transf))}
         if sel_cf <= cf:
-            remaining = sorted(cf - sel_cf)
-            combo_map[(main, transf)] = (global_main,
-                                         " + ".join(casing.get(k, k) for k in remaining))
+            combo_map[(main, transf)] = (global_main, _join_transfection(cf - sel_cf, casing))
         else:
             combo_map[(main, transf)] = (None, _CANON_DROP_SINK)   # unresolved -> sink
 

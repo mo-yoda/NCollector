@@ -7,6 +7,11 @@ from restore import migrate_blob_separator
 
 logger = logging.getLogger("NCollector")
 
+# Condition label for wells that carry only the Main_Plasmids backbone (blank Transfection).
+# Must be non-empty (the dropdown cascade treats "" as "nothing selected") and
+# not a plasmid token (so Main_Plasmids needs no rewrite). See ensure_master_csv_schema.
+MAIN_ONLY_CONDITION = "-"
+
 def parse_ncollector_version(value):
     """Extract (major, minor, patch) from a version string like 'N Collector v2.0.5'.
     Returns None if no vX.Y.Z pattern is present (missing / '< v2' / free text)."""
@@ -221,6 +226,16 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
     if "Empty/NoID" in df.get('Transfection', pd.Series()).values:
         _modified("Removing legacy 'Empty/NoID' data...")
         df = df[df['Transfection'] != "Empty/NoID"].copy()
+
+    # --- Handle empty Transfection wells that are main-plasmids-only conditions (v<2.0.5) ---
+    # It cannot be empty string ("") as this is treated by dropdown cascade as "nothing selected"
+    if 'Transfection' in df.columns:
+        blank_trans = (df['Transfection'].isna()
+                       | df['Transfection'].astype(str).str.strip().isin(["", "nan", "None"]))
+        if blank_trans.any():
+            df.loc[blank_trans, 'Transfection'] = MAIN_ONLY_CONDITION
+            _modified(f"Labeled {int(blank_trans.sum())} main plasdmids-only conditions "
+                      f"(blank Transfection) as '{MAIN_ONLY_CONDITION}'.")
 
     # --- Reconstruct Bl_LP if missing (pre-v2 beta CSVs only had Bl_Corrected_BRET) ---
     if 'Bl_LP' not in df.columns and 'Bl_Corrected_BRET' in df.columns:
