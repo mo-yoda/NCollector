@@ -205,15 +205,17 @@ def ensure_master_csv_schema(df: pd.DataFrame, log_fn=None) -> tuple[pd.DataFram
             _modified(f"'{col}' column missing. Assigned default: '{default_val}'.")
 
     # --- Normalize Info_Sheet to a consistent string column ---
-    # read_csv brings empty cells in as NaN -> the column is mixed (float NaN + str)
-    # Coerce to a single string dtype (NaN -> "", matching the legacy default)
+    # read_csv brings empty cells in as NaN -> the column is mixed (float NaN + str).
+    # Coerce to a single string dtype (NaN -> "", matching the legacy default).
+    # ONLY an in-memory read-representation fix (an empty cell and "" round-trip identically on
+    # disk), so it must NOT count as a schema modification — otherwise importing a freshly
+    # saved master would needlessly raise the "Master CSV Updated" dialog. Logged at DEBUG.
     if 'Info_Sheet' in df.columns:
         _info_norm = df['Info_Sheet'].fillna("").astype(str)
         if not _info_norm.equals(df['Info_Sheet']):
-            _n_filled = int(df['Info_Sheet'].isna().sum())
             df['Info_Sheet'] = _info_norm
-            _modified(f"Normalized 'Info_Sheet' to string dtype "
-                      f"(filled {_n_filled} NaN -> '').")
+            logger.debug("Normalized 'Info_Sheet' to string dtype (in-memory read fix; "
+                         "not a schema change).")
 
     # --- v1.0.0 legacy cleanup ---
     if "Empty/NoID" in df.get('Transfection', pd.Series()).values:
