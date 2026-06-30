@@ -724,6 +724,7 @@ class NCollectorApp:
                  f" + {len(pending_target)} criteria-targeted well(s) ---")
 
         config = self._build_recompute_config()
+        before_excluded = self._excluded_well_set()   # to detect which wells get reverted
 
         # One shared resolution context for the whole batch revert. Precomputes the
         # invariant resolution work (normalised dates, stripped criteria columns, per-rule
@@ -818,6 +819,14 @@ class NCollectorApp:
             self.log(f"   [WARNING] {len(uniq)} well(s) could not be reverted:")
             for (f, w, reason) in uniq:
                 self.log(f"       - {f} / {w}: {reason}")
+
+        # Re-run vehicle check
+        # if reverted wells include vehicle wells + only for the recalculated conditions
+        affected_keys = before_excluded ^ self._excluded_well_set()
+        veh_detected = self._vehicle_warnings_for_affected(affected_keys)
+        new_veh = [w for w in veh_detected if w['Display'] not in self.ignored_warnings]
+        if new_veh:
+            self.show_warning_review(new_veh)
 
         # Update the crc plot (if open) against the recomputed data
         self._refresh_crc_window()
@@ -1361,9 +1370,10 @@ class NCollectorApp:
         Is_Excluded=True (add-only), and the affected files are recomputed via
         recompute_master_after_exclusion — the one and only re-application path. The
         object pipeline (process_bret_measurement) is NOT re-run here (it runs only at
-        initial load). The lum + vehicle checks are then auto-re-run on the recomputed
-        data and filtered against previously-ignored warnings, preserving the
-        "exclude -> new warnings may appear" loop in both modes.
+        initial load). Only the vehicle check is auto-re-run on the recomputed data (gated to
+        when vehicle / labeling-control wells were affected, scoped to the recalculated
+        conditions) and filtered against previously-ignored warnings. The lum check is NOT
+        re-run on exclusion: use the manual "Re-run Lum Check" button for an on-demand full scan).
         """
         if not self.pending_exclusions:
             self.log("No exclusion rules defined.")
@@ -1403,6 +1413,7 @@ class NCollectorApp:
             [self.master_df[c].astype(str) for c in key_cols])
         target_mask = pd.Series(key_index.isin(list(targets)), index=self.master_df.index)
 
+        before_excluded = self._excluded_well_set()   # to detect which wells actually flip
         self.master_df.loc[target_mask, 'Is_Excluded'] = True
         affected_files = sorted(self.master_df.loc[target_mask, 'File_Name'].astype(str).unique().tolist())
         self.log(f"   [DONE] Flagged {len(targets)} well(s) across "
@@ -1422,14 +1433,10 @@ class NCollectorApp:
         # Clear pending list now that the rules are applied
         self.clear_exclusion_list()
 
-        # --- AUTO-RERUN quality checks on the recomputed data ---
-        # Detect fresh warnings, then filter against previously-ignored ones (the auto
-        # path respects self.ignored_warnings; the manual buttons deliberately do not).
-        lum_thr, veh_thr = self._get_thresholds()
-        all_files = self.master_df['File_Name'].astype(str).unique().tolist()
-        detected = self._collect_quality_warnings(
-            all_files, run_lum=True, run_vehicle=True,
-            lum_threshold=lum_thr, vehicle_threshold=veh_thr, log_lum_skips=True)
+        # --- AUTO-RERUN vehicle check on the recomputed data ---
+        # only if excluded wells include vehicle wells + only for the recalculated conditions
+        affected_keys = before_excluded ^ self._excluded_well_set()
+        detected = self._vehicle_warnings_for_affected(affected_keys)
 
         new_warnings = [w for w in detected if w['Display'] not in self.ignored_warnings]
         if new_warnings:
@@ -1506,6 +1513,63 @@ class NCollectorApp:
             self.log(f"   [LUM] Skipped {len(missing_donor)} file(s) lacking donor data: "
                      f"{', '.join(missing_donor)}")
         return warnings
+
+    def _excluded_well_set(self):
+        """Current set of (File_Name, Well_ID) flagged Is_Excluded in master_df."""
+        df = self.master_df
+        if df is None or df.empty or 'Is_Excluded' not in df.columns:
+            return set()
+        mask = df['Is_Excluded'].map(coerce_bool)
+        return set(zip(df.loc[mask, 'File_Name'].astype(str),
+                       df.loc[mask, 'Well_ID'].astype(str)))
+
+    def _vehicle_warnings_for_affected(self, affected_keys):
+        """Vehicle check restricted to what an exclude/revert actually changed.
+
+        `affected_keys` is the set of (File_Name, Well_ID) whose Is_Excluded state flipped.
+        A block's vehicle-check result can move only when one of ITS OWN wells that feeds the
+        vehicle normalisation changed:
+          * a vehicle well (Is_Vehicle == True) — it sets the block's vehicle mean; OR
+          * a labeling-control well (Replicate == "labeling control") — under labeling
+            correction it sets the block's background subtraction, which shifts every well's
+            baseline-corrected value (incl. the vehicle wells), hence the vehicle mean.
+        So the check runs ONLY if a changed well is one of those, and only its warnings for
+        the RECALCULATED conditions (the Ligand / Transfection / Cell_Line of those changed
+        wells) are kept. Returns warning dicts (NOT filtered against ignored_warnings;
+        callers decide).
+        """
+        df = self.master_df
+        if df is None or df.empty or not affected_keys:
+            return []
+        key = pd.MultiIndex.from_arrays(
+            [df['File_Name'].astype(str), df['Well_ID'].astype(str)])
+        changed = df[pd.Series(key.isin(list(affected_keys)), index=df.index)]
+        if changed.empty:
+            return []
+        relevant_mask = pd.Series(False, index=changed.index)
+        if 'Is_Vehicle' in changed.columns:
+            relevant_mask |= changed['Is_Vehicle'].map(coerce_bool)
+        if 'Replicate' in changed.columns:
+            relevant_mask |= changed['Replicate'].astype(str) == "labeling control"
+        relevant = changed[relevant_mask]
+        if relevant.empty:
+            # no vehicle / labeling-control wells changed -> skip the check
+            self.log("   [VEHICLE] Vehicle check skipped — no vehicle or labeling-control "
+                     "wells affected.")
+            return []
+        affected_conditions = set(zip(relevant['Ligand'].astype(str),
+                                      relevant['Transfection'].astype(str),
+                                      relevant['Cell_Line'].astype(str)))
+        affected_files = sorted(relevant['File_Name'].astype(str).unique())
+        _, veh_thr = self._get_thresholds()
+        self.log(f"   [VEHICLE] Re-running vehicle check on {len(affected_files)} file(s), "
+                 f"{len(affected_conditions)} condition(s) (threshold={veh_thr}).")
+        warnings = self._collect_quality_warnings(
+            affected_files, run_lum=False, run_vehicle=True,
+            lum_threshold=0, vehicle_threshold=veh_thr)
+        return [w for w in warnings
+                if (str(w['Ligand']), str(w['Condition']), str(w['Cell_Line']))
+                in affected_conditions]
 
     def rerun_lum_check(self):
         """
