@@ -16,7 +16,7 @@ from processing import (process_bret_measurement, calculate_relative_time, map_p
 from mapping import infer_ligand_info_from_master
 from export import (apply_export_filters, build_row_info, generate_header_key,
                     create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
-                    ensure_master_csv_schema, build_crc_table)
+                    ensure_master_csv_schema, build_crc_table, MAIN_ONLY_CONDITION)
 from restore import (list_active_exclusions, restore_rule, restore_wells,
                      build_resolve_ctx, well_token)
 from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
@@ -3324,11 +3324,18 @@ class NCollectorApp:
                         f"{r}{col_idx}" in result.excluded_wells for r in rows_str)
                     if all_wells_excluded: continue
 
+                    # Main plasmid-only condition (empty plasmids list -> condition_name "") gets
+                    # the same sentinel as compile_master_dataframe / the CSV-import path, so the
+                    # initial-load dropdowns match the master_df.
+                    cond_label = (meta.condition_name
+                                  if str(meta.condition_name).strip() not in ("", "nan", "None")
+                                  else MAIN_ONLY_CONDITION)
+
                     records.append({
                         "File_Name": result.file_name,
                         "Date": result.measurement_date.strftime('%d.%m.%y'),  # dropdown string
                         "Cell_Line": meta.cell_line,
-                        "Condition": meta.condition_name,
+                        "Condition": cond_label,
                         "Ligand": meta.ligand_identity,
                         "Replicate": meta.replicate,
                         "Main_Plasmids": main_plasmids,
@@ -3743,6 +3750,12 @@ class NCollectorApp:
                     except: pass
 
                 merged_df['Transfection'] = merged_df['Well_ID'].map(meta_lookups['Transfection'])
+
+                # label main_plasmid-only wells
+                _blank_cond = (merged_df['Transfection'].isna()
+                               | merged_df['Transfection'].astype(str).str.strip().isin(["", "nan", "None"]))
+                if _blank_cond.any():
+                    merged_df.loc[_blank_cond, 'Transfection'] = MAIN_ONLY_CONDITION
                 merged_df['Cell_Line'] = merged_df['Well_ID'].map(meta_lookups['Cell_Line'])
                 merged_df['Ligand'] = merged_df['Well_ID'].map(meta_lookups['Ligand'])
                 merged_df['Ligand_Conc'] = merged_df['Well_ID'].map(meta_lookups['Ligand_Conc'])
