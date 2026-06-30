@@ -23,6 +23,7 @@ from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
                      ask_filename_collision, warn_and_abort, ask_main_plasmids_selection)
 from plasmid_selection import (group_by_main_plasmids, resolve_selection)
 import merge
+import crc_window
 
 logger = logging.getLogger("NCollector")
 
@@ -142,7 +143,8 @@ class NCollectorApp:
         self.merge_summary_tree = None
         self.merge_main_plasmids_label = None
         self.btn_merge_run = None
-        self.merge_main_plasmids_choice = None # Selection by user if needed
+        self.merge_main_plasmids_choice = None
+        self.crc_window = None # exclude/restore refreshes this window live
 
         # --- Setup GUI ---
         self.setup_logging()
@@ -368,11 +370,17 @@ class NCollectorApp:
     def setup_exclusion_tab(self):
         """Builds GUI for Tab 2 data selection"""
 
+        # Live concentration-response plot in separate window
+        plot_frame = tk.Frame(self.tab_select)
+        plot_frame.pack(fill="x", pady=(10, 0))
+        tk.Button(plot_frame, text="Plot concentration-response curves",
+                  command=self.open_crc_window).pack(fill="x")
+
         # Mode toggle (Exclude vs Revert)
         # Mutually-exclusive, exactly one selected, default "exclude"
         self.var_excl_mode = tk.StringVar(value="exclude")
         mode_frame = tk.LabelFrame(self.tab_select, text="Mode")
-        mode_frame.pack(fill="x", pady=(10, 0), padx=5)
+        mode_frame.pack(fill="x", pady=(5, 0), padx=5)
         self.rb_exclude = ttk.Radiobutton(mode_frame, text="Exclude Data",
                                            variable=self.var_excl_mode, value="exclude",
                                            command=self._on_excl_mode_change)
@@ -811,7 +819,39 @@ class NCollectorApp:
             for (f, w, reason) in uniq:
                 self.log(f"       - {f} / {w}: {reason}")
 
+        # Update the crc plot (if open) against the recomputed data
+        self._refresh_crc_window()
+
         self.log("--- Exclusions reverted & data recomputed ---")
+
+    # --- Concentration-response plot window (Exclude tab) ---
+    def open_crc_window(self):
+        """Open the concentration-response plot window for the current master."""
+        if self.master_df is None or self.master_df.empty:
+            self.log("[CRC] No data loaded to plot.")
+            return
+        if self.crc_window is not None:
+            try:
+                self.crc_window.win.deiconify()
+                self.crc_window.win.lift()
+                self.crc_window.refresh()
+                return
+            except tk.TclError:
+                self.crc_window = None  # window was closed/destroyed; recreate below
+        self.crc_window = crc_window.CRCWindow(
+            self.main_gi,
+            get_master_df=lambda: self.master_df,
+            on_close=lambda: setattr(self, "crc_window", None),
+            log_fn=self.log)
+
+    def _refresh_crc_window(self):
+        """Redraw the open CRC plot (if any) against the current master — called after every
+        exclude/restore and whenever a new master is loaded/merged."""
+        if self.crc_window is not None:
+            try:
+                self.crc_window.refresh()
+            except tk.TclError:
+                self.crc_window = None
 
     def log(self, message):
         """Logs to the separate window"""
@@ -1404,6 +1444,9 @@ class NCollectorApp:
         # --- Refresh the shared Active-Exclusions view (both tabs) + Tab-2 comboboxes ---
         # repopulates both active boxes and re-evaluates the Revert-mode enable state now that the excluded set changed.
         self.refresh_active_exclusions() #
+
+        # Update the crc plot (if open) against the recomputed data
+        self._refresh_crc_window()
 
         self.log("--- Exclusions applied & data recomputed ---")
 
@@ -2524,6 +2567,7 @@ class NCollectorApp:
         self._update_quality_buttons_state()
         self.refresh_active_exclusions()
         self.refresh_plot_helper_options()
+        self._refresh_crc_window()
         self.btn_export_master.config(state="normal")
         self.btn_export_excel.config(state="normal")
 
@@ -2577,6 +2621,7 @@ class NCollectorApp:
             self.built_master_index(source="master")
             self._update_quality_buttons_state()
             self.refresh_active_exclusions()
+            self._refresh_crc_window()
 
             # Enable exports for the imported master (both run purely off master_df)
             self.btn_export_master.config(state="normal")
