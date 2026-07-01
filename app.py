@@ -2,26 +2,27 @@ import os
 import logging
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
-import numpy as np
 import pandas as pd
-from datetime import datetime, date
 
-from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, MASTER_COLUMNS,
-                    DATA_TYPE_MAP, build_plate_layout, ENRICHABLE_COLS, LEGACY_COLUMN_DEFAULTS,
-                    SINGLE_CONC_CATEGORIES, REQUIRES_GROUP_BY)
+from models import (MeasurementFolder, ProcessingConfig, APP_VERSION, DATA_TYPE_MAP,
+                    build_plate_layout, SINGLE_CONC_CATEGORIES, REQUIRES_GROUP_BY)
 from parsing import scan_and_load_folders
-from processing import (process_bret_measurement, calculate_relative_time, map_plate_metadata,
+from processing import (process_bret_measurement,
                         recompute_master_after_exclusion, reconstruct_file_inputs,
                         check_luminescence, check_vehicle_wells, coerce_bool, parse_date_series)
-from mapping import infer_ligand_info_from_master
-from export import (apply_export_filters, build_row_info, generate_header_key,
-                    create_clean_pivot, create_bargraph_table, create_heatmap_table, filter_by_conc,
-                    ensure_master_csv_schema, build_crc_table, MAIN_ONLY_CONDITION)
+from export import (build_row_info, ensure_master_csv_schema,
+                    write_excel_export as _write_excel_export)
 from restore import (list_active_exclusions, restore_rule, restore_wells,
-                     build_resolve_ctx, well_token)
+                     build_resolve_ctx, well_token,
+                     exclusion_key_cols, rule_mask,
+                     resolve_rule_to_targets, resolve_rule_to_wells)
 from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
                      ask_filename_collision, warn_and_abort, ask_main_plasmids_selection)
 from plasmid_selection import (group_by_main_plasmids, resolve_selection)
+from enrich import enrich_master
+from master_index import build_records_from_objects, build_records_from_master
+from master_builder import (compile_master_dataframe as _compile_master_dataframe,
+                            process_folder_to_master as _process_folder_to_master_impl)
 import merge
 import crc_window
 
@@ -1216,96 +1217,23 @@ class NCollectorApp:
         self.pending_exclusions = []
         self.lb_exclusions.delete(0, tk.END)
 
-    # Columns that together identify which master rows an exclusion target refers
-    # to. File_Name + Well_ID alone could collide if two loaded files happen to
-    # share a name (e.g. same filename in two folders), so the match is widened to
-    # the well's biological identity. Both _resolve_rule_to_targets (which builds
-    # the target tuples) and apply_exclusions (which builds the match mask) read
-    # this list, so the two keys are guaranteed to line up by construction.
-    _EXCLUSION_KEY_COLS = ('File_Name', 'Well_ID', 'Ligand', 'Transfection',
-                           'Cell_Line', 'Main_Plasmids')
-
-    def _exclusion_key_cols(self, df):
-        """The exclusion-key columns actually present in df, in fixed order.
-        File_Name + Well_ID are always present; the identity columns are added
-        when available (they are part of MASTER_COLUMNS, so normally all six)."""
-        return [c for c in self._EXCLUSION_KEY_COLS if c in df.columns]
+    # Pending-rule resolution lives in restore.py (free functions, alongside the
+    # rest of exclusion resolution). These thin wrappers feed it the live master_df
+    # and translate the GUI ligand-lock state (cb_lig disabled) into a flag.
 
     def _rule_mask(self, rule, norm_dates):
-        """
-        Boolean mask over master_df for ONE pending criteria rule — the single source of
-        the pending-rule filter semantics, shared by both the exclude path
-        (_resolve_rule_to_targets) and the revert path (_resolve_rule_to_wells) so the two
-        can never drift. "All ligands" also covers the single-locked-ligand case
-        (cb_lig disabled). norm_dates is master_df['Date'] pre-normalised to '%d.%m.%y'.
-        """
-        df = self.master_df
-        mask = pd.Series(True, index=df.index)
-
-        ligand_is_all = (rule.get('Ligand', 'All') in ("All", "")
-                         or str(self.cb_lig['state']) == 'disabled')
-        if not ligand_is_all:
-            mask &= (df['Ligand'].astype(str) == str(rule['Ligand']))
-        if rule.get('Date', 'All') != "All":
-            mask &= (norm_dates == rule['Date'])
-        if rule.get('Cell_Line', 'All') != "All":
-            mask &= (df['Cell_Line'].astype(str) == str(rule['Cell_Line']))
-        if rule.get('Condition', 'All') != "All":
-            # Index vocabulary "Condition" maps to master_df "Transfection".
-            mask &= (df['Transfection'].astype(str) == str(rule['Condition']))
-        rep = rule.get('Replicate', 'All')
-        if rep not in ("All", ""):
-            mask &= (df['Replicate'].astype(str) == str(rep))
-        row = rule.get('Row', 'All')
-        if row not in ("All", ""):
-            mask &= (df['Plate_Row'].astype(str) == str(row))
-        # Scope narrowing (post-merge masters). Skipped when "All"/empty
-        main = rule.get('Main_Plasmids', 'All')
-        if main not in ("All", "") and 'Main_Plasmids' in df.columns:
-            mask &= (df['Main_Plasmids'].astype(str) == str(main))
-        fname = rule.get('File_Name', 'All')
-        if fname not in ("All", "") and 'File_Name' in df.columns:
-            mask &= (df['File_Name'].astype(str) == str(fname))
-        return mask
+        # translates selected ligand into plain flag for wrapper to use
+        ligand_locked = str(self.cb_lig['state']) == 'disabled'
+        return rule_mask(self.master_df, rule, norm_dates, ligand_locked)
 
     def _resolve_rule_to_targets(self, rule, norm_dates):
-        """
-        Resolves one pending exclusion rule to a set of identity tuples directly on
-        master_df (the single source of truth). Same rule semantics as before,
-        including the "whole date" branch — which now resolves to every matching
-        well on that date rather than flagging PrResult.is_excluded.
-
-        Each returned tuple is keyed on self._EXCLUSION_KEY_COLS — i.e. not just
-        (File_Name, Well_ID) but also Ligand / Transfection / Cell_Line /
-        Main_Plasmids — so that a duplicate file name cannot cause the wrong rows
-        to be flagged. apply_exclusions builds its match mask from the same column
-        list, keeping the two sides consistent.
-
-        norm_dates is master_df['Date'] pre-normalised to the '%d.%m.%y' dropdown form.
-        """
-        df = self.master_df
-        mask = self._rule_mask(rule, norm_dates)
-
-        sub = df.loc[mask]
-        if sub.empty:
-            self.log(f"   [WARNING] Rule {rule} matched 0 records.")
-            return set()
-        key_cols = self._exclusion_key_cols(df)
-        return set(zip(*[sub[c].astype(str) for c in key_cols]))
+        ligand_locked = str(self.cb_lig['state']) == 'disabled'
+        return resolve_rule_to_targets(self.master_df, rule, norm_dates,
+                                       ligand_locked, log_fn=self.log)
 
     def _resolve_rule_to_wells(self, rule, norm_dates):
-        """
-        Resolve one pending criteria rule to a set of (File_Name, Well_ID) tuples, using
-        the SAME mask as _resolve_rule_to_targets (via _rule_mask). Used by the revert
-        path, which needs plain (file, well) pairs for the restore.py API rather than the
-        full exclusion-identity tuples the add-only flag mask uses.
-        """
-        df = self.master_df
-        mask = self._rule_mask(rule, norm_dates)
-        sub = df.loc[mask]
-        if sub.empty:
-            return set()
-        return set(zip(sub['File_Name'].astype(str), sub['Well_ID'].astype(str)))
+        ligand_locked = str(self.cb_lig['state']) == 'disabled'
+        return resolve_rule_to_wells(self.master_df, rule, norm_dates, ligand_locked)
 
     def _build_recompute_config(self):
         """
@@ -1409,7 +1337,7 @@ class NCollectorApp:
         # Ligand/Transfection/Cell_Line/Main_Plasmids), built from the exact same
         # column list _resolve_rule_to_targets used, so a shared file name cannot
         # cause the wrong rows to be flagged.
-        key_cols = self._exclusion_key_cols(self.master_df)
+        key_cols = exclusion_key_cols(self.master_df)
         key_index = pd.MultiIndex.from_arrays(
             [self.master_df[c].astype(str) for c in key_cols])
         target_mask = pd.Series(key_index.isin(list(targets)), index=self.master_df.index)
@@ -1960,52 +1888,11 @@ class NCollectorApp:
         return df, was_modified, was_fixed
 
     def _process_folder_to_master(self, folder_paths, config):
-        """
-        Process one or more experiment subfolders into a master-shaped DataFrame WITHOUT
-        touching application state. Used by the Merge tab to add an experiment folder as a
-        merge source.
-
-        Mirrors the object pipeline (scan -> process_bret_measurement -> compile) but
-        writes to a LOCAL frame and returns it: it does NOT assign self.master_df, does NOT
-        flip the warning/export buttons.
-        It DOES run the interactive main-plasmids selection — but purely on the local experiment
-        list (it never reads or mutates self.experiment). Ligand dialogs are reused via the
-        passed ProcessingConfig callbacks, exactly as collect_files builds them. A folder
-        source is enriched by construction (Donor/Acceptor raw channels are always populated
-        by compile), so it always passes the merge channel gate.
-
-        Returns the compiled master-shaped DataFrame, an empty DataFrame if there is nothing
-        to process, or ``None`` if the user cancels the main-plasmids selection.
-        """
-        if not folder_paths:
-            return pd.DataFrame()
-
-        experiment = scan_and_load_folders(folder_paths, log_fn=self.log)
-        if not experiment:
-            return pd.DataFrame()
-
-        # Prompt user to pick main plasmids, folder spans more than one main_plasmids set
-        selected_experiment, _selected_str = self._select_main_plasmids(experiment)
-        if selected_experiment is None:
-            self.log("[MERGE] Folder add cancelled at main-plasmids selection.")
-            return None
-        experiment = selected_experiment
-
-        for folder in experiment:
-            if not folder.protocol:
-                continue
-            for result in folder.results:
-                process_bret_measurement(result, folder.protocol, config)
-
-        # Provenance directory for the Path column (common root of the scanned subfolders).
-        try:
-            directory = (folder_paths[0] if len(folder_paths) == 1
-                         else os.path.commonpath(folder_paths))
-        except ValueError:
-            directory = folder_paths[0]
-
-        return self.compile_master_dataframe(experiment=experiment, directory=directory,
-                                             rule_history_text="")
+        """GUI wrapper around master_builder.process_folder_to_master: injects the
+        interactive main-plasmids selection and self.log. Used by the Merge tab to add an
+        experiment folder as a merge source without touching application state."""
+        return _process_folder_to_master_impl(folder_paths, config,
+                                              self._select_main_plasmids, log_fn=self.log)
 
     def setup_merge_tab(self):
         """Builds the Merge tab: a Sources list, a Summary preview (mirrors Tab 1, with an
@@ -2246,97 +2133,17 @@ class NCollectorApp:
                 for s in self.merge_sources]
 
     def _master_df_to_index_records(self, df, source_str=None):
-        """Tab-1-style per-column index records from a master-shaped df: one record per
-        (File_Name, column) that is not Empty/Unknown and not fully excluded, carrying
-        Ligand/Cell_Line/Condition(=Transfection)/Date/Main_Plasmids. If source_str is given,
-        each record is tagged Source=source_str. Read-only — never mutates df."""
-        records = []
-        if df is None or df.empty:
-            return records
-        work = df.copy()
-        try:
-            work['_DateStr'] = parse_date_series(
-                work['Date'], context="merge index").dt.strftime('%d.%m.%y')
-        except Exception:
-            work['_DateStr'] = work['Date'].astype(str)
-        work['_ColIdx'] = work['Well_ID'].astype(str).str[1:]
-        work['_Excl'] = (work['Is_Excluded'].map(coerce_bool)
-                         if 'Is_Excluded' in work.columns else False)
-        work = work[~work['Transfection'].astype(str).str.contains("Empty", na=False)]
-        work = work[~work['Cell_Line'].astype(str).str.startswith("Unknown", na=False)]
-        for (fname, _col), g in work.groupby(['File_Name', '_ColIdx'], sort=False):
-            if g['_Excl'].all():
-                continue
-            first = g.iloc[0]
-            rec = {
-                "File_Name": fname,
-                "Date": first['_DateStr'],
-                "Cell_Line": first['Cell_Line'],
-                "Condition": first['Transfection'],
-                "Ligand": first['Ligand'],
-                "Main_Plasmids": (str(first['Main_Plasmids'])
-                                  if 'Main_Plasmids' in g.columns else "Unknown"),
-            }
-            if source_str is not None:
-                rec["Source"] = source_str
-            records.append(rec)
-        return records
+        """Merge-preview index records from a master-shaped df (delegates to
+        master_index.build_records_from_master). Read-only — never mutates df."""
+        return build_records_from_master(df, source_str=source_str, context="merge index")
 
     def _compute_merge_preview(self, sources, report):
-        """Produce the merged frame for the summary preview WITHOUT touching self.master_df.
-
-        Mirrors merge_run's conflict handling so the summary reflects the ACTUAL merged
-        result: hard-forbidden (no-override) issues -> None (cannot preview); filename
-        collisions are auto-resolved by 'rename' for the preview (so both copies show);
-        conflicting exclusions are unioned (Is_Excluded only — enough for accurate N, no
-        recompute needed for counts)."""
-        hard = [i for i in report.forbidden
-                if i["code"] not in (merge.FILENAME_DATA_COLLISION,
-                                     merge.MULTIPLE_MAIN_PLASMIDS)]
-        if hard:
-            codes = ", ".join(sorted({i["code"] for i in hard}))
-            self.log(f"[MERGE] Cannot preview merged summary — unresolved forbidden "
-                     f"issue(s): {codes}. Resolve these before merging.")
-            return None
-
-        resolutions = {}
-        if any(i["code"] == merge.FILENAME_DATA_COLLISION for i in report.forbidden):
-            resolutions["filename_collision"] = "rename"
-            self.log("[MERGE] Summary preview: same-named files with different data are "
-                     "shown as separate (renamed) copies.")
-
-        # MULTIPLE_MAIN_PLASMIDS: use selected main plasmids for display summary
-        canon = getattr(report, "canon_plan", None)
-        if canon is not None and canon.requires_selection:
-            selected_mp = self.merge_main_plasmids_choice or list(canon.preselected)
-            if not selected_mp:
-                self.log("[MERGE] Cannot preview merged summary — no Main Plasmids chosen.")
-                return None
-            resolutions["main_plasmids"] = list(selected_mp)
-
-        try:
-            merged_df, _r = merge.merge_masters(sources, resolutions, log_fn=None)
-        except merge.MergeForbidden as e:
-            codes = ", ".join(sorted({i["code"] for i in e.issues}))
-            self.log(f"[MERGE] Cannot preview merged summary: {codes}.")
-            return None
-
-        # Union conflicting exclusions (Is_Excluded only) so fully-excluded columns drop
-        # from N exactly as they will after a real merge.
-        file_col = merged_df['File_Name'].astype(str)
-        well_col = merged_df['Well_ID'].astype(str)
-        for iss in report.needs_input:
-            if iss["code"] != merge.FILENAME_EXCLUSION_CONFLICT:
-                continue
-            ctx = iss["context"]
-            fname = ctx.get("file_name")
-            wells = {str(w) for lst in ctx.get("excluded_wells_by_source", {}).values()
-                     for w in lst}
-            for well in wells:
-                m = (file_col == str(fname)) & (well_col == str(well))
-                if m.any():
-                    merged_df.loc[m, 'Is_Excluded'] = True
-        return merged_df
+        """GUI wrapper around merge.compute_merge_preview (feeds self.log + the chosen
+        main-plasmids). Produces the merged frame for the summary preview WITHOUT touching
+        self.master_df."""
+        return merge.compute_merge_preview(
+            sources, report,
+            main_plasmids_choice=self.merge_main_plasmids_choice, log_fn=self.log)
 
     def merge_display_summary(self):
         """Run the compatibility check (logged) and show the summary of the MERGED result —
@@ -2785,318 +2592,15 @@ class NCollectorApp:
             self.log("[ENRICH] Cancelled — no folder selected.")
             return
 
-        # --- 2. Load protocols + measurements from path ---
-        logger.debug("--- Master Enrichment ---")
-        logger.debug("scanning for files...")
-
-        # Determine plate layout from old master (check for labeling control)
-        is_labeling = "labeling control" in df_old.get("Replicate", pd.Series()).astype(str).values
-
-        # Extract baseline_end_index from old master: row index where Time_(min) == 0
-        baseline_end_idx = None
-        if 'Time_(min)' in df_old.columns:
-            zero_times = df_old.loc[df_old['Time_(min)'] == 0.0]
-            if not zero_times.empty:
-                # Get the position within any file (count rows before time==0 for one well)
-                sample_file = df_old['File_Name'].iloc[0]
-                sample_well = df_old['Well_ID'].iloc[0]
-                file_well_mask = (df_old['File_Name'] == sample_file) & (df_old['Well_ID'] == sample_well)
-                file_well_times = df_old.loc[file_well_mask, 'Time_(min)'].sort_values()
-                zero_idx = (file_well_times == 0.0).values.argmax()
-                baseline_end_idx = int(zero_idx)
-                logger.debug(f"extracted baseline_end_index={baseline_end_idx} from old master.")
-
-        enrich_config = ProcessingConfig(
-            plate_layout=build_plate_layout(is_labeling),
-            labeling_correction=is_labeling,
-            baseline_end_index=baseline_end_idx,
-            ligand_choice_fn=self._ask_ligand_choice_logged,
-            ligand_layout_fn=self._ask_ligand_layout_logged
-        )
-
-        # Get folder paths containing xlsx/xlsm files
-        folder_paths = []
-        for root, dirs, files in os.walk(source_dir):
-            if any(f.endswith(('.xlsx', '.xlsm')) for f in files):
-                folder_paths.append(root)
-
-        # Scan and load (debug-level logging — no per-file output to user)
-        all_folders = scan_and_load_folders(folder_paths)
-
-        # Only keep folders with both protocol and results
-        loaded_folders = [f for f in all_folders if f.protocol and f.results]
-
-        if not loaded_folders:
-            self.log("[ENRICH] ERROR: No valid protocol + measurement pairs found in selected folder.")
-            return
-
-        # Filter to folders matching the Main_Plasmids from the old master
-        old_main_plasmids = df_old['Main_Plasmids'].iloc[0] if 'Main_Plasmids' in df_old.columns else None
-        if old_main_plasmids and old_main_plasmids != "Unknown":
-            matching_folders = []
-            for f in loaded_folders:
-                folder_mp = " + ".join(f.protocol.main_plasmids) if f.protocol.main_plasmids else "Unknown"
-                if folder_mp == old_main_plasmids:
-                    matching_folders.append(f)
-            if matching_folders:
-                logger.debug(f"filtered {len(loaded_folders)} folders to "
-                             f"{len(matching_folders)} matching Main_Plasmids='{old_main_plasmids}'.")
-                loaded_folders = matching_folders
-            else:
-                self.log(f"[ENRICH] ERROR: No folders match Main_Plasmids '{old_main_plasmids}'. "
-                         f"Source files do not match this experiment.")
-                return
-
-        total_files = sum(len(f.results) for f in loaded_folders)
-        self.log(f"[ENRICH] Loaded {total_files} measurement files from "
-                 f"{len(loaded_folders)} folders. Extracting raw data...")
-
-        # For cases master was created with user-input specified ligand layout:
-        # --- 2b. Infer ligand layout and per-plate ligand choices from old master ---
-        all_ligand_choices = {}  # file_name -> "L1" or "L2"
-
-        for folder in loaded_folders:
-            protocol = folder.protocol
-            if not protocol or not protocol.ligand_2:
-                continue
-
-            layout, choices = infer_ligand_info_from_master(
-                df_old, protocol, len(enrich_config.plate_layout))
-
-            if layout:
-                protocol.ligand_layout = layout
-                self.log(f"   [ENRICH] Inferred ligand layout '{layout}' for "
-                         f"protocol '{protocol.file_name}' from existing master")
-
-            if choices:
-                all_ligand_choices.update(choices)
-                for fname, choice in choices.items():
-                    lig_name = (str(protocol.ligand_2) if choice == "L2"
-                                else str(protocol.ligand))
-                    self.log(f"   [ENRICH] Inferred ligand '{lig_name}' for plate '{fname}' "
-                             f"from existing master")
-
-        # Build a ligand_choice_fn that looks up from inferred data,
-        # falling back to the dialog for files not found in the old master
-        def _enrich_ligand_choice(l1_name, l2_name, plate_info):
-            if plate_info in all_ligand_choices:
-                return all_ligand_choices[plate_info]
-            self.log(f"   [ENRICH] Plate '{plate_info}' not found in master — asking user")
-            return self._ask_ligand_choice_logged(l1_name, l2_name, plate_info)
-
-        enrich_config.ligand_choice_fn = _enrich_ligand_choice
-        # ligand_layout_fn remains as dialog fallback for protocols not in old master
-
-        # --- 3. Map metadata and extract raw data per file ---
-        new_file_data = []
-        time_col = "Time (min)"
-        n_ok = 0
-        n_err = 0
-
-        for folder in loaded_folders:
-            protocol = folder.protocol
-            main_plasmids = " + ".join(protocol.main_plasmids) if protocol.main_plasmids else "Unknown"
-
-            for result in folder.results:
-                try:
-                    # Map conditions onto plate columns
-                    map_plate_metadata(result, protocol, enrich_config)
-
-                    # Calculate relative time vector for this file
-                    raw_df = result.raw_bret_ratio_df.copy()
-                    t_vec = calculate_relative_time(
-                        raw_df[time_col], enrich_config.baseline_end_index)
-                    if t_vec is None:
-                        t_vec = list(range(len(raw_df)))
-
-                    # Persist baseline index for subsequent files
-                    if enrich_config.baseline_end_index is None and 0 in t_vec:
-                        enrich_config.baseline_end_index = t_vec.index(0)
-
-                    # PR Time: raw plate reader time mapped by relative time
-                    raw_time_list = (list(result.raw_time)
-                                     if result.raw_time is not None and len(result.raw_time) > 0 else [])
-                    pr_time_map = (dict(zip(t_vec, raw_time_list))
-                                   if len(raw_time_list) == len(t_vec) else {})
-
-                    # Melt helper — uses calculated Time_(min)
-                    def melt_df(df_in, val_name):
-                        work = df_in.drop(columns=[time_col], errors='ignore').copy()
-                        if len(work) == len(t_vec):
-                            work.index = t_vec
-                        work.index.name = "Time_(min)"
-                        return work.reset_index().melt(
-                            id_vars="Time_(min)", var_name="Well_ID", value_name=val_name)
-
-                    # Raw BRET (for post-merge validation — no exclusions)
-                    df_raw = melt_df(raw_df, "Raw_BRET_new")
-                    # Donor and Acceptor (raw, no exclusions — for traceability)
-                    df_donor = melt_df(result.donor_df, "Donor_Raw_kinetic")
-                    df_acceptor = melt_df(result.acceptor_df, "Acceptor_Raw_kinetic")
-
-                    merge_on = ["Time_(min)", "Well_ID"]
-                    df_file = df_raw.merge(df_donor, on=merge_on, how="left") \
-                                    .merge(df_acceptor, on=merge_on, how="left")
-
-                    # PR Time
-                    df_file["PR_Time(min)"] = (df_file["Time_(min)"].map(pr_time_map)
-                                               if pr_time_map else float('nan'))
-
-                    # Add condition metadata for merge
-                    df_file["Date"] = result.measurement_date
-                    df_file["Main_Plasmids"] = main_plasmids
-                    df_file["Info_Sheet"] = str(result.info_sheet) if result.info_sheet else ""
-
-                    meta_maps = {k: {} for k in
-                                 ['Transfection', 'Cell_Line', 'Ligand']}
-                    for well_id in df_file['Well_ID'].unique():
-                        try:
-                            c_idx = int(well_id[1:])
-                            meta = result.column_metadata.get(c_idx)
-                            if meta:
-                                meta_maps['Transfection'][well_id] = meta.condition_name
-                                meta_maps['Cell_Line'][well_id] = meta.cell_line
-                                meta_maps['Ligand'][well_id] = meta.ligand_identity
-                        except:
-                            pass
-
-                    for col_name, mapping in meta_maps.items():
-                        df_file[col_name] = df_file['Well_ID'].map(mapping)
-
-                    new_file_data.append(df_file)
-                    n_ok += 1
-                    logger.debug(f"Extracted {result.file_name}")
-
-                except Exception as e:
-                    n_err += 1
-                    self.log(f"   [ERROR] Failed to extract {result.file_name}: {e}")
-
-        if not new_file_data:
-            self.log("[ENRICH] ERROR: No data could be extracted. Enrichment aborted.")
-            return
-
-        if n_err > 0:
-            self.log(f"[ENRICH] Extracted {n_ok} files ({n_err} failed).")
-        else:
-            logger.debug(f"All {n_ok} files extracted successfully.")
-
-        df_new = pd.concat(new_file_data, ignore_index=True)
-
-        # --- 4. Validate condition combinations ---
-        logger.debug("Validating conditions...")
-        condition_cols = ['Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand']
-
-        old_combos = set(
-            df_old[condition_cols].drop_duplicates().itertuples(index=False, name=None))
-        new_combos = set(
-            df_new[condition_cols].drop_duplicates().itertuples(index=False, name=None))
-
-        missing_combos = old_combos - new_combos
-        if missing_combos:
-            self.log(f"[ENRICH] ERROR: {len(missing_combos)} condition(s) from master CSV "
-                     f"not found in source files:")
-            for combo in list(missing_combos)[:5]:
-                self.log(f"   Missing: {dict(zip(condition_cols, combo))}")
-            self.log("[ENRICH] Enrichment aborted — source files do not match this experiment.")
-            return
-
-        logger.debug(f"All {len(old_combos)} condition combinations found.")
-
-        # --- 5. Validate row count ---
-        if len(df_old) != len(df_new):
-            self.log(f"[ENRICH] ERROR: Row count mismatch — master CSV: {len(df_old)}, "
-                     f"source files: {len(df_new)}. Enrichment aborted.")
-            return
-
-        logger.debug(f"Row count matches ({len(df_old)}).")
-
-        # --- 6. Merge on condition columns + Well_ID + Time_(min) ---
-        merge_cols = ['Date', 'Main_Plasmids', 'Transfection', 'Cell_Line', 'Ligand',
-                      'Well_ID', 'Time_(min)']
-
-        df_old_work = df_old.copy()
-
-        # Normalize Date to consistent YYYY-MM-DD format
-        df_old_work['Date'] = pd.to_datetime(df_old_work['Date']).dt.strftime('%Y-%m-%d')
-        df_new['Date'] = pd.to_datetime(df_new['Date']).dt.strftime('%Y-%m-%d')
-
-        # Normalize Time_(min) to float for both sides
-        df_old_work['Time_(min)'] = df_old_work['Time_(min)'].astype(float)
-        df_new['Time_(min)'] = df_new['Time_(min)'].astype(float)
-
-        # Ensure enrichable columns exist in new data (safety fallback)
-        for col in ENRICHABLE_COLS:
-            if col not in df_new.columns:
-                df_new[col] = LEGACY_COLUMN_DEFAULTS[col]["default"]
-
-        # Select merge keys + enrichable columns + validation column from new data
-        validation_col = 'Raw_BRET_new'
-        enrich_cols = merge_cols + [validation_col] + ENRICHABLE_COLS
-        df_enrich = df_new[enrich_cols].copy()
-
-        # Drop old empty columns before merge
-        df_old_work.drop(columns=ENRICHABLE_COLS, inplace=True, errors='ignore')
-
-        df_merged = df_old_work.merge(df_enrich, on=merge_cols, how='left')
-
-        # Check if merge created duplicate rows (many-to-many)
-        if len(df_merged) != len(df_old_work):
-            self.log(f"[ENRICH] ERROR: Merge changed row count from {len(df_old_work)} to {len(df_merged)}. "
-                     f"Likely duplicate merge keys in source data. Enrichment aborted.")
-            # Find which keys are duplicated
-            dup_keys = df_enrich[df_enrich.duplicated(subset=merge_cols, keep=False)]
-            if not dup_keys.empty:
-                sample = dup_keys[merge_cols].head(3).to_dict('records')
-                logger.debug(f"example duplicate keys: {sample}")
-            return
-
-        # --- 7. Post-merge validation: Raw BRET data should match ---
-        # Validation logic: BRET ratio in old master (Raw_BRET_kinetic) is compared to extracted ratio from new path:
-        # Difference of the two should be 0 (np.isclose defines decimal tolerance). NAs (excluded values) are ignored.
-        if 'Raw_BRET_kinetic' in df_merged.columns and validation_col in df_merged.columns:
-            # Compare only non-excluded rows (old master has NaN for excluded wells)
-            compare_mask = df_merged['Raw_BRET_kinetic'].notna() & df_merged[validation_col].notna()
-            if compare_mask.any():
-                old_vals = df_merged.loc[compare_mask, 'Raw_BRET_kinetic'].astype(float).values
-                new_vals = df_merged.loc[compare_mask, validation_col].astype(float).values
-                diff = ~np.isclose(old_vals, new_vals, rtol=1e-8, atol=1e-8)
-                n_mismatched = diff.sum()
-                if n_mismatched > 0:
-                    self.log(f"[ENRICH] WARNING: {n_mismatched} rows have mismatched Raw BRET values. "
-                             f"Source files may not be the originals.")
-                    # Debug: show mismatched rows
-                    mismatch_positions = compare_mask[compare_mask].index[diff]
-                    for idx in mismatch_positions[:5]:
-                        row = df_merged.loc[idx]
-                        logger.debug(
-                            f"Mismatch row {idx}: "
-                            f"Well={row.get('Well_ID')} Time={row.get('Time_(min)')} "
-                            f"Date={row.get('Date')} Transf={row.get('Transfection')} "
-                            f"old={row['Raw_BRET_kinetic']!r} new={row[validation_col]!r} "
-                            f"delta={abs(float(row['Raw_BRET_kinetic']) - float(row[validation_col])):.15e}"
-                        )
-                else:
-                    logger.debug("Raw BRET validation passed.")
-            else:
-                self.log("[ENRICH] WARNING: No overlapping non-NaN Raw BRET data to validate.")
-
-        # Drop the temporary validation column
-        df_merged.drop(columns=[validation_col], inplace=True, errors='ignore')
-
-        # --- 8. Final result ---
-        n_populated = df_merged['Donor_Raw_kinetic'].notna().sum()
-        n_total = len(df_merged)
-        logger.info(f"Complete. Populated {n_populated}/{n_total} rows with raw channel data.")
-
-        if n_populated == 0:
-            self.log("[ENRICH] ERROR: No data was populated after merge. Enrichment aborted.")
-            return
+        df_merged = enrich_master(
+            df_old, source_dir, log_fn=self.log,
+            ask_ligand_choice_fn=self._ask_ligand_choice_logged,
+            ask_ligand_layout_fn=self._ask_ligand_layout_logged)
+        if df_merged is None:
+            return  # abort reason already logged
 
         # Update master
         self.master_df = df_merged
-
-        # Update NCollector version to current
-        self.master_df['NCollector_version'] = APP_VERSION
 
         # Update path if it was missing
         if stored_path in (None, "undocumented path"):
@@ -3303,86 +2807,17 @@ class NCollectorApp:
 
     def _build_index_from_objects(self):
         """Object-path index build (initial load). Reads live column_metadata."""
-        records = []
-        rows_str = "ABCDEFGH"
-
-        for folder in self.experiment:
-            # Match the Main_Plasmids string exactly as the compile path writes it onto master_df
-            proto = getattr(folder, "protocol", None)
-            main_plasmids = (" + ".join(proto.main_plasmids)
-                             if proto and proto.main_plasmids else "Unknown")
-            for result in folder.results:
-                if not result.column_metadata: continue
-                if result.is_excluded: continue
-
-                for col_idx, meta in result.column_metadata.items():
-                    # Filter out empty cols
-                    if meta.condition_name is None or "Empty" in meta.condition_name: continue
-                    # Skip columns whose every well is excluded (N count drops). At
-                    # initial load excluded_wells is empty, so nothing is skipped here.
-                    all_wells_excluded = all(
-                        f"{r}{col_idx}" in result.excluded_wells for r in rows_str)
-                    if all_wells_excluded: continue
-
-                    # Main plasmid-only condition (empty plasmids list -> condition_name "") gets
-                    # the same sentinel as compile_master_dataframe / the CSV-import path, so the
-                    # initial-load dropdowns match the master_df.
-                    cond_label = (meta.condition_name
-                                  if str(meta.condition_name).strip() not in ("", "nan", "None")
-                                  else MAIN_ONLY_CONDITION)
-
-                    records.append({
-                        "File_Name": result.file_name,
-                        "Date": result.measurement_date.strftime('%d.%m.%y'),  # dropdown string
-                        "Cell_Line": meta.cell_line,
-                        "Condition": cond_label,
-                        "Ligand": meta.ligand_identity,
-                        "Replicate": meta.replicate,
-                        "Main_Plasmids": main_plasmids,
-                    })
-
+        records = build_records_from_objects(self.experiment)
         result_df = self._finalize_index(records)
         # Object path also primes the plot helper (master_df may not exist yet).
         self.refresh_plot_helper_options()
         return result_df
 
     def _build_index_from_master(self):
-        """
-        Master-path index build (CSV/import mode + after every exclusion). Derives the
-        same dropdown vocabulary directly from master_df. Note the column mapping:
-        index "Condition" <- master_df "Transfection".
-        """
-        df = self.master_df
-        if df is None or df.empty:
-            return self._finalize_index([])
-
-        work = df.copy()
-        # Dropdown date string (consistent with the object branch '%d.%m.%y').
-        work['_DateStr'] = parse_date_series(work['Date'], context="_build_index_from_master").dt.strftime('%d.%m.%y')
-        work['_ColIdx'] = work['Well_ID'].astype(str).str[1:]
-        work['_Excl'] = (work['Is_Excluded'].map(coerce_bool)
-                         if 'Is_Excluded' in work.columns else False)
-
-        # Drop empty/unknown columns (defensive — compile already removes them).
-        work = work[~work['Transfection'].astype(str).str.contains("Empty", na=False)]
-        work = work[~work['Cell_Line'].astype(str).str.startswith("Unknown", na=False)]
-
-        records = []
-        for (fname, col_idx), g in work.groupby(['File_Name', '_ColIdx'], sort=False):
-            # Skip a column whose every well is currently excluded (N count drops).
-            if g['_Excl'].all():
-                continue
-            first = g.iloc[0]
-            records.append({
-                "File_Name": fname,
-                "Date": first['_DateStr'],
-                "Cell_Line": first['Cell_Line'],
-                "Condition": first['Transfection'],
-                "Ligand": first['Ligand'],
-                "Replicate": str(first['Replicate']),
-                "Main_Plasmids": str(first['Main_Plasmids']) if 'Main_Plasmids' in g.columns else "Unknown",
-            })
-
+        """Master-path index build (CSV/import mode + after every exclusion). Derives the
+        dropdown vocabulary directly from master_df (index "Condition" <- "Transfection")."""
+        records = build_records_from_master(self.master_df, include_replicate=True,
+                                            context="_build_index_from_master")
         return self._finalize_index(records)
 
     def _ask_ligand_choice_logged(self, ligand_1_name, ligand_2_name, plate_info):
@@ -3535,11 +2970,7 @@ class NCollectorApp:
         self.btn_export_excel.config(state="normal")
 
     def compile_master_dataframe(self, experiment=None, directory=None, rule_history_text=None):
-        """
-        Compiles all processing steps into one Master DataFrame.
-        Structure: 1 row per well per timepoint.
-        Means are repeated for respective technical replicates as AUCs for all timepoints.
-        Empty wells (unknwon cell line or empty condition) are dropped.
+        """GUI wrapper around master_builder.compile_master_dataframe.
 
         Defaults pull from application state (self.experiment / self.directory /
         self.rule_history_text) for the normal object pipeline. The Merge tab passes a
@@ -3549,238 +2980,7 @@ class NCollectorApp:
         experiment = self.experiment if experiment is None else experiment
         directory = self.directory if directory is None else directory
         rule_history_text = self.rule_history_text if rule_history_text is None else rule_history_text
-
-        if not experiment:
-            return None
-        self.log("\n--- Building Master CSV ---")
-
-        all_files_data = []
-
-        for folder in experiment:
-            if folder.protocol.main_plasmids:
-                main_plasmids = " + ".join(folder.protocol.main_plasmids)
-            else:
-                main_plasmids = "Unknown"
-
-            for res in folder.results:
-                if res.is_excluded: continue
-
-                # --- PREPARE KINETIC DATA ---
-                # Use pandas melt function to prepare each df from wide to long format
-                def melt_df(df, val_name, time_vec):
-                    if df is None or df.empty: return pd.DataFrame()
-
-                    df_work = df.copy()
-                    # Check lengths
-                    if len(df_work) != len(time_vec):
-                        logger.warning(
-                            f"Length mismatch in {res.file_name}: Data {len(df_work)} vs Time {len(time_vec)}")
-                        # Use generic index
-                        df_work.index.name = "Time_Idx"
-                        id_var = "Time_Idx"
-                    else:
-                        # Set the Time Vector as the Index
-                        df_work.index = time_vec
-                        df_work.index.name = "Time_(min)"
-                        id_var = "Time_(min)"
-
-                    return df_work.reset_index().melt(
-                        id_vars=id_var,
-                        var_name="Well_ID",
-                        value_name=val_name)
-
-                # Get the Time Vector for this file
-                t_vec = res.time_vector
-                if not t_vec:
-                    # Fallback if time vector calculation failed
-                    t_vec = range(len(res.raw_bret_ratio_cleaned))
-
-                # Ignore time col in raw bret df
-                raw_clean = res.raw_bret_ratio_cleaned.drop(columns=["Time (min)"], errors='ignore')
-
-                # df_og = melt_df(res.raw_bret_ratio_df.drop(columns=["Time (min)"], errors='ignore'),
-                #                "OG_BRET_ratio", t_vec)
-                df_donor = melt_df(res.donor_df.drop(columns=["Time (min)"], errors='ignore'),
-                                "Donor_Raw_kinetic", t_vec)
-                df_acceptor = melt_df(res.acceptor_df.drop(columns=["Time (min)"], errors='ignore'),
-                                "Acceptor_Raw_kinetic", t_vec)
-                df_raw = melt_df(raw_clean, "Raw_BRET_kinetic", t_vec)
-                df_lab = melt_df(res.labeling_corr_kinetic, "Lab_BRET_kinetic", t_vec)
-                df_bl = melt_df(res.bl_corr_kinetic, "Bl_Corrected_BRET", t_vec)
-                df_norm = melt_df(res.kinetic_df, "Veh_Norm_Kinetic", t_vec)
-
-                # Merge on [Time_(min), Well_ID]
-                merge_on = [df_donor.columns[0], "Well_ID"]
-
-                merged_df = df_donor.merge(df_acceptor, on=merge_on, how="left") \
-                    .merge(df_raw, on=merge_on, how="left") \
-                    .merge(df_lab, on=merge_on, how="left") \
-                    .merge(df_bl, on=merge_on, how="left") \
-                    .merge(df_norm, on=merge_on, how="left")
-
-                # --- PRISTINE, EXCLUSION-FREE RAW (uniform provenance for ALL files) ---
-                # Raw_BRET_unexcluded = Acceptor / Donor,
-                # Donor 0/NaN -> NaN
-                # Left UNROUNDED. This column is never NaN-d by exclusion, so it is the
-                # pristine source the engine restores from.
-                _donor = pd.to_numeric(merged_df["Donor_Raw_kinetic"], errors="coerce")
-                _acceptor = pd.to_numeric(merged_df["Acceptor_Raw_kinetic"], errors="coerce")
-                merged_df["Raw_BRET_unexcluded"] = (
-                    _acceptor / _donor.where((_donor != 0) & _donor.notna())
-                )
-
-                # --- MAP RAW PLATE READER TIME (file-specific, from res.raw_time) ---
-                if res.raw_time is not None and len(res.raw_time) == len(t_vec):
-                    raw_time_map = dict(zip(t_vec, res.raw_time))
-                    merged_df["PR_Time(min)"] = merged_df["Time_(min)"].map(raw_time_map)
-                else:
-                    merged_df["PR_Time(min)"] = float('nan')
-
-                # --- MAP DATA FOR CRC ---
-                # Last 3x points/AUC is 1 value per well, map data to Well_ID
-                # Last 3 time points (lp)
-                raw_bret_map = res.raw_bret_points_df.iloc[0].to_dict() if res.raw_bret_points_df is not None else {}
-                lp_lab_map = res.labeling_corr_lp_df.iloc[0].to_dict() if res.labeling_corr_lp_df is not None else {}
-                lp_bl_map = res.bl_corr_lp_df.iloc[0].to_dict() if res.bl_corr_lp_df is not None else {}
-                lp_norm_map = res.lp_df.iloc[0].to_dict() if res.lp_df is not None else {}
-
-                # AUC
-                auc_lab_map = res.labeling_corr_auc_df.iloc[0].to_dict() if res.labeling_corr_auc_df is not None else {}
-                auc_bl_map = res.bl_corr_auc_df.iloc[0].to_dict() if res.bl_corr_auc_df is not None else {}
-                auc_norm_map = res.auc_df.iloc[0].to_dict() if res.auc_df is not None else {}
-
-                merged_df['Raw_BRET_CRC'] = merged_df['Well_ID'].map(raw_bret_map)
-                merged_df['Lab_LP'] = merged_df['Well_ID'].map(lp_lab_map)
-                merged_df['Bl_LP'] = merged_df['Well_ID'].map(lp_bl_map)
-                merged_df['Veh_Norm_LP'] = merged_df['Well_ID'].map(lp_norm_map)
-
-                merged_df['Lab_AUC'] = merged_df['Well_ID'].map(auc_lab_map)
-                merged_df['Bl_AUC'] = merged_df['Well_ID'].map(auc_bl_map)
-                merged_df['Veh_Norm_AUC'] = merged_df['Well_ID'].map(auc_norm_map)
-
-                # --- PREPARE MEAN KINETIC AND AUC MAPPING ---
-                well_to_mean_map = {}
-                well_to_lp_mean_map = {}
-                well_to_auc_mean_map = {}
-                for col_idx, meta in res.column_metadata.items():
-                    col_str = str(col_idx)
-                    for row_char in "ABCDEFGH":
-                        well_id = f"{row_char}{col_str}"
-
-                        # Construct Key: "Condition|Cell|Ligand|Row"
-                        mean_key = f"{meta.condition_name}|{meta.cell_line}|{meta.ligand_identity}|{row_char}"
-
-                        # Grab Kinetic Mean Series
-                        if res.kinetic_mean_df is not None and mean_key in res.kinetic_mean_df.columns:
-                            well_to_mean_map[well_id] = res.kinetic_mean_df[mean_key].tolist()
-
-                        # Grab Last points Mean Value
-                        if res.lp_mean_df is not None and mean_key in res.lp_mean_df.columns:
-                            well_to_lp_mean_map[well_id] = res.lp_mean_df[mean_key].iloc[0]
-
-                        # Grab AUC Mean Value
-                        if res.auc_mean_df is not None and mean_key in res.auc_mean_df.columns:
-                            well_to_auc_mean_map[well_id] = res.auc_mean_df[mean_key].iloc[0]
-
-                merged_df['LP_Mean'] = merged_df['Well_ID'].map(well_to_lp_mean_map)
-                merged_df['AUC_Mean'] = merged_df['Well_ID'].map(well_to_auc_mean_map)
-
-                # --- MAP KINETIC MEANS ---
-                # Create  specialized DF to merge accurately by Time
-                mean_rows = []
-                # Use the same t_vec defined above
-                for well_id, mean_series in well_to_mean_map.items():
-                    # Ensure mean series matches time vector length
-                    if len(mean_series) == len(t_vec):
-                        for t, val in zip(t_vec, mean_series):
-                            mean_rows.append({
-                                'Well_ID': well_id,
-                                'Time_(min)': t,  # Using actual time for merge key
-                                'Kinetic_Mean': val
-                            })
-                if mean_rows:
-                    df_means = pd.DataFrame(mean_rows)
-                    # Merge on Time and Well
-                    merge_keys = ['Well_ID', 'Time_(min)']
-                    merged_df = merged_df.merge(df_means, on=merge_keys, how='left')
-                else:
-                    merged_df['Kinetic_Mean'] = float('nan')
-
-                all_files_data.append(merged_df)
-
-                # --- ADD METADATA ---
-                merged_df["NCollector_version"] = APP_VERSION
-                merged_df["Path"] = directory
-                merged_df["Info_Sheet"] = str(res.info_sheet) if res.info_sheet else ""
-                merged_df["File_Name"] = res.file_name
-                merged_df["Date"] = res.measurement_date
-                merged_df["Main_Plasmids"] = main_plasmids
-
-                # Get the exclusion text (handle empty case)
-                exclusion_text = rule_history_text if rule_history_text else "None"
-                # v2.0.5: join rules with " || "
-                exclusion_text_clean = exclusion_text.replace("\n", " || ")
-                merged_df["Applied_Exclusions"] = exclusion_text_clean
-
-                # Mark excluded wells: True if this well was in the exclusion list
-                excluded_set = set(res.excluded_wells)
-                merged_df["Is_Excluded"] = merged_df["Well_ID"].isin(excluded_set)
-
-                # Meta Lookups (Optimization: Build dicts once per file)
-                meta_lookups = {'Transfection': {},
-                                'Cell_Line': {},
-                                'Ligand': {},
-                                'Ligand_Conc': {},
-                                'Plate_Row': {},
-                                'Replicate': {}}
-
-                for well_id in merged_df['Well_ID'].unique():
-                    try:
-                        c_idx = int(well_id[1:])
-                        row_char = well_id[0]
-                        meta = res.column_metadata.get(c_idx)
-                        if meta:
-                            meta_lookups['Transfection'][well_id] = meta.condition_name
-                            meta_lookups['Cell_Line'][well_id] = meta.cell_line
-                            meta_lookups['Ligand'][well_id] = meta.ligand_identity
-                            meta_lookups['Ligand_Conc'][well_id] = meta.ligand_conc.get(
-                                row_char, float('nan'))
-                            meta_lookups['Plate_Row'][well_id] = row_char
-                            meta_lookups['Replicate'][well_id] = meta.replicate
-                    except: pass
-
-                merged_df['Transfection'] = merged_df['Well_ID'].map(meta_lookups['Transfection'])
-
-                # label main_plasmid-only wells
-                _blank_cond = (merged_df['Transfection'].isna()
-                               | merged_df['Transfection'].astype(str).str.strip().isin(["", "nan", "None"]))
-                if _blank_cond.any():
-                    merged_df.loc[_blank_cond, 'Transfection'] = MAIN_ONLY_CONDITION
-                merged_df['Cell_Line'] = merged_df['Well_ID'].map(meta_lookups['Cell_Line'])
-                merged_df['Ligand'] = merged_df['Well_ID'].map(meta_lookups['Ligand'])
-                merged_df['Ligand_Conc'] = merged_df['Well_ID'].map(meta_lookups['Ligand_Conc'])
-                merged_df['Plate_Row'] = merged_df['Well_ID'].map(meta_lookups['Plate_Row'])
-                merged_df['Replicate'] = merged_df['Well_ID'].map(meta_lookups['Replicate'])
-                merged_df['Is_Vehicle'] = (
-                    (merged_df['Plate_Row'] == 'H') & (merged_df['Ligand_Conc'].isna())
-                )
-
-                # Drop empty wells (Empty transfections / Unknown cell lines)
-                merged_df.drop(
-                    merged_df[
-                        merged_df['Transfection'].astype(str).str.contains("Empty", na=False) |
-                        merged_df['Cell_Line'].astype(str).str.startswith("Unknown", na=False)
-                    ].index, inplace=True
-                )
-
-        if not all_files_data:
-            return pd.DataFrame()
-
-        # Combine all files
-        master_df = pd.concat(all_files_data, ignore_index=True)
-        # Cleanup columns
-        final_cols = [c for c in MASTER_COLUMNS if c in master_df.columns]
-        return master_df[final_cols]
+        return _compile_master_dataframe(experiment, directory, rule_history_text, log_fn=self.log)
 
     def export_master_csv(self, is_updated = False):
         """Saves compiled master df to csv"""
@@ -3805,179 +3005,8 @@ class NCollectorApp:
             self.log(f"   [ERROR] Failed to save CSV: {e}")
 
     def write_excel_export(self, file_path, master_df, config):
-        """
-        Writes the Excel file based on the config dictionary provided by either tab 1 (default) or tab 3 (user).
-        """
-        try:
-            df_subset = apply_export_filters(self.master_df, config)
-
-            if df_subset.empty:
-                logger.error("Export failed: Filter resulted in no data.")
-                return
-
-            # Define groups
-            group_by = config.get('group_by', 'None')
-            data_groups = []  # List of tuples: (Group_Name, DataFrame)
-
-            if group_by == 'Cell Line':
-                for name, group in df_subset.groupby('Cell_Line'):
-                    data_groups.append((str(name), group))
-            elif group_by == 'Transfection':
-                for name, group in df_subset.groupby('Transfection'):
-                    data_groups.append((str(name), group))
-            else:
-                data_groups.append(("", df_subset))  # No grouping
-
-            # Check whether labeling control was applied
-            is_labeling = True if "labeling control" in df_subset["Replicate"].values else False
-
-            # Category from config (set by plot helper), or detect from column membership for default export
-            export_category = config.get('category', None)
-            kinetic_types = list(DATA_TYPE_MAP["kinetic"].values())
-            crc_types = list(DATA_TYPE_MAP["CRC"].values())
-
-            with pd.ExcelWriter(file_path) as writer:
-                sheets_written = False
-
-                # --- 1. METADATA SHEET ---
-                file_names = df_subset["File_Name"].unique().tolist()
-                mp_str = "Unknown"
-                if 'Main_Plasmids' in df_subset.columns:
-                    mp_vals = df_subset['Main_Plasmids'].unique()
-                    if len(mp_vals) > 0: mp_str = mp_vals[0]
-                if 'Ligand' in df_subset.columns:
-                    ligand = df_subset['Ligand'].unique()
-
-                meta_dict = {
-                    "Export Date": [datetime.now().strftime("%d.%m.%Y - %H:%M:%S")],
-                    "Main Plasmids": [mp_str],
-                    "Ligand": [", ".join(ligand)],
-                    "Source Files Count": [len(file_names)],
-                    "Source Files List": [", ".join(file_names)],
-                    "Data Type": [", ".join(config.get('data_types', []))],
-                    "Conc. Selection": [", ".join(
-                        f"Row {c['row']}: Vehicle {c['ligand']}" if c.get('is_vehicle')
-                        else f"Row {c['row']}: {c['conc']} log(M) {c['ligand']}"
-                        for c in config.get('conc_mode', [])
-                    )],
-                    "Filter: Ligands": [", ".join(config.get('ligands'))],
-                    "Filter: Cells": [", ".join(config.get('cells'))],
-                    "Filter: Conditions": [", ".join(config.get('transfections'))],
-                    "Group By": [group_by]
-                }
-                pd.DataFrame(meta_dict).transpose().to_excel(writer, sheet_name="Metadata", header=False)
-                sheets_written = True
-
-                # Iterate Groups + data types
-                for group_name, df_group in data_groups:
-
-                    # --- Loop through selected data types
-                    # This handles both Single Selection (Plot Helper) and Default Report (List of 2)
-                    selected_types = config.get('data_types', [])
-
-                    for dtype in selected_types:
-                        # Determine labeling column handling
-                        if dtype in ["Raw_BRET_kinetic", "Raw_BRET_CRC"] and is_labeling:
-                            drop_labeling_col = False
-                        else:
-                            drop_labeling_col = True
-
-                        # Determine which category this dtype belongs to
-                        if export_category:
-                            cat = export_category
-                        elif dtype in kinetic_types:
-                            cat = "kinetic"
-                        elif dtype in crc_types:
-                            cat = "CRC"
-                        else:
-                            cat = "unknown"
-
-                        # --- KINETIC ---
-                        if cat == "kinetic":
-                            k_layout = config.get('conc_mode', [])
-                            if not k_layout:
-                                continue
-
-                            df_kin = filter_by_conc(df_group, k_layout)
-                            if df_kin.empty:
-                                continue
-
-                            df_kin = generate_header_key(df_kin, group_by, include_conc=True)
-                            kin_pivot = create_clean_pivot(df_kin, "Time_(min)",
-                                                           dtype, "Mean" in dtype,
-                                                           drop_labeling_col)
-                            kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
-
-                            # Sheet Name with group_prefix (Max 31 chars)
-                            base = f"{group_name}_{dtype}" if group_name else f"{dtype}"
-                            kin_pivot.to_excel(writer, sheet_name=base[:31], index=True)
-                            sheets_written = True
-
-                        # --- CRC ---
-                        elif cat == "CRC":
-                            # Shared helper (also used by the CRC-window preview)
-                            # pivot on plate row, conc-index for single-ligand.
-                            crc_pivot = build_crc_table(df_group, dtype, group_by,
-                                                        drop_labeling_col)
-                            if crc_pivot is None:
-                                continue
-                            base = f"{group_name}_AUC" if group_name else f"AUC_{dtype}"
-                            crc_pivot.to_excel(writer, sheet_name=base[:31], index=True)
-                            sheets_written = True
-
-                        # --- BARGRAPH ---
-                        elif cat == "bargraph":
-                            conc_criteria = config.get('conc_mode', [])
-                            if not conc_criteria:
-                                continue
-
-                            df_bar = filter_by_conc(df_group, conc_criteria)
-                            if df_bar.empty:
-                                continue
-
-                            df_bar = generate_header_key(df_bar, group_by)
-
-                            bar_table = create_bargraph_table(df_bar, dtype, group_by,
-                                                              drop_labeling_control=drop_labeling_col)
-                            if bar_table.empty:
-                                continue
-
-                            base = f"{group_name}_bargraph" if group_name else "Bargraph"
-                            bar_table.to_excel(writer, sheet_name=base[:31], index=False)
-                            sheets_written = True
-
-                        # --- HEATMAP ---
-                        elif cat == "heatmap":
-                            conc_criteria = config.get('conc_mode', [])
-                            if not conc_criteria:
-                                continue
-
-                            # Use df_subset (full dataset), NOT df_group (already split by group_by)
-                            df_hm = filter_by_conc(df_subset, conc_criteria)
-                            if df_hm.empty:
-                                continue
-
-                            hm_table = create_heatmap_table(df_hm, dtype, group_by,
-                                                            drop_labeling_control=drop_labeling_col)
-                            if hm_table.empty:
-                                continue
-
-                            base = "Heatmap"
-                            hm_table.to_excel(writer, sheet_name=base[:31], index=True)
-                            sheets_written = True
-                            break  # Heatmap handles grouping internally, skip other groups
-
-                    # If heatmap was written, break out of data_groups loop too
-                    if export_category == "heatmap" and sheets_written:
-                        break
-
-            if not sheets_written:
-                pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name="Empty")
-
-            self.log(f"   [SUCCESS] Exported: {os.path.basename(file_path)}")
-
-        except Exception as e:
-            self.log(f"   [ERROR] Export failed: {e}")
+        """Thin GUI wrapper around export.write_excel_export (uses self.master_df, logs via self.log)."""
+        _write_excel_export(file_path, self.master_df, config, log_fn=self.log)
 
     def export_excel_report(self):
         """

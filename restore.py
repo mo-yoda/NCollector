@@ -188,6 +188,108 @@ def parse_exclusion_blob(blob) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Pending-rule resolution (exclude/revert dropdowns) -> targets / wells
+# --------------------------------------------------------------------------- #
+# These resolve the PENDING rule dicts the GUI builds from its dropdowns directly
+# against the live master_df. Distinct from _ResolveCtx below, which resolves
+# already-applied blob entries (AUTO/manual tokens). Kept together here so all
+# exclusion resolution lives in one module.
+
+# Columns that together identify which master rows an exclusion target refers
+# to. File_Name + Well_ID alone could collide if two loaded files happen to
+# share a name (e.g. same filename in two folders), so the match is widened to
+# the well's biological identity. Both resolve_rule_to_targets (which builds
+# the target tuples) and apply_exclusions (which builds the match mask) read
+# this list, so the two keys are guaranteed to line up by construction.
+EXCLUSION_KEY_COLS = ('File_Name', 'Well_ID', 'Ligand', 'Transfection',
+                      'Cell_Line', 'Main_Plasmids')
+
+
+def exclusion_key_cols(df):
+    """The exclusion-key columns actually present in df, in fixed order.
+    File_Name + Well_ID are always present; the identity columns are added
+    when available (they are part of MASTER_COLUMNS, so normally all six)."""
+    return [c for c in EXCLUSION_KEY_COLS if c in df.columns]
+
+
+def rule_mask(df, rule, norm_dates, ligand_locked=False):
+    """
+    Boolean mask over df for ONE pending criteria rule — the single source of
+    the pending-rule filter semantics, shared by both the exclude path
+    (resolve_rule_to_targets) and the revert path (resolve_rule_to_wells) so the two
+    can never drift. "All ligands" also covers the single-locked-ligand case
+    (ligand_locked, i.e. the GUI's cb_lig disabled). norm_dates is df['Date']
+    pre-normalised to '%d.%m.%y'.
+    """
+    mask = pd.Series(True, index=df.index)
+
+    ligand_is_all = (rule.get('Ligand', 'All') in ("All", "") or ligand_locked)
+    if not ligand_is_all:
+        mask &= (df['Ligand'].astype(str) == str(rule['Ligand']))
+    if rule.get('Date', 'All') != "All":
+        mask &= (norm_dates == rule['Date'])
+    if rule.get('Cell_Line', 'All') != "All":
+        mask &= (df['Cell_Line'].astype(str) == str(rule['Cell_Line']))
+    if rule.get('Condition', 'All') != "All":
+        # Index vocabulary "Condition" maps to master_df "Transfection".
+        mask &= (df['Transfection'].astype(str) == str(rule['Condition']))
+    rep = rule.get('Replicate', 'All')
+    if rep not in ("All", ""):
+        mask &= (df['Replicate'].astype(str) == str(rep))
+    row = rule.get('Row', 'All')
+    if row not in ("All", ""):
+        mask &= (df['Plate_Row'].astype(str) == str(row))
+    # Scope narrowing (post-merge masters). Skipped when "All"/empty
+    main = rule.get('Main_Plasmids', 'All')
+    if main not in ("All", "") and 'Main_Plasmids' in df.columns:
+        mask &= (df['Main_Plasmids'].astype(str) == str(main))
+    fname = rule.get('File_Name', 'All')
+    if fname not in ("All", "") and 'File_Name' in df.columns:
+        mask &= (df['File_Name'].astype(str) == str(fname))
+    return mask
+
+
+def resolve_rule_to_targets(df, rule, norm_dates, ligand_locked=False, log_fn=None):
+    """
+    Resolves one pending exclusion rule to a set of identity tuples directly on
+    df (the single source of truth). Same rule semantics as before,
+    including the "whole date" branch — which resolves to every matching
+    well on that date.
+
+    Each returned tuple is keyed on EXCLUSION_KEY_COLS — i.e. not just
+    (File_Name, Well_ID) but also Ligand / Transfection / Cell_Line /
+    Main_Plasmids — so that a duplicate file name cannot cause the wrong rows
+    to be flagged. apply_exclusions builds its match mask from the same column
+    list, keeping the two sides consistent.
+
+    norm_dates is df['Date'] pre-normalised to the '%d.%m.%y' dropdown form.
+    """
+    mask = rule_mask(df, rule, norm_dates, ligand_locked)
+
+    sub = df.loc[mask]
+    if sub.empty:
+        if log_fn:
+            log_fn(f"   [WARNING] Rule {rule} matched 0 records.")
+        return set()
+    key_cols = exclusion_key_cols(df)
+    return set(zip(*[sub[c].astype(str) for c in key_cols]))
+
+
+def resolve_rule_to_wells(df, rule, norm_dates, ligand_locked=False):
+    """
+    Resolve one pending criteria rule to a set of (File_Name, Well_ID) tuples, using
+    the SAME mask as resolve_rule_to_targets (via rule_mask). Used by the revert
+    path, which needs plain (file, well) pairs for the restore API rather than the
+    full exclusion-identity tuples the add-only flag mask uses.
+    """
+    mask = rule_mask(df, rule, norm_dates, ligand_locked)
+    sub = df.loc[mask]
+    if sub.empty:
+        return set()
+    return set(zip(sub['File_Name'].astype(str), sub['Well_ID'].astype(str)))
+
+
+# --------------------------------------------------------------------------- #
 # Resolution: rule criteria -> (File_Name, Well_ID) set
 # --------------------------------------------------------------------------- #
 

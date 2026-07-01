@@ -31,6 +31,11 @@ MASTER_COLUMNS = [
     "Lab_AUC", "Bl_AUC", "Veh_Norm_AUC", "AUC_Mean"
 ]
 
+# Condition label for wells that carry only the Main_Plasmids backbone (blank Transfection).
+# Must be non-empty (the dropdown cascade treats "" as "nothing selected") and
+# not a plasmid token (so Main_Plasmids needs no rewrite). See ensure_master_csv_schema.
+MAIN_ONLY_CONDITION = "-"
+
 
 # Columns added after v1
 # with their default values for legacy CSVs and whether they are reconstructable without loading original files again
