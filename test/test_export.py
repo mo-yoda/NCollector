@@ -14,6 +14,8 @@ from export import (
     build_row_info,
     generate_header_key,
     create_clean_pivot,
+    build_crc_table,
+    build_crc_preview_table,
 )
 from models import LEGACY_COLUMN_DEFAULTS, MASTER_COLUMNS
 
@@ -90,11 +92,13 @@ class TestEnsureSchemaMissingColumns:
             assert col in result.columns, f"'{col}' not added to DataFrame"
 
     def test_does_not_overwrite_existing_columns(self):
-        """Existing columns should not be modified by the fill step."""
+        """Existing data columns should not be modified by the fill step.
+        (NCollector_version is intentionally re-stamped when a legacy master is migrated,
+        so it is no longer an 'unchanged' column — check a data column instead.)"""
         df = _make_master_df()
-        original_values = df["NCollector_version"].tolist()
+        original_values = df["Cell_Line"].tolist()
         result, _, _ = ensure_master_csv_schema(df)
-        assert result["NCollector_version"].tolist() == original_values
+        assert result["Cell_Line"].tolist() == original_values
 
     def test_was_modified_true_when_columns_added(self):
         """was_modified should be True when legacy columns are missing."""
@@ -103,14 +107,17 @@ class TestEnsureSchemaMissingColumns:
         assert was_modified is True
 
     def test_was_modified_false_when_complete(self):
-        """was_modified should be False when nothing needs changing."""
+        """Re-running migration on an already-migrated master is a no-op.
+
+        The schema step now does reconstruction/stamping (version, Raw_BRET_unexcluded,
+        Date canonicalization) that a hand-built minimal master can't pre-satisfy, so the
+        robust 'nothing needs changing' check is idempotency: migrate once, then confirm a
+        second pass reports no modification."""
         df = _make_master_df()
-        # Add all possible columns so nothing is missing
-        for col, cfg in LEGACY_COLUMN_DEFAULTS.items():
-            if col not in df.columns:
-                df[col] = cfg["default"]
-        _, was_modified, _ = ensure_master_csv_schema(df)
-        assert was_modified is False
+        migrated, was_modified_1, _ = ensure_master_csv_schema(df)
+        assert was_modified_1 is True  # first pass migrates the legacy 'v2' master
+        _, was_modified_2, _ = ensure_master_csv_schema(migrated)
+        assert was_modified_2 is False  # second pass: already current + complete
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +286,7 @@ class TestSchemaLogCallback:
         df.loc[1, "Raw_BRET_kinetic"] = float("nan")
         messages = []
         ensure_master_csv_schema(df, log_fn=lambda m: messages.append(m))
-        fix_msgs = [m for m in messages if "[CSV FIX]" in m]
+        fix_msgs = [m for m in messages if "[CSV BUG FIX]" in m]
         assert len(fix_msgs) > 0
 
     def test_no_log_fn_no_crash(self):
@@ -457,7 +464,7 @@ class TestGenerateHeaderKey:
             "Time_(min)": [0.0, 1.0],
             "Is_Vehicle": [False, False],
         })
-        result = generate_header_key(df)
+        result = generate_header_key(df, include_conc=True)
         assert "Header_Key" in result.columns
         assert "C1" in result["Header_Key"].iloc[0]
         assert "HEK" in result["Header_Key"].iloc[0]
@@ -473,7 +480,7 @@ class TestGenerateHeaderKey:
             "Time_(min)": [0.0, 1.0],
             "Is_Vehicle": [True, True],
         })
-        result = generate_header_key(df)
+        result = generate_header_key(df, include_conc=True)
         assert "Vehicle" in result["Header_Key"].iloc[0]
 
     def test_group_by_transfection(self):
@@ -640,3 +647,76 @@ class TestCreateCleanPivot:
         # Values should be sorted by well: A1(1), A2(2), A10(10), A11(11)
         values = result.iloc[0].dropna().tolist()
         assert values == [1.0, 2.0, 10.0, 11.0]
+
+# ---------------------------------------------------------------------------
+# build_crc_table / build_crc_preview_table (CRC "second sheet" + window preview)
+# ---------------------------------------------------------------------------
+
+def _crc_condition_master():
+    """One condition (CondA / HEK / Lig1), two files (= two dates), a triplicate block
+    (cols 1-3), dose rows A-G + vehicle row H. AUC_Mean is constant across the 3 wells of a
+    (file, row); Veh_Norm_AUC differs per technical well."""
+    rows_letters = "ABCDEFGH"
+    concs = {"A": -9.0, "B": -8.0, "C": -7.0, "D": -6.0, "E": -5.0, "F": -4.0, "G": -3.0,
+             "H": float("nan")}
+    files = [("F1.xlsx", "2026-06-05", 1.0), ("F2.xlsx", "2026-06-20", 1.1)]
+    recs = []
+    for fname, date, scale in files:
+        for col in (1, 2, 3):
+            for r in rows_letters:
+                is_veh = (r == "H")
+                base = 1.0 if is_veh else round((1.0 + (rows_letters.index(r) + 1) * 0.3) * scale, 4)
+                recs.append({
+                    "File_Name": fname, "Date": date, "Main_Plasmids": "P1 + P2",
+                    "Transfection": "CondA", "Cell_Line": "HEK", "Ligand": "Lig1",
+                    "Ligand_Conc": concs[r], "Plate_Row": r, "Replicate": str(col),
+                    "Well_ID": f"{r}{col}", "Is_Vehicle": is_veh, "Is_Excluded": False,
+                    "AUC_Mean": base, "Veh_Norm_AUC": round(base + col * 0.01, 4)})
+    df = pd.DataFrame(recs)
+    for c in MASTER_COLUMNS:
+        if c not in df.columns:
+            df[c] = float("nan")
+    return df[MASTER_COLUMNS].copy()
+
+
+class TestBuildCrcTable:
+    def test_auc_mean_index_and_one_column_per_file(self):
+        t = build_crc_table(_crc_condition_master(), "AUC_Mean")
+        assert t is not None
+        assert t.index.name == "Lig1 (logM)"          # single-ligand -> conc index
+        assert "Vehicle" in list(t.index) and -9.0 in list(t.index)
+        assert t.shape[1] == 2                          # one column per file (mean)
+
+    def test_veh_norm_one_column_per_well(self):
+        t = build_crc_table(_crc_condition_master(), "Veh_Norm_AUC")
+        assert t.shape[1] == 6                          # 2 files x 3 technical wells
+
+    def test_none_when_value_col_absent(self):
+        df = _crc_condition_master().drop(columns=["AUC_Mean"])
+        assert build_crc_table(df, "AUC_Mean") is None
+
+
+class TestBuildCrcPreviewTable:
+    def test_auc_mean_columns_labelled_by_date_only(self):
+        p = build_crc_preview_table(_crc_condition_master(), "AUC_Mean")
+        assert list(p.columns) == ["05.06.26", "20.06.26"]              # date only, date-ordered
+        assert p.index.name == "Lig1 (logM)"
+
+    def test_veh_norm_columns_labelled_date_and_replicate(self):
+        p = build_crc_preview_table(_crc_condition_master(), "Veh_Norm_AUC")
+        # one column per technical-replicate well: "<date> (<replicate #>)".
+        assert list(p.columns) == ["05.06.26 (1)", "05.06.26 (2)", "05.06.26 (3)",
+                                   "20.06.26 (1)", "20.06.26 (2)", "20.06.26 (3)"]
+
+    def test_value_parity_with_export_table(self):
+        # The preview shows the SAME per-concentration values as the export sheet (only the
+        # column labels/order differ), for both subtypes.
+        df = _crc_condition_master()
+        for col in ("AUC_Mean", "Veh_Norm_AUC"):
+            t = build_crc_table(df, col)
+            p = build_crc_preview_table(df, col)
+            assert set(t.index) == set(p.index)
+            for idx in t.index:
+                tv = sorted(round(float(x), 6) for x in t.loc[idx] if pd.notna(x))
+                pv = sorted(round(float(x), 6) for x in p.loc[idx] if pd.notna(x))
+                assert tv == pv, f"value mismatch at {idx!r} for {col}"

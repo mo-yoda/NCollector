@@ -115,6 +115,37 @@ def find(issues, code):
     return [i for i in issues if i["code"] == code]
 
 
+# Backbone resolution helpers --------------------------------------------------
+# Under the current definition, any two OVERLAPPING sources (sharing >=1 plasmid token)
+# must confirm a single Main_Plasmids backbone before merging — even when they already
+# agree on Main_Plasmids. Tests that aren't about canonicalization pass the (matching)
+# backbone so canon is a no-op and the rest of the assertions are unchanged.
+def _bb(*tokens, **extra):
+    """resolutions dict selecting `tokens` as the Main_Plasmids backbone."""
+    return {"main_plasmids": list(tokens), **extra}
+
+
+def _concat(*dfs):
+    return pd.concat(dfs, ignore_index=True)
+
+
+def _scope_tokens(merged, blob, origin_files):
+    """Scope ONE source's blob against a provisional merged frame, via the restore engine
+    (the function merge_masters delegates per-source exclusion scoping to)."""
+    origin = merged["File_Name"].astype(str).isin([str(f) for f in origin_files])
+    return exclusions.scope_blob_for_merge(merged, blob, origin)
+
+
+def _resolve_wells(merged, tokens):
+    """(File, Well) set that `tokens` re-resolve to (criteria ∩ Is_Excluded)."""
+    ctx = exclusions.build_resolve_ctx(merged)
+    wells = set()
+    for t in tokens:
+        for e in exclusions.parse_exclusion_blob(t):
+            wells |= ctx.rule_wells(e, only_excluded=True)
+    return wells
+
+
 # --------------------------------------------------------------------------- #
 # LABELING_MISMATCH
 # --------------------------------------------------------------------------- #
@@ -224,6 +255,7 @@ def test_raw_channels_clean_masters_pass():
 def test_filename_duplicate_agree_downgraded_to_info():
     A = make_master("F1", seed=3)
     rep = merge.classify_sources([MergeSource("A", A), MergeSource("A2", A.copy())])
+    # Identical copies share the same Main_Plasmids -> no backbone prompt; not a collision.
     assert not rep.forbidden
     dup = find(rep.auto, merge.FILENAME_DUPLICATE)
     assert dup and dup[0]["severity"] == merge.INFO
@@ -265,21 +297,321 @@ def test_filename_exclusion_conflict_default_keeps_first():
 
 
 # --------------------------------------------------------------------------- #
-# CONDITION_PARTITION_OVERLAP — deferred (hook is currently a no-op)
+# CONDITION_PARTITION_OVERLAP / Main_Plasmids canonicalization
+# (Was test_condition_partition_overlap_is_deferred_noop, which asserted the feature
+#  was deferred. This implements the feature, so the test now exercises it. The old
+#  fixture used "pA+pB" without the " + " spacing the compiler emits, so it incidentally
+#  dodged tokenization; with proper spacing the two splits ARE the same biology.)
 # --------------------------------------------------------------------------- #
-def test_condition_partition_overlap_is_deferred_noop():
-    # Two sources record the same biology under different Main_Plasmids/Transfection
-    # splits. Canonicalization is deferred, so the hook must emit NOTHING and the merge
-    # must proceed normally (splits kept distinct).
-    A = make_master("F1", cell="HEK", ligand="ATP", main="pA+pB",
+def test_condition_partition_overlap_now_canonicalizes():
+    # Two sources record the SAME biology (HEK/ATP, tokens {pA,pB,pC}) under different
+    # Main_Plasmids/Transfection splits. Unresolved -> forbidden; with a backbone chosen
+    # -> reconciled into one condition.
+    A = make_master("F1", cell="HEK", ligand="ATP", main="pA + pB",
                     conds={1: "pC", 2: "pC", 3: "pC"})
     B = make_master("F2", cell="HEK", ligand="ATP", main="pA",
-                    conds={1: "pB+pC", 2: "pB+pC", 3: "pB+pC"})
+                    conds={1: "pB + pC", 2: "pB + pC", 3: "pB + pC"})
     rep = merge.classify_sources([MergeSource("A", A), MergeSource("B", B)])
-    assert merge.CONDITION_PARTITION_OVERLAP not in codes(rep.all_issues())
-    m, rep2 = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-    assert len(m) == len(A) + len(B)
+    assert rep.canon_plan.requires_selection
+    assert merge.MULTIPLE_MAIN_PLASMIDS in codes(rep.forbidden)
+    # Unresolved without a backbone:
+    with pytest.raises(MergeForbidden):
+        merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
+    # Resolved with backbone "pA": both collapse to Main="pA", Transf="pB + pC".
+    m, rep2 = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                                  {"main_plasmids": ["pA"]})
     assert not rep2.forbidden
+    assert set(m["Main_Plasmids"].unique()) == {"pA"}
+    assert set(m["Transfection"].unique()) == {"pB + pC"}
+    assert len(m) == len(A) + len(B)
+
+
+# --------------------------------------------------------------------------- #
+# Main_Plasmids canonicalization — spec acceptance tests
+# --------------------------------------------------------------------------- #
+def _canon_pair(excluded_wells=(), blobA="None"):
+    """The spec's b2AR example: A and B encode one biology (HEK/ATP, tokens
+    {b2AR, D44KE, CAMYEL}) under different Main/Transfection splits."""
+    A = make_master("F1", cell="HEK", ligand="ATP", main="b2AR + D44KE",
+                    conds={1: "CAMYEL", 2: "CAMYEL", 3: "CAMYEL"},
+                    excluded_wells=excluded_wells, blob=blobA)
+    B = make_master("F2", cell="HEK", ligand="ATP", main="b2AR",
+                    conds={1: "CAMYEL + D44KE", 2: "CAMYEL + D44KE", 3: "CAMYEL + D44KE"})
+    return A, B
+
+
+def test_canon_select_b2ar_collapses_to_one_condition():
+    # (spec test 1)
+    A, B = _canon_pair()
+    m, rep = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                                 {"main_plasmids": ["b2AR"]})
+    assert set(m["Main_Plasmids"].unique()) == {"b2AR"}
+    assert set(m["Transfection"].unique()) == {"CAMYEL + D44KE"}
+    # One biological condition (HEK, ATP, b2AR, CAMYEL + D44KE), two files.
+    bio = m[["Main_Plasmids", "Transfection", "Cell_Line", "Ligand"]].drop_duplicates()
+    assert len(bio) == 1
+    assert m["File_Name"].nunique() == 2
+    assert len(m) == len(A) + len(B)
+
+
+def test_canon_select_b2ar_d44ke_keeps_d44ke_in_backbone():
+    # (spec test 2)
+    A, B = _canon_pair()
+    m, rep = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                                 {"main_plasmids": ["b2AR", "D44KE"]})
+    assert set(m["Main_Plasmids"].unique()) == {"b2AR + D44KE"}
+    assert set(m["Transfection"].unique()) == {"CAMYEL"}
+
+
+def test_canon_plan_requires_selection_and_orders_candidates():
+    # (spec test 3) Add a third source so "b2AR" appears in 2 distinct identities while
+    # the others appear in 1 -> a meaningful descending-occurrence ordering.
+    A, B = _canon_pair()
+    C = make_master("F3", cell="HEK", ligand="DA", main="b2AR",
+                    conds={1: "GsX", 2: "GsX", 3: "GsX"})
+    plan = merge.plan_canonicalization([A, B, C])
+    assert plan.requires_selection
+    assert plan.selected_main is None
+    assert not plan.rewrites                      # no rewrites until a backbone is chosen
+    # Candidates ordered by descending MEASUREMENT (file) count: b2AR is in all 3 files,
+    # CAMYEL/D44KE in 2 (F1,F2), GsX in 1 (F3) -> b2AR ranks first.
+    assert plan.candidate_tokens[0] == ("b2AR", 3)
+    others = {tok for tok, _ in plan.candidate_tokens[1:]}
+    assert others == {"CAMYEL", "D44KE", "GsX"}
+    # Default backbone = the top candidate (most measurements, then alphabetical).
+    assert plan.preselected == ["b2AR"]
+
+
+def test_canon_superset_backbone_requires_selection():
+    # Regression for the real-world report: A="b2AR-nLuc", B="b2AR-nLuc + miniG" where B's
+    # conditions carry MORE total plasmid content than A's (so there is NO identical-content
+    # collision), yet the overlapping backbone still requires a single-backbone selection.
+    A = make_master("F1", cell="HEK", ligand="ISO", main="b2AR-nLuc",
+                    conds={1: "GRK2", 2: "GRK2", 3: "GRK2"})
+    B = make_master("F2", cell="HEK", ligand="ISO", main="b2AR-nLuc + miniG",
+                    conds={1: "GRK2", 2: "GRK2", 3: "GRK2"})
+    plan = merge.plan_canonicalization([A, B])
+    assert plan.requires_selection, "overlapping-backbone mismatch must prompt"
+    assert plan.preselected == ["b2AR-nLuc"]            # the shared backbone is the default
+    # Unresolved without a backbone choice.
+    rep = merge.classify_sources([MergeSource("A", A), MergeSource("B", B)])
+    assert merge.MULTIPLE_MAIN_PLASMIDS in codes(rep.forbidden)
+    with pytest.raises(MergeForbidden):
+        merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
+    # Choosing "b2AR-nLuc" unifies the backbone; miniG moves into B's Transfection.
+    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                               {"main_plasmids": ["b2AR-nLuc"]})
+    assert set(m["Main_Plasmids"].unique()) == {"b2AR-nLuc"}
+    assert set(m[m["File_Name"] == "F1"]["Transfection"].unique()) == {"GRK2"}
+    assert set(m[m["File_Name"] == "F2"]["Transfection"].unique()) == {"GRK2 + miniG"}
+
+
+def test_canon_overlap_via_shared_transfection_prompts_with_default():
+    # Main_Plasmids differ (X vs Y) and the ONLY shared token is a Transfection (T) present
+    # in both sources. Treating Main and Transfection tokens at the same level, this overlaps
+    # -> prompt (not forbidden), and the default backbone is the shared token T (the only
+    # backbone choice that keeps both sources). Regression for an empty default that broke the
+    # merge preview.
+    A = make_master("F1", cell="HEK", ligand="ATP", main="X", conds={1: "T", 2: "T", 3: "T"})
+    B = make_master("F2", cell="COS", ligand="DA", main="Y", conds={1: "T", 2: "T", 3: "T"})
+    plan = merge.plan_canonicalization([A, B])
+    assert plan.requires_selection
+    assert plan.preselected == ["T"]                    # shared token is the default backbone
+    rep = merge.classify_sources([MergeSource("A", A), MergeSource("B", B)])
+    assert merge.MULTIPLE_MAIN_PLASMIDS in codes(rep.forbidden)
+    assert merge.NO_PLASMID_OVERLAP not in codes(rep.forbidden)
+    # Picking T as the backbone keeps both sources (X and Y move into Transfection).
+    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                               {"main_plasmids": ["T"]})
+    assert set(m["Main_Plasmids"].unique()) == {"T"}
+    assert set(m["File_Name"]) == {"F1", "F2"}
+    assert set(m[m["File_Name"] == "F1"]["Transfection"].unique()) == {"X"}
+    assert set(m[m["File_Name"] == "F2"]["Transfection"].unique()) == {"Y"}
+
+
+def test_canon_cross_role_overlap_default_backbone():
+    # "b2AR" is Main_Plasmids in A but a Transfection in B -> overlap via b2AR; the default
+    # backbone must be b2AR (not empty), so the merge preview can render.
+    A = make_master("F1", main="b2AR", conds={1: "GRK2", 2: "GRK2", 3: "GRK2"})
+    B = make_master("F2", main="miniG", conds={1: "b2AR", 2: "b2AR", 3: "b2AR"})
+    plan = merge.plan_canonicalization([A, B])
+    assert plan.requires_selection
+    assert plan.preselected == ["b2AR"]
+
+
+def test_no_plasmid_overlap_forbidden():
+    # Definition rule 1: sources sharing NO plasmid token at all (across Main_Plasmids ∪
+    # Transfection) are different experiments -> forbidden, no override.
+    A = make_master("F1", cell="HEK", ligand="ATP", main="pA",
+                    conds={1: "X", 2: "X", 3: "X"})
+    B = make_master("F2", cell="COS", ligand="DA", main="pB",
+                    conds={1: "Y", 2: "Y", 3: "Y"})
+    rep = merge.classify_sources([MergeSource("A", A), MergeSource("B", B)])
+    assert merge.NO_PLASMID_OVERLAP in codes(rep.forbidden)
+    assert not rep.canon_plan.requires_selection        # forbidden, not a selectable prompt
+    with pytest.raises(MergeForbidden) as ei:
+        merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
+    assert merge.NO_PLASMID_OVERLAP in codes(ei.value.issues)
+    # No override (even supplying a backbone cannot force it).
+    with pytest.raises(MergeForbidden):
+        merge.merge_masters([MergeSource("A", A), MergeSource("B", B)], _bb("pA"))
+
+
+def test_canon_matching_main_no_prompt():
+    # Definition rule 1: when the sources already share the SAME Main_Plasmids backbone there
+    # is nothing to reconcile -> NO prompt, no forbidden, merge proceeds untouched. Token
+    # order/casing in the Main_Plasmids string does not matter (set-based comparison).
+    A = make_master("F1", cell="HEK", main="b2AR-NanoLuc + bArr2")
+    B = make_master("F2", cell="COS", main="bArr2 + b2AR-NanoLuc")   # same backbone, reordered
+    plan = merge.plan_canonicalization([A, B])
+    assert not plan.requires_selection                  # mains match -> no prompt
+    m, rep = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
+    assert not rep.forbidden                            # no MULTIPLE_MAIN_PLASMIDS gate
+    assert merge.MULTIPLE_MAIN_PLASMIDS not in codes(rep.forbidden)
+    assert len(m) == len(A) + len(B)                    # merged as-is, nothing dropped
+    # apply is a no-op when no backbone is carried.
+    out = merge.apply_canonicalization(A, merge.plan_canonicalization(A))
+    assert out.equals(A)
+
+
+def test_canon_exclusion_survival_on_swapped_condition():
+    # (spec test 5) An excluded well on A's swapped condition must re-resolve to the SAME
+    # (File, Well) set in the post-merge unified blob.
+    blobA = ("Ligand: ATP | Date: 21.05.26 | Cell: HEK | "
+             "Cond: CAMYEL | Rep: | Row:A")
+    A, B = _canon_pair(excluded_wells=("A1", "A2", "A3"), blobA=blobA)
+    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                               {"main_plasmids": ["b2AR"]})
+    # Is_Excluded preserved (3 wells x 4 timepoints), only on F1.
+    assert int(m["Is_Excluded"].sum()) == 12
+    excl_files = set(m.loc[m["Is_Excluded"], "File_Name"])
+    assert excl_files == {"F1"}
+    # The unified blob re-resolves to exactly A's three origin wells (no bleed to F2).
+    active = exclusions.list_active_exclusions(m)
+    wells = set()
+    for e in active:
+        wells |= set(e["wells"])
+    assert wells == {("F1", "A1"), ("F1", "A2"), ("F1", "A3")}
+
+
+def test_canon_excluded_wells_revert_after_merge():
+    # (exclusion survival, restore round-trip) After canonicalization strands the original
+    # manual rule, the backstop keeps the wells excluded AND revertable: restoring every
+    # active rule clears Is_Excluded and recomputes cleanly.
+    blobA = ("Ligand: ATP | Date: 21.05.26 | Cell: HEK | "
+             "Cond: CAMYEL | Rep: | Row:A")
+    A, B = _canon_pair(excluded_wells=("A1", "A2", "A3"), blobA=blobA)
+    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                               {"main_plasmids": ["b2AR"]})
+    assert int(m["Is_Excluded"].sum()) == 12
+
+    config = ProcessingConfig()
+    for entry in list(exclusions.list_active_exclusions(m)):
+        exclusions.restore_rule(m, entry["label"], config)
+    # All exclusions reverted; the canonical raw came back.
+    assert int(m["Is_Excluded"].sum()) == 0
+    assert exclusions.list_active_exclusions(m) == []
+    restored = m.loc[(m["File_Name"] == "F1") & (m["Well_ID"] == "A1"), "Raw_BRET_kinetic"]
+    assert restored.notna().any()
+
+
+def test_canon_canonicalizes_labeling_control_rows():
+    # A labeling-control column (marker in Replicate, real condition in Transfection) belongs
+    # to a condition and must be canonicalized like the rest of it: its Main_Plasmids /
+    # Transfection are rewritten, while the Replicate marker is preserved (canon never touches
+    # Replicate). Otherwise the control column desyncs from its block — each unique
+    # (Main_Plasmids + Transfection) per cell line has its own labeling correction.
+    A = make_master("F1", cell="HEK", ligand="ATP", main="b2AR + D44KE",
+                    conds={1: "CAMYEL", 2: "CAMYEL", 3: "CAMYEL"})
+    B = make_master("F2", cell="HEK", ligand="ATP", main="b2AR",
+                    conds={1: "CAMYEL + D44KE", 2: "CAMYEL + D44KE", 3: "CAMYEL + D44KE"})
+    # Mark column 3 of each as the labeling-control column (real condition kept in Transfection).
+    for df in (A, B):
+        ctrl = df["Well_ID"].astype(str).str.endswith("3")
+        df.loc[ctrl, "Replicate"] = "labeling control"
+
+    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                               {"main_plasmids": ["b2AR"]})
+    ctrl_rows = m[m["Replicate"] == "labeling control"]
+    assert not ctrl_rows.empty                                  # marker preserved
+    # Control rows carry the canonical backbone + transfection (same as their condition)...
+    assert set(ctrl_rows["Main_Plasmids"].unique()) == {"b2AR"}
+    assert set(ctrl_rows["Transfection"].unique()) == {"CAMYEL + D44KE"}
+    # ...and the merged master is internally consistent (controls match the other replicates).
+    assert set(m["Main_Plasmids"].unique()) == {"b2AR"}
+    assert set(m["Transfection"].unique()) == {"CAMYEL + D44KE"}
+
+
+def test_canon_unresolved_condition_dropped_as_no_metadata():
+    # (spec test 6) An OVERLAPPING source whose condition cannot honor the SELECTED backbone
+    # (lacks one of the chosen tokens) is dropped as no-metadata (CONDITION_PARTITION_OVERLAP),
+    # while the merge itself proceeds. A and B share b2AR + GRK2 (overlap OK); the chosen
+    # backbone "b2AR + miniG" includes miniG, which B does not have -> B is dropped.
+    A = make_master("F1", cell="HEK", ligand="ATP", main="b2AR + miniG",
+                    conds={1: "GRK2", 2: "GRK2", 3: "GRK2"})
+    B = make_master("F2", cell="HEK", ligand="ATP", main="b2AR",
+                    conds={1: "GRK2", 2: "GRK2", 3: "GRK2"})
+    m, rep = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                                 {"main_plasmids": ["b2AR", "miniG"]})
+    # B is gone from the merged master (its conditions can't honor the miniG backbone).
+    assert set(m["File_Name"]) == {"F1"}
+    assert merge.CONDITION_PARTITION_OVERLAP in codes(rep.all_issues())
+    assert set(m["Main_Plasmids"].unique()) == {"b2AR + miniG"}
+
+
+def test_canon_selection_withheld_is_forbidden():
+    # (spec test 7)
+    A, B = _canon_pair()
+    with pytest.raises(MergeForbidden) as ei:
+        merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
+    assert merge.MULTIPLE_MAIN_PLASMIDS in codes(ei.value.issues)
+
+
+def test_canon_case_folding_identity_and_casing_preserved():
+    # (spec test 8) Tokens differing only in case are one token for identity/ordering;
+    # emitted strings keep a single canonical casing.
+    A = make_master("F1", cell="HEK", ligand="ATP", main="B2ar + d44ke",
+                    conds={1: "camyel", 2: "camyel", 3: "camyel"})
+    B = make_master("F2", cell="HEK", ligand="ATP", main="b2AR",
+                    conds={1: "CAMYEL + D44KE", 2: "CAMYEL + D44KE", 3: "CAMYEL + D44KE"})
+    # Case-folded identities match -> collision detected.
+    plan = merge.plan_canonicalization([A, B])
+    assert plan.requires_selection
+    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                               {"main_plasmids": ["b2AR"]})
+    # Single backbone (user's casing) and a single, consistently-cased Transfection.
+    assert set(m["Main_Plasmids"].unique()) == {"b2AR"}
+    assert m["Transfection"].nunique() == 1            # case-insensitive collapse worked
+    # One biological condition despite the mixed input casing.
+    bio = m[["Main_Plasmids", "Transfection", "Cell_Line", "Ligand"]].drop_duplicates()
+    assert len(bio) == 1
+
+
+def test_canon_multiple_ligands_preserved():
+    # (spec test 9) Different ligands are never collapsed; each keeps its own condition.
+    A, B = _canon_pair()                               # ATP collision
+    C = make_master("F3", cell="HEK", ligand="DA", main="b2AR + D44KE",
+                    conds={1: "CAMYEL", 2: "CAMYEL", 3: "CAMYEL"})
+    m, _ = merge.merge_masters(
+        [MergeSource("A", A), MergeSource("B", B), MergeSource("C", C)],
+        {"main_plasmids": ["b2AR"]})
+    assert set(m["Ligand"].unique()) == {"ATP", "DA"}
+    # One transfection per ligand, backbone unified.
+    per_ligand = m.groupby("Ligand")["Transfection"].nunique()
+    assert (per_ligand == 1).all()
+    assert set(m["Main_Plasmids"].unique()) == {"b2AR"}
+
+
+def test_canon_new_conditions_not_inflated_by_cosmetic_split():
+    # (spec test 10) Post-canon NEW_CONDITIONS excludes cosmetic duplicates.
+    A, B = _canon_pair()                               # same biology, different split
+    rep = merge.classify_sources([MergeSource("A", A), MergeSource("B", B)])
+    # Provisional canonical view (preselected backbone) collapses A and B -> no new condition.
+    assert not find(rep.auto, merge.NEW_CONDITIONS)
+    m, rep2 = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)],
+                                  {"main_plasmids": ["b2AR"]})
+    assert not find(rep2.auto, merge.NEW_CONDITIONS)
+    assert rep2.summary["conditions_added"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -342,11 +674,13 @@ def test_self_merge_identity():
 
 
 # --------------------------------------------------------------------------- #
-# Acceptance #3 — disjoint concat
+# Acceptance #3 — matching-backbone concat (different conditions, no prompt)
 # --------------------------------------------------------------------------- #
-def test_disjoint_concat_len_and_conditions():
-    A = make_master("F1", cell="HEK", ligand="ATP", main="pA")
-    B = make_master("F2", cell="COS", ligand="DA", main="pB")
+def test_matching_main_concat_len_and_conditions():
+    # Two sources sharing the SAME backbone (pX) but different cell/ligand -> no prompt;
+    # nothing is dropped and the rows concatenate.
+    A = make_master("F1", cell="HEK", ligand="ATP", main="pX")
+    B = make_master("F2", cell="COS", ligand="DA", main="pX")
     m, rep = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
     assert len(m) == len(A) + len(B)
     assert not rep.forbidden
@@ -390,6 +724,11 @@ def _manual_row_rule(date="21.05.26", cell="HEK", ligand="ATP", cond="WT", row="
             f"Cond: {cond} | Rep: | Row:{row}")
 
 
+# NOTE: these exercise exclusions.scope_blob_for_merge directly (the function merge_masters
+# delegates per-source exclusion scoping to). Since canonicalization now forces a single
+# Main_Plasmids backbone on every merge, the "Main as discriminator" scenario only arises
+# at the engine level, so it is unit-tested here on a hand-built provisional merged frame
+# (mirroring test_pathological_overlap_forces_per_well_decomposition).
 def test_manual_rule_scopes_by_discriminator_no_bleed():
     # Source A: Main=pA, row A wells excluded by a manual Row:A rule.
     # Source B: Main=pB, same cell/ligand/cond/date/row -> would bleed without a
@@ -397,62 +736,56 @@ def test_manual_rule_scopes_by_discriminator_no_bleed():
     blobA = _manual_row_rule(row="A")
     A = make_master("F1", main="pA", excluded_wells=("A1", "A2", "A3"), blob=blobA)
     B = make_master("F2", main="pB")     # same HEK/ATP/WT, row A present, NOT excluded
+    merged = _concat(A, B)
 
-    m, rep = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-
-    # The merged blob must re-resolve A's rule to EXACTLY A's three origin wells.
-    active = restore.list_active_exclusions(m)
-    # Exactly one rule entry, covering only F1's row-A wells.
-    assert len(active) == 1
-    wells = set(active[0]["wells"])
-    assert wells == {("F1", "A1"), ("F1", "A2"), ("F1", "A3")}
-    # No bleed onto source B.
-    assert all(f == "F1" for (f, _) in wells)
-    # The rule stayed ONE readable manual rule (not decomposed into per-well tokens):
-    # its label is a single 'Ligand: ... | Row:A | Main: pA' token, not three AUTO tokens.
-    assert "AUTO:" not in active[0]["label"]
-    assert "Main: pA" in active[0]["label"]
+    tokens = _scope_tokens(merged, blobA, ["F1"])
+    # ONE readable manual rule (not per-well AUTO), scoped by Main: pA.
+    assert len(tokens) == 1
+    assert "AUTO:" not in tokens[0]
+    assert "Main: pA" in tokens[0]
+    # Re-resolves to EXACTLY A's three origin wells; no bleed onto B.
+    assert _resolve_wells(merged, tokens) == {("F1", "A1"), ("F1", "A2"), ("F1", "A3")}
 
 
 def test_scoped_manual_rule_targeted_restore_round_trips():
     blobA = _manual_row_rule(row="A")
     A = make_master("F1", main="pA", excluded_wells=("A1", "A2", "A3"), blob=blobA)
     B = make_master("F2", main="pB")
-    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
+    merged = _concat(A, B)
+    merged["Applied_Exclusions"] = " || ".join(_scope_tokens(merged, blobA, ["F1"]))
 
     config = ProcessingConfig()
-    active = exclusions.list_active_exclusions(m)
+    active = exclusions.list_active_exclusions(merged)
+    assert len(active) == 1
     label = active[0]["label"]
-    before_excluded = int(m["Is_Excluded"].sum())
-    assert before_excluded == 12          # 3 wells x 4 timepoints (per-row flag)
+    assert int(merged["Is_Excluded"].sum()) == 12   # 3 wells x 4 timepoints (per-row flag)
 
-    report = restore.restore_rule(m, label, config)
-    # restore_rule mutates `m` in place and returns a report scoreboard.
-    assert report["restored_count"] == 3         # 3 wells (well-granular count)
+    report = exclusions.restore_rule(merged, label, config)
+    assert report["restored_count"] == 3            # 3 wells (well-granular count)
     # All three of A's wells restored; B never touched.
-    assert int(m["Is_Excluded"].sum()) == 0
-    assert exclusions.list_active_exclusions(m) == []
+    assert int(merged["Is_Excluded"].sum()) == 0
+    assert exclusions.list_active_exclusions(merged) == []
 
 
 def test_manual_rule_does_not_bleed_when_b_also_has_excluded_elsewhere():
-    # A excludes row A (pA); B independently excludes row C (pB). After merge each
-    # rule must resolve to its own source only.
+    # A excludes row A (pA); B independently excludes row C (pB). Each rule must resolve to
+    # its own source only.
     A = make_master("F1", main="pA", excluded_wells=("A1", "A2", "A3"),
                     blob=_manual_row_rule(row="A"))
     B = make_master("F2", main="pB", excluded_wells=("C1", "C2", "C3"),
                     blob=_manual_row_rule(row="C"))
-    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-    active = exclusions.list_active_exclusions(m)
+    merged = _concat(A, B)
+    tokens = (_scope_tokens(merged, A["Applied_Exclusions"].iloc[0], ["F1"])
+              + _scope_tokens(merged, B["Applied_Exclusions"].iloc[0], ["F2"]))
     by_file = {}
-    for entry in active:
-        for (f, w) in entry["wells"]:
-            by_file.setdefault(f, set()).add(w)
+    for (f, w) in _resolve_wells(merged, tokens):
+        by_file.setdefault(f, set()).add(w)
     assert by_file["F1"] == {"A1", "A2", "A3"}
     assert by_file["F2"] == {"C1", "C2", "C3"}
 
 
 def test_pathological_overlap_forces_per_well_decomposition():
-    # Directly exercise restore.scope_blob_for_merge with a provisional merged frame
+    # Directly exercise exclusions.scope_blob_for_merge with a provisional merged frame
     # where origin and bleed rows are IDENTICAL in every meaningful field AND share a
     # File_Name, and the bleed well is itself excluded -> File scoping over-resolves,
     # so the scoper must fall back to per-well File-pinned tokens for THIS rule only.
@@ -464,7 +797,7 @@ def test_pathological_overlap_forces_per_well_decomposition():
     origin_mask = merged["Well_ID"] == "A1"
 
     tokens = exclusions.scope_blob_for_merge(merged, _manual_row_rule(row="A"),
-                                             origin_mask)
+                                          origin_mask)
     # Fallback emits per-well tokens (AUTO well-pinned), NOT a broad manual rule.
     assert tokens, "scoper returned no tokens"
     assert all(t.startswith("AUTO:") for t in tokens)
@@ -478,21 +811,20 @@ def test_pathological_overlap_forces_per_well_decomposition():
     assert resolved == {("SHARED", "A1")}
 
 
-def test_whole_date_rule_with_cell_discriminator_stays_one_rule():
-    # Spec example: A's Date rule where B measured the same date but a different cell
-    # line -> scopes to Date + Cell, ONE readable rule, no file names.
+def test_whole_date_rule_with_discriminator_stays_one_rule():
+    # A's whole-plate rule where B differs by a single discriminating field -> ONE readable
+    # rule, all wells in F1, none in F2, no File: token / no AUTO decomposition.
     blobA = "Ligand: ATP | Date: 21.05.26 | Cell: HEK | Cond: All | Rep: | Row:"
     A = make_master("F1", date="2026-05-21", cell="HEK", main="pA",
                     excluded_wells=tuple(f"{r}{c}" for r in ROWS for c in (1, 2, 3)),
                     blob=blobA)
     B = make_master("F2", date="2026-05-21", cell="COS", main="pB")  # same date, other cell
-    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-    active = exclusions.list_active_exclusions(m)
-    # One rule, all wells in F1, none in F2, and no File: token / no AUTO decomposition.
-    assert len(active) == 1
-    assert all(f == "F1" for (f, _) in active[0]["wells"])
-    assert "AUTO:" not in active[0]["label"]
-    assert "File:" not in active[0]["label"]
+    merged = _concat(A, B)
+    tokens = _scope_tokens(merged, blobA, ["F1"])
+    assert len(tokens) == 1
+    assert "AUTO:" not in tokens[0]
+    assert "File:" not in tokens[0]
+    assert all(f == "F1" for (f, _) in _resolve_wells(merged, tokens))
 
 
 def test_date_discriminates_date_agnostic_rule_across_sources():
@@ -504,14 +836,16 @@ def test_date_discriminates_date_agnostic_rule_across_sources():
     A = make_master("F1", date="2026-05-21", cell="HEK", ligand="ATP", main="pA",
                     excluded_wells=("A1", "A2", "A3"), blob=blobA)
     B = make_master("F2", date="2026-05-22", cell="HEK", ligand="ATP", main="pA")  # other day
-    m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-    active = exclusions.list_active_exclusions(m)
-    assert len(active) == 1
-    assert set(active[0]["wells"]) == {("F1", "A1"), ("F1", "A2"), ("F1", "A3")}
+    merged = _concat(A, B)
+    tokens = _scope_tokens(merged, blobA, ["F1"])
+    assert len(tokens) == 1
+    assert _resolve_wells(merged, tokens) == {("F1", "A1"), ("F1", "A2"), ("F1", "A3")}
     # Scoped by Date, as one readable manual rule (not File-pinned, not per-well AUTO).
-    assert "AUTO:" not in active[0]["label"]
-    assert "File:" not in active[0]["label"]
-    assert "Date: 21.05.26" in active[0]["label"]
+    assert "AUTO:" not in tokens[0]
+    assert "File:" not in tokens[0]
+    assert "Date: 21.05.26" in tokens[0]
+
+
 def test_folder_source_passes_raw_channel_gate():
     # A freshly processed folder source is enriched by construction; emulate it with a
     # clean master and kind="folder". Empty Info_Sheet must not trip the gate.
@@ -525,8 +859,8 @@ def test_folder_source_passes_raw_channel_gate():
 # Misc: report structure + summary integrity
 # --------------------------------------------------------------------------- #
 def test_report_summary_keys_present():
-    A = make_master("F1", cell="HEK", ligand="ATP", main="pA")
-    B = make_master("F2", cell="COS", ligand="DA", main="pB")
+    A = make_master("F1", cell="HEK", ligand="ATP", main="pX")
+    B = make_master("F2", cell="COS", ligand="DA", main="pX")
     m, rep = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
     for k in ("total_sources", "total_files", "total_rows",
               "conditions_added", "collisions_handled", "duplicates_dropped"):

@@ -343,8 +343,10 @@ class TestGetTransfectionMap:
         assert result == ["1", "2", "1", "2"]
 
     def test_half_alternating_ligand(self):
-        """half + alternating → single (all same)."""
-        result = get_transfection_map("half", "alternating", ["1", "2"])
+        """half + alternating → single (all same). The single mapping is only applied
+        when exactly one transfection ID is provided (safety guard); more IDs fall back
+        to unique."""
+        result = get_transfection_map("half", "alternating", ["1"])
         assert result == ["1", "1", "1", "1"]
 
     def test_alternating_one_ligand(self):
@@ -353,8 +355,8 @@ class TestGetTransfectionMap:
         assert result == ["1", "1", "2", "2"]
 
     def test_alternating_half_ligand(self):
-        """alternating + half → single."""
-        result = get_transfection_map("alternating", "half", ["1", "2"])
+        """alternating + half → single (only when exactly one transfection ID is given)."""
+        result = get_transfection_map("alternating", "half", ["1"])
         assert result == ["1", "1", "1", "1"]
 
     # --- Block count variations ---
