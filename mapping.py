@@ -202,13 +202,15 @@ def get_transfection_map(cell_layout_type: str, ligand_layout_type: str | None, 
         return _unique()
 
     def _seq_safe():
-        if len(t_ids) == pair_count: return _seq_repeat()
+        # len==1 is checked first so an odd block_count (pair_count==1) still yields
+        # block_count entries (single repeated) rather than a short seq_repeat of len 2.
         if len(t_ids) == 1:          return _single()
+        if len(t_ids) == pair_count: return _seq_repeat()
         return _unique()
 
     def _elem_safe():
-        if len(t_ids) == pair_count: return _elem_repeat()
         if len(t_ids) == 1:          return _single()
+        if len(t_ids) == pair_count: return _elem_repeat()
         return _unique()
 
     # Decision matrix
