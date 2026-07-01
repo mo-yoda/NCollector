@@ -39,7 +39,7 @@ import pytest
 import models
 from models import MASTER_COLUMNS, ProcessingConfig
 import merge
-import restore
+import exclusions
 from merge import MergeSource, MergeForbidden
 
 ROWS = "ABCDEFGH"
@@ -421,7 +421,7 @@ def test_scoped_manual_rule_targeted_restore_round_trips():
     m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
 
     config = ProcessingConfig()
-    active = restore.list_active_exclusions(m)
+    active = exclusions.list_active_exclusions(m)
     label = active[0]["label"]
     before_excluded = int(m["Is_Excluded"].sum())
     assert before_excluded == 12          # 3 wells x 4 timepoints (per-row flag)
@@ -431,7 +431,7 @@ def test_scoped_manual_rule_targeted_restore_round_trips():
     assert report["restored_count"] == 3         # 3 wells (well-granular count)
     # All three of A's wells restored; B never touched.
     assert int(m["Is_Excluded"].sum()) == 0
-    assert restore.list_active_exclusions(m) == []
+    assert exclusions.list_active_exclusions(m) == []
 
 
 def test_manual_rule_does_not_bleed_when_b_also_has_excluded_elsewhere():
@@ -442,7 +442,7 @@ def test_manual_rule_does_not_bleed_when_b_also_has_excluded_elsewhere():
     B = make_master("F2", main="pB", excluded_wells=("C1", "C2", "C3"),
                     blob=_manual_row_rule(row="C"))
     m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-    active = restore.list_active_exclusions(m)
+    active = exclusions.list_active_exclusions(m)
     by_file = {}
     for entry in active:
         for (f, w) in entry["wells"]:
@@ -463,17 +463,17 @@ def test_pathological_overlap_forces_per_well_decomposition():
     # Tag A1's rows as origin, A2's rows as bleed (same file, same everything else).
     origin_mask = merged["Well_ID"] == "A1"
 
-    tokens = restore.scope_blob_for_merge(merged, _manual_row_rule(row="A"),
-                                          origin_mask)
+    tokens = exclusions.scope_blob_for_merge(merged, _manual_row_rule(row="A"),
+                                             origin_mask)
     # Fallback emits per-well tokens (AUTO well-pinned), NOT a broad manual rule.
     assert tokens, "scoper returned no tokens"
     assert all(t.startswith("AUTO:") for t in tokens)
     # And they resolve to exactly A1 within the origin (the bleed well A2 is excluded
     # only by its own source's tokens, which we did not request here).
-    ctx = restore.build_resolve_ctx(merged)
+    ctx = exclusions.build_resolve_ctx(merged)
     resolved = set()
     for t in tokens:
-        for e in restore.parse_exclusion_blob(t):
+        for e in exclusions.parse_exclusion_blob(t):
             resolved |= ctx.rule_wells(e, only_excluded=True)
     assert resolved == {("SHARED", "A1")}
 
@@ -487,7 +487,7 @@ def test_whole_date_rule_with_cell_discriminator_stays_one_rule():
                     blob=blobA)
     B = make_master("F2", date="2026-05-21", cell="COS", main="pB")  # same date, other cell
     m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-    active = restore.list_active_exclusions(m)
+    active = exclusions.list_active_exclusions(m)
     # One rule, all wells in F1, none in F2, and no File: token / no AUTO decomposition.
     assert len(active) == 1
     assert all(f == "F1" for (f, _) in active[0]["wells"])
@@ -505,7 +505,7 @@ def test_date_discriminates_date_agnostic_rule_across_sources():
                     excluded_wells=("A1", "A2", "A3"), blob=blobA)
     B = make_master("F2", date="2026-05-22", cell="HEK", ligand="ATP", main="pA")  # other day
     m, _ = merge.merge_masters([MergeSource("A", A), MergeSource("B", B)])
-    active = restore.list_active_exclusions(m)
+    active = exclusions.list_active_exclusions(m)
     assert len(active) == 1
     assert set(active[0]["wells"]) == {("F1", "A1"), ("F1", "A2"), ("F1", "A3")}
     # Scoped by Date, as one readable manual rule (not File-pinned, not per-well AUTO).

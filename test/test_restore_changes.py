@@ -1,5 +1,5 @@
 """
-Focused tests for the two restore.py changes:
+Focused tests for the two exclusions.py changes:
 
   1. _build_restorable_map (vectorized) must agree, well-for-well, with the original
      per-well is_restorable() that it replaces in the hot loops.
@@ -13,7 +13,7 @@ Focused tests for the two restore.py changes:
 """
 import types
 import pandas as pd
-import restore
+import exclusions
 
 
 def _make_master():
@@ -89,7 +89,7 @@ def test_map_matches_is_restorable():
     pairs = set(zip(df["File_Name"].astype(str), df["Well_ID"].astype(str)))
     for f, w in pairs:
         got_ok, _ = rmap[(f, w)]
-        exp_ok, _ = restore.is_restorable(df, f, w)
+        exp_ok, _ = exclusions.is_restorable(df, f, w)
         assert got_ok == exp_ok, f"map disagrees for {f}/{w}: map={got_ok} ref={exp_ok}"
     # Spot-check expectations
     assert rmap[("F1", "A1")][0] is True
@@ -106,7 +106,7 @@ def test_defer_batch_equivalence():
     # --- Path A: OLD behaviour — recompute inside every restore call ---
     dfA = _make_master(); dfA["Applied_Exclusions"] = _make_blob()
     counterA = {"calls": 0, "files": 0}
-    restore.recompute_master_after_exclusion = _make_stub(counterA)
+    exclusions.recompute_master_after_exclusion = _make_stub(counterA)
     for lbl in label_list:
         restore.restore_rule(dfA, lbl, _StubConfig(), recompute=True)
 
@@ -144,7 +144,7 @@ def test_ctx_equivalence_overlapping_rules():
     criteria-rule (whole Plate_Row), an OVERLAP (a well covered by both a manual rule and an
     auto rule), and a non-restorable well — exercising the blocked / decompose / drop paths.
     """
-    import restore as R
+    import exclusions as R
 
     def master():
         rows = []

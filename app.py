@@ -12,10 +12,10 @@ from processing import (process_bret_measurement,
                         check_luminescence, check_vehicle_wells, coerce_bool, parse_date_series)
 from export import (build_row_info, ensure_master_csv_schema,
                     write_excel_export as _write_excel_export)
-from restore import (list_active_exclusions, restore_rule, restore_wells,
-                     build_resolve_ctx, well_token,
-                     exclusion_key_cols, rule_mask,
-                     resolve_rule_to_targets, resolve_rule_to_wells)
+from exclusions import (list_active_exclusions, restore_rule, restore_wells,
+                        build_resolve_ctx, well_token,
+                        exclusion_key_cols, rule_mask,
+                        resolve_rule_to_targets, resolve_rule_to_wells)
 from dialogs import (ask_user_parameter, ask_ligand_choice, ask_ligand_layout,
                      ask_filename_collision, warn_and_abort, ask_main_plasmids_selection)
 from plasmid_selection import (group_by_main_plasmids, resolve_selection)
@@ -585,7 +585,7 @@ class NCollectorApp:
     def _display_label(label):
         """
         Human-friendly text for an active-exclusion entry. For restore-split tokens
-        (emitted by restore.py when a rule is partially reverted) the trailing
+        (emitted by exclusions.py when a rule is partially reverted) the trailing
         "- value: n/a" carries no information, so it is dropped for display. The original
         label is left untouched in self._active_excl_entries for the revert dispatch.
         """
@@ -685,7 +685,7 @@ class NCollectorApp:
 
     def revert_exclusions(self):
         """
-        Revert dispatch, via restore.py's label-based API. Two input sources are
+        Revert dispatch, via exclusions.py's label-based API. Two input sources are
         handled with DIFFERENT semantics (see _collect_revert_inputs):
 
           (A) Whole-rule selections -> restore_rule per selected entry. restore_rule already
@@ -697,7 +697,7 @@ class NCollectorApp:
               own each well (full coverage -> restore_rule, partial -> restore_wells),
               evaluated AFTER the whole-rule reverts so it sees the updated blob.
 
-        ALL restore decisions live in restore.py. Non-restorable / blocked wells are logged.
+        ALL restore decisions live in exclusions.py. Non-restorable / blocked wells are logged.
 
         Efficiency: each entry's restorable/non_restorable split is ALREADY computed by
         list_active_exclusions (it drives the "(N wells; M not revertable)" suffix) and held
@@ -799,7 +799,7 @@ class NCollectorApp:
                 self.master_df, sorted(affected_files), config)
 
         # --- Refresh everything the revert touched ---
-        # IMPORTANT: restore.py rewrote master_df['Applied_Exclusions'] in place but does not
+        # IMPORTANT: exclusions.py rewrote master_df['Applied_Exclusions'] in place but does not
         # touch rule_history_text. Re-sync it from the authoritative blob now so a later
         # apply_exclusions (which rebuilds the blob from rule_history_text) does not resurrect
         # the rule that was just reverted.
@@ -1217,7 +1217,7 @@ class NCollectorApp:
         self.pending_exclusions = []
         self.lb_exclusions.delete(0, tk.END)
 
-    # Pending-rule resolution lives in restore.py (free functions, alongside the
+    # Pending-rule resolution lives in exclusions.py (free functions, alongside the
     # rest of exclusion resolution). These thin wrappers feed it the live master_df
     # and translate the GUI ligand-lock state (cb_lig disabled) into a flag.
 
@@ -1274,7 +1274,7 @@ class NCollectorApp:
         master_df.
 
         rule_history_text is the app's running provenance string. apply_exclusions rebuilds
-        the whole blob from it, and the Excel export writes it out. restore.py, however,
+        the whole blob from it, and the Excel export writes it out. exclusions.py, however,
         rewrites master_df['Applied_Exclusions'] in place on a revert WITHOUT touching
         rule_history_text — Calling this after any revert (and after a data-
         source swap that brings its own blob) keeps rule_history_text equal to the blob.
