@@ -30,8 +30,8 @@ from models import ProcessingConfig, TRIPLICATE_LAYOUT
 from processing import recompute_master_after_exclusion
 import exclusions
 from exclusions import (parse_exclusion_blob, list_active_exclusions,
-                        restore_rule, is_restorable, _resolve_rule_wells,
-                        _resolve_criteria, _excluded_mask)
+                     restore_rule, is_restorable, _resolve_rule_wells,
+                     _resolve_criteria, _excluded_mask)
 from export import ensure_master_csv_schema
 
 RTOL, ATOL = 1e-4, 1e-6
@@ -162,8 +162,8 @@ def test_round_trip(raw_master, config):
                                                 sorted(raw_master["File_Name"].unique()),
                                                 config)
     # S includes a vehicle (row H) well AND a labeling-control well (fileB col4).
-    veh_token = restore._well_token(master_0, "fileA.xlsx", "H1")
-    lab_token = restore._well_token(master_0, "fileB.xlsx", "A4")
+    veh_token = exclusions._well_token(master_0, "fileA.xlsx", "H1")
+    lab_token = exclusions._well_token(master_0, "fileB.xlsx", "A4")
     master_1, S = apply_rule_tokens(master_0, [veh_token, lab_token], config)
     check(master_1.loc[(master_1["File_Name"] == "fileA.xlsx") &
                        (master_1["Well_ID"] == "H1"), "Raw_BRET_kinetic"].isna().all()
@@ -200,7 +200,7 @@ def test_partial_overlap(raw_master, config):
     print(f"        report: restored={rep['restored_count']} "
           f"blocked={rep['blocked_by_other_rule_count']} decomposed={rep['rule_decomposed']}")
 
-    excl_now = restore._all_excluded_wells(master_1)
+    excl_now = exclusions._all_excluded_wells(master_1)
     check(overlap.issubset(excl_now),
           "overlap wells (matched by rule2) STAY excluded after restoring rule1")
     check(only_rule1.isdisjoint(excl_now),

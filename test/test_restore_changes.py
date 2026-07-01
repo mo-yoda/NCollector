@@ -85,7 +85,7 @@ def _make_stub(counter):
 
 def test_map_matches_is_restorable():
     df = _make_master()
-    rmap = restore._build_restorable_map(df)
+    rmap = exclusions._build_restorable_map(df)
     pairs = set(zip(df["File_Name"].astype(str), df["Well_ID"].astype(str)))
     for f, w in pairs:
         got_ok, _ = rmap[(f, w)]
@@ -100,7 +100,7 @@ def test_map_matches_is_restorable():
 
 
 def test_defer_batch_equivalence():
-    labels = restore.parse_exclusion_blob(_make_blob())
+    labels = exclusions.parse_exclusion_blob(_make_blob())
     label_list = [e["label"] for e in labels]
 
     # --- Path A: OLD behaviour — recompute inside every restore call ---
@@ -108,19 +108,19 @@ def test_defer_batch_equivalence():
     counterA = {"calls": 0, "files": 0}
     exclusions.recompute_master_after_exclusion = _make_stub(counterA)
     for lbl in label_list:
-        restore.restore_rule(dfA, lbl, _StubConfig(), recompute=True)
+        exclusions.restore_rule(dfA, lbl, _StubConfig(), recompute=True)
 
     # --- Path B: NEW behaviour — defer, then ONE batched recompute over the union ---
     dfB = _make_master(); dfB["Applied_Exclusions"] = _make_blob()
     counterB = {"calls": 0, "files": 0}
-    restore.recompute_master_after_exclusion = _make_stub(counterB)
+    exclusions.recompute_master_after_exclusion = _make_stub(counterB)
     affected = set()
     for lbl in label_list:
-        rep = restore.restore_rule(dfB, lbl, _StubConfig(), recompute=False)
+        rep = exclusions.restore_rule(dfB, lbl, _StubConfig(), recompute=False)
         affected.update(rep["affected_files"])
     assert counterB["calls"] == 0, "deferred path must not recompute inside restore calls"
     if affected:
-        dfB = restore.recompute_master_after_exclusion(dfB, sorted(affected), _StubConfig())
+        dfB = exclusions.recompute_master_after_exclusion(dfB, sorted(affected), _StubConfig())
 
     # Equivalence of the resulting master (the columns restore + recompute own)
     cols = ["File_Name", "Well_ID", "Time_(min)", "Is_Excluded",

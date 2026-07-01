@@ -33,7 +33,8 @@ class MockApp:
         self.master_df = pd.DataFrame()
         self.master_index = pd.DataFrame()
         self.rule_history_text = ""
-        self.lbl_data_source = MagicMock()  # Mock tkinter label
+        self.lbl_data_source = MagicMock()       # Mock tkinter label (Tab 3)
+        self.lbl_data_source_tab1 = None         # Tab 1 mirror label (skipped when None)
 
     def log(self, message):
         pass  # Suppress log output during tests
@@ -47,7 +48,11 @@ class MockApp:
     compile_master_dataframe = NCollectorApp.compile_master_dataframe
     write_excel_export = NCollectorApp.write_excel_export
     built_master_index = NCollectorApp.built_master_index
+    _build_index_from_objects = NCollectorApp._build_index_from_objects
+    _build_index_from_master = NCollectorApp._build_index_from_master
+    _finalize_index = NCollectorApp._finalize_index
     export_master_csv = NCollectorApp.export_master_csv
+    _set_data_source = NCollectorApp._set_data_source
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +359,7 @@ class TestWriteExcelExport:
             "ligands": "All",
             "data_types": ["Kinetic_Mean"],
             "group_by": "None",
-            "conc_select": [
+            "conc_mode": [
                 {"row": "A", "ligand": "Lig1", "is_vehicle": False, "conc": "-9.0"},
                 {"row": "H", "ligand": "Lig1", "is_vehicle": True},
             ],

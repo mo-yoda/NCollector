@@ -15,6 +15,7 @@ import app
 from app import NCollectorApp
 from processing import reconstruct_file_inputs, recompute_master_after_exclusion, coerce_bool
 from models import ProcessingConfig, TRIPLICATE_LAYOUT, build_plate_layout
+from exclusions import exclusion_key_cols
 
 ROWS = "ABCDEFGH"
 TIMES = [0.0, 1.0, 2.0, 3.0, 4.0]  # one baseline read at t=0
@@ -98,10 +99,6 @@ def make_fake_self(df):
     s.btn_rerun_vehicle = None
     s.log = lambda m: captured["logs"].append(str(m))
 
-    # Real exclusion-key helper + constant (used by _resolve_rule_to_targets and
-    # apply_exclusions). Bound from the real class so the test exercises real code.
-    s._EXCLUSION_KEY_COLS = NCollectorApp._EXCLUSION_KEY_COLS
-    s._exclusion_key_cols = NCollectorApp._exclusion_key_cols.__get__(s, NCollectorApp)
 
     # Stub GUI-touching methods used by the methods under test
     s.refresh_filter_options = lambda: None
@@ -165,7 +162,7 @@ def test_resolve_rule_to_targets():
     rule = {"Ligand": "All", "Date": "All", "Cell_Line": "All",
             "Condition": "CondA", "Replicate": "All", "Row": "All"}
     targets = resolve(rule, norm_dates)
-    # Target tuples are keyed on _EXCLUSION_KEY_COLS:
+    # Target tuples are keyed on EXCLUSION_KEY_COLS:
     # (File_Name, Well_ID, Ligand, Transfection, Cell_Line, Main_Plasmids)
     cols_hit = {int(t[1][1:]) for t in targets}
     assert cols_hit == {1, 2, 3}, cols_hit
@@ -225,6 +222,14 @@ def test_full_apply_exclusions_then_recompute():
     s._finalize_index = bind("_finalize_index", s)
     s._build_index_from_master = bind("_build_index_from_master", s)
     s.built_master_index = bind("built_master_index", s)
+    # apply_exclusions now snapshots the excluded set and re-checks vehicles / refreshes
+    # views afterwards. Bind the data helper; stub the GUI/warning side-effects the
+    # assertions below don't cover.
+    s._excluded_well_set = bind("_excluded_well_set", s)
+    s._vehicle_warnings_for_affected = lambda affected_keys: []
+    s.refresh_active_exclusions = lambda: None
+    s.crc_window = None
+    s._refresh_crc_window = bind("_refresh_crc_window", s)
 
     apply_exc = bind("apply_exclusions", s)
     apply_exc()
@@ -277,7 +282,7 @@ def test_duplicate_filename_disambiguation():
     targets = resolve(rule, norm_dates)
 
     # Build the mask exactly as apply_exclusions does, via the real helper.
-    key_cols = s._exclusion_key_cols(df)
+    key_cols = exclusion_key_cols(df)
     key_index = pd.MultiIndex.from_arrays([df[c].astype(str) for c in key_cols])
     mask = pd.Series(key_index.isin(list(targets)), index=df.index)
 

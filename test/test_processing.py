@@ -534,7 +534,7 @@ class TestCheckLuminescence:
         """All wells above threshold should produce no warnings."""
         data = pd.DataFrame({f"{r}{c}": [500.0] * 10
                              for r in ROWS for c in range(1, 13)})
-        warnings = check_luminescence(data, PLATE_BLOCKS, col_metadata,
+        warnings = check_luminescence(data, col_metadata,
                                       lum_threshold=100, date_str="01.01.25")
         assert len(warnings) == 0
 
@@ -546,7 +546,7 @@ class TestCheckLuminescence:
         for r in ROWS:
             data[f"{r}1"] = [10.0] * 10
 
-        warnings = check_luminescence(data, PLATE_BLOCKS, col_metadata,
+        warnings = check_luminescence(data, col_metadata,
                                       lum_threshold=100, date_str="01.01.25")
         assert len(warnings) > 0
 
@@ -690,14 +690,15 @@ class TestProcessBretMeasurement:
         result = process_bret_measurement(mock_result, mock_protocol, processing_config)
         assert len(result.low_lum_warnings) > 0
 
-    def test_lum_check_skipped_for_non_475(self, mock_result, mock_protocol, processing_config):
-        """Luminescence check should NOT run when donor wavelength is not 475."""
+    def test_lum_check_runs_for_non_475(self, mock_result, mock_protocol, processing_config):
+        """Luminescence check now runs regardless of donor wavelength (the old 475 nm
+        gating was removed in v2.0.5; wavelengths are still logged for reference)."""
         mock_result.donor_wavelength = 450
-        # Even with low counts, no warnings should appear
+        # Low counts should still be flagged even when the donor is not 475 nm.
         for r in ROWS:
             mock_result.donor_df[f"{r}1"] = [5.0] * N_TIMEPOINTS
         result = process_bret_measurement(mock_result, mock_protocol, processing_config)
-        assert len(result.low_lum_warnings) == 0
+        assert len(result.low_lum_warnings) > 0
 
 
 # ---------------------------------------------------------------------------
