@@ -1,16 +1,14 @@
+import os
 import logging
 import re
+from datetime import datetime
 import pandas as pd
-from models import LEGACY_COLUMN_DEFAULTS, APP_VERSION
+from models import LEGACY_COLUMN_DEFAULTS, APP_VERSION, MAIN_ONLY_CONDITION, DATA_TYPE_MAP
 from processing import pristine_raw_for_file, _melt_wide, parse_date_series
 from restore import migrate_blob_separator
 
 logger = logging.getLogger("NCollector")
 
-# Condition label for wells that carry only the Main_Plasmids backbone (blank Transfection).
-# Must be non-empty (the dropdown cascade treats "" as "nothing selected") and
-# not a plasmid token (so Main_Plasmids needs no rewrite). See ensure_master_csv_schema.
-MAIN_ONLY_CONDITION = "-"
 
 def parse_ncollector_version(value):
     """Extract (major, minor, patch) from a version string like 'N Collector v2.0.5'.
@@ -731,3 +729,180 @@ def create_heatmap_table(df_input, value_col, group_by, drop_labeling_control=Tr
     pivot.columns.name = None
 
     return pivot
+
+
+def write_excel_export(file_path, master_df, config, log_fn=None):
+    """
+    Writes the Excel file based on the config dictionary provided by either tab 1 (default) or tab 3 (user).
+    """
+    log = log_fn or (lambda *a, **k: None)
+    try:
+        df_subset = apply_export_filters(master_df, config)
+
+        if df_subset.empty:
+            logger.error("Export failed: Filter resulted in no data.")
+            return
+
+        # Define groups
+        group_by = config.get('group_by', 'None')
+        data_groups = []  # List of tuples: (Group_Name, DataFrame)
+
+        if group_by == 'Cell Line':
+            for name, group in df_subset.groupby('Cell_Line'):
+                data_groups.append((str(name), group))
+        elif group_by == 'Transfection':
+            for name, group in df_subset.groupby('Transfection'):
+                data_groups.append((str(name), group))
+        else:
+            data_groups.append(("", df_subset))  # No grouping
+
+        # Check whether labeling control was applied
+        is_labeling = True if "labeling control" in df_subset["Replicate"].values else False
+
+        # Category from config (set by plot helper), or detect from column membership for default export
+        export_category = config.get('category', None)
+        kinetic_types = list(DATA_TYPE_MAP["kinetic"].values())
+        crc_types = list(DATA_TYPE_MAP["CRC"].values())
+
+        with pd.ExcelWriter(file_path) as writer:
+            sheets_written = False
+
+            # --- 1. METADATA SHEET ---
+            file_names = df_subset["File_Name"].unique().tolist()
+            mp_str = "Unknown"
+            if 'Main_Plasmids' in df_subset.columns:
+                mp_vals = df_subset['Main_Plasmids'].unique()
+                if len(mp_vals) > 0: mp_str = mp_vals[0]
+            if 'Ligand' in df_subset.columns:
+                ligand = df_subset['Ligand'].unique()
+
+            meta_dict = {
+                "Export Date": [datetime.now().strftime("%d.%m.%Y - %H:%M:%S")],
+                "Main Plasmids": [mp_str],
+                "Ligand": [", ".join(ligand)],
+                "Source Files Count": [len(file_names)],
+                "Source Files List": [", ".join(file_names)],
+                "Data Type": [", ".join(config.get('data_types', []))],
+                "Conc. Selection": [", ".join(
+                    f"Row {c['row']}: Vehicle {c['ligand']}" if c.get('is_vehicle')
+                    else f"Row {c['row']}: {c['conc']} log(M) {c['ligand']}"
+                    for c in config.get('conc_mode', [])
+                )],
+                "Filter: Ligands": [", ".join(config.get('ligands'))],
+                "Filter: Cells": [", ".join(config.get('cells'))],
+                "Filter: Conditions": [", ".join(config.get('transfections'))],
+                "Group By": [group_by]
+            }
+            pd.DataFrame(meta_dict).transpose().to_excel(writer, sheet_name="Metadata", header=False)
+            sheets_written = True
+
+            # Iterate Groups + data types
+            for group_name, df_group in data_groups:
+
+                # --- Loop through selected data types
+                # This handles both Single Selection (Plot Helper) and Default Report (List of 2)
+                selected_types = config.get('data_types', [])
+
+                for dtype in selected_types:
+                    # Determine labeling column handling
+                    if dtype in ["Raw_BRET_kinetic", "Raw_BRET_CRC"] and is_labeling:
+                        drop_labeling_col = False
+                    else:
+                        drop_labeling_col = True
+
+                    # Determine which category this dtype belongs to
+                    if export_category:
+                        cat = export_category
+                    elif dtype in kinetic_types:
+                        cat = "kinetic"
+                    elif dtype in crc_types:
+                        cat = "CRC"
+                    else:
+                        cat = "unknown"
+
+                    # --- KINETIC ---
+                    if cat == "kinetic":
+                        k_layout = config.get('conc_mode', [])
+                        if not k_layout:
+                            continue
+
+                        df_kin = filter_by_conc(df_group, k_layout)
+                        if df_kin.empty:
+                            continue
+
+                        df_kin = generate_header_key(df_kin, group_by, include_conc=True)
+                        kin_pivot = create_clean_pivot(df_kin, "Time_(min)",
+                                                       dtype, "Mean" in dtype,
+                                                       drop_labeling_col)
+                        kin_pivot.rename(columns={"Time_(min)": "Time (min)"}, inplace=True)
+
+                        # Sheet Name with group_prefix (Max 31 chars)
+                        base = f"{group_name}_{dtype}" if group_name else f"{dtype}"
+                        kin_pivot.to_excel(writer, sheet_name=base[:31], index=True)
+                        sheets_written = True
+
+                    # --- CRC ---
+                    elif cat == "CRC":
+                        # Shared helper (also used by the CRC-window preview)
+                        # pivot on plate row, conc-index for single-ligand.
+                        crc_pivot = build_crc_table(df_group, dtype, group_by,
+                                                    drop_labeling_col)
+                        if crc_pivot is None:
+                            continue
+                        base = f"{group_name}_AUC" if group_name else f"AUC_{dtype}"
+                        crc_pivot.to_excel(writer, sheet_name=base[:31], index=True)
+                        sheets_written = True
+
+                    # --- BARGRAPH ---
+                    elif cat == "bargraph":
+                        conc_criteria = config.get('conc_mode', [])
+                        if not conc_criteria:
+                            continue
+
+                        df_bar = filter_by_conc(df_group, conc_criteria)
+                        if df_bar.empty:
+                            continue
+
+                        df_bar = generate_header_key(df_bar, group_by)
+
+                        bar_table = create_bargraph_table(df_bar, dtype, group_by,
+                                                          drop_labeling_control=drop_labeling_col)
+                        if bar_table.empty:
+                            continue
+
+                        base = f"{group_name}_bargraph" if group_name else "Bargraph"
+                        bar_table.to_excel(writer, sheet_name=base[:31], index=False)
+                        sheets_written = True
+
+                    # --- HEATMAP ---
+                    elif cat == "heatmap":
+                        conc_criteria = config.get('conc_mode', [])
+                        if not conc_criteria:
+                            continue
+
+                        # Use df_subset (full dataset), NOT df_group (already split by group_by)
+                        df_hm = filter_by_conc(df_subset, conc_criteria)
+                        if df_hm.empty:
+                            continue
+
+                        hm_table = create_heatmap_table(df_hm, dtype, group_by,
+                                                        drop_labeling_control=drop_labeling_col)
+                        if hm_table.empty:
+                            continue
+
+                        base = "Heatmap"
+                        hm_table.to_excel(writer, sheet_name=base[:31], index=True)
+                        sheets_written = True
+                        break  # Heatmap handles grouping internally, skip other groups
+
+                # If heatmap was written, break out of data_groups loop too
+                if export_category == "heatmap" and sheets_written:
+                    break
+
+        if not sheets_written:
+            pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name="Empty")
+
+        log(f"   [SUCCESS] Exported: {os.path.basename(file_path)}")
+
+    except Exception as e:
+        log(f"   [ERROR] Export failed: {e}")

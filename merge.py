@@ -59,8 +59,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from models import MASTER_COLUMNS, LEGACY_COLUMN_DEFAULTS, APP_VERSION
-from export import ensure_master_csv_schema, MAIN_ONLY_CONDITION
+from models import MASTER_COLUMNS, LEGACY_COLUMN_DEFAULTS, APP_VERSION, MAIN_ONLY_CONDITION
+from export import ensure_master_csv_schema
 from processing import coerce_bool
 from restore import (scope_blob_for_merge, remap_blob_file_names,
                      well_token, build_resolve_ctx, parse_exclusion_blob)
@@ -987,3 +987,63 @@ def merge_masters(sources: list, resolutions: dict | None = None, log_fn=None):
          f"{report.summary['total_rows']} rows, "
          f"{len(uniq)} exclusion rule(s).")
     return merged, report
+
+
+def compute_merge_preview(sources, report, main_plasmids_choice=None, log_fn=None):
+    """Produce the merged frame for the summary preview WITHOUT touching app state.
+
+    Mirrors merge_run's conflict handling so the summary reflects the ACTUAL merged
+    result: hard-forbidden (no-override) issues -> None (cannot preview); filename
+    collisions are auto-resolved by 'rename' for the preview (so both copies show);
+    conflicting exclusions are unioned (Is_Excluded only — enough for accurate N, no
+    recompute needed for counts). main_plasmids_choice is the user's chosen backbone
+    (app.merge_main_plasmids_choice) used when canonicalization requires a selection."""
+    log = log_fn or (lambda *a, **k: None)
+
+    hard = [i for i in report.forbidden
+            if i["code"] not in (FILENAME_DATA_COLLISION,
+                                 MULTIPLE_MAIN_PLASMIDS)]
+    if hard:
+        codes = ", ".join(sorted({i["code"] for i in hard}))
+        log(f"[MERGE] Cannot preview merged summary — unresolved forbidden "
+            f"issue(s): {codes}. Resolve these before merging.")
+        return None
+
+    resolutions = {}
+    if any(i["code"] == FILENAME_DATA_COLLISION for i in report.forbidden):
+        resolutions["filename_collision"] = "rename"
+        log("[MERGE] Summary preview: same-named files with different data are "
+            "shown as separate (renamed) copies.")
+
+    # MULTIPLE_MAIN_PLASMIDS: use selected main plasmids for display summary
+    canon = getattr(report, "canon_plan", None)
+    if canon is not None and canon.requires_selection:
+        selected_mp = main_plasmids_choice or list(canon.preselected)
+        if not selected_mp:
+            log("[MERGE] Cannot preview merged summary — no Main Plasmids chosen.")
+            return None
+        resolutions["main_plasmids"] = list(selected_mp)
+
+    try:
+        merged_df, _r = merge_masters(sources, resolutions, log_fn=None)
+    except MergeForbidden as e:
+        codes = ", ".join(sorted({i["code"] for i in e.issues}))
+        log(f"[MERGE] Cannot preview merged summary: {codes}.")
+        return None
+
+    # Union conflicting exclusions (Is_Excluded only) so fully-excluded columns drop
+    # from N exactly as they will after a real merge.
+    file_col = merged_df['File_Name'].astype(str)
+    well_col = merged_df['Well_ID'].astype(str)
+    for iss in report.needs_input:
+        if iss["code"] != FILENAME_EXCLUSION_CONFLICT:
+            continue
+        ctx = iss["context"]
+        fname = ctx.get("file_name")
+        wells = {str(w) for lst in ctx.get("excluded_wells_by_source", {}).values()
+                 for w in lst}
+        for well in wells:
+            m = (file_col == str(fname)) & (well_col == str(well))
+            if m.any():
+                merged_df.loc[m, 'Is_Excluded'] = True
+    return merged_df
