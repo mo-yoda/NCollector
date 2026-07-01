@@ -1,5 +1,5 @@
 """
-restore.py — GUI-agnostic backend for REVERSIBLE exclusions ("restore").
+exclusions.py — GUI-agnostic backend for REVERSIBLE exclusions ("restore").
 
 Exclusion in N Collector is per-row authoritative via Is_Excluded; the engine
 (recompute_master_after_exclusion) derives every downstream column from the PRISTINE

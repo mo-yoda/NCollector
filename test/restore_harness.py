@@ -28,10 +28,10 @@ import pandas as pd
 
 from models import ProcessingConfig, TRIPLICATE_LAYOUT
 from processing import recompute_master_after_exclusion
-import restore
-from restore import (parse_exclusion_blob, list_active_exclusions,
-                     restore_rule, is_restorable, _resolve_rule_wells,
-                     _resolve_criteria, _excluded_mask)
+import exclusions
+from exclusions import (parse_exclusion_blob, list_active_exclusions,
+                        restore_rule, is_restorable, _resolve_rule_wells,
+                        _resolve_criteria, _excluded_mask)
 from export import ensure_master_csv_schema
 
 RTOL, ATOL = 1e-4, 1e-6

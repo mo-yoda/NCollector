@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 from models import LEGACY_COLUMN_DEFAULTS, APP_VERSION, MAIN_ONLY_CONDITION, DATA_TYPE_MAP
 from processing import pristine_raw_for_file, _melt_wide, parse_date_series
-from restore import migrate_blob_separator
+from exclusions import migrate_blob_separator
 
 logger = logging.getLogger("NCollector")
 
