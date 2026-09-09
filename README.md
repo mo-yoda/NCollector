@@ -18,3 +18,28 @@ and provides an interactive GUI for excluding/restoring data, merging datasets, 
 plotting concentration-response curves.
 
 > **Download latest version: [v2.0.5](https://github.com/mo-yoda/NCollector/releases/tag/v2.0.5)**
+
+---
+
+### Example data
+
+A small example experiment is provided:
+
+```
+examples/
+├── 260101_ExampleExperiment/     # one experiment folder (YYMMDD_... naming)
+│   ├── protocol.xlsx             #  → 'Protocol' sheet
+│   ├── measurement_01.xlsx       #  → 'Table All Cycles' sheet
+│   └── measurement_02.xlsx
+└── example_master.csv            # the master CSV produced from the folder above
+```
+
+Launch the app. Within the **Import & Export Data** tab: "Select folder containing reuslts of experiment" button to 
+`examples/260101_ExampleExperiment/`, and "Load Files" — or import `examples/example_master.csv`
+directly.
+
+---
+
+This work is funded by the [Wellcome Trust](https://wellcome.org/research-funding/funding-portfolio/funded-grants/spatiotemporal-assessment-b-arrestin-centred)
+
+---
