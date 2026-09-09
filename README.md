@@ -78,3 +78,5 @@ examples/
 Launch the app. Within the **Import & Export Data** tab: "Select folder containing reuslts of experiment" button to 
 `examples/260101_ExampleExperiment/`, and "Load Files" — or import `examples/example_master.csv`
 directly.
+
+<img width="991" height="905" alt="image" src="https://github.com/user-attachments/assets/3ec7d354-8713-4afb-aee0-a471aa5043ba" />
