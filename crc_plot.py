@@ -9,7 +9,8 @@ ligand concentration (Ligand_Conc, log10 M), plus the across-date mean and a 4PL
 that mean.
 
 Everything here is a pure function of the master DataFrame (no Tkinter, no matplotlib).
-Only `fit_four_pl` needs scipy, imported lazily so listing/extraction work without it.
+Only `fit_four_pl` needs scipy. It is imported at module level inside a try/except, so
+listing/extraction still work if scipy is unavailable (the fit is then skipped).
 Because AUC_Mean is recomputed on every exclude/restore, reading it here automatically
 reflects the current exclusion state (fully-excluded concentrations are NaN -> dropped).
 """
@@ -23,6 +24,14 @@ import pandas as pd
 from processing import parse_date_series
 
 logger = logging.getLogger("NCollector")
+
+try:
+    from scipy.optimize import curve_fit
+    _SCIPY_ERROR = None
+except Exception as e:
+    curve_fit = None
+    _SCIPY_ERROR = f"{type(e).__name__}: {e}"
+    logger.warning(f"scipy unavailable, skipping 4PL fit: {_SCIPY_ERROR}")
 
 # Columns the plot needs from the master.
 _REQUIRED = {'Ligand', 'Cell_Line', 'Transfection', 'Ligand_Conc', 'AUC_Mean',
@@ -175,7 +184,7 @@ def fit_four_pl(x, y):
     """Fit the 4PL to (x = log10 conc, y = response).
 
     Returns (popt, x_smooth, y_smooth) for drawing, or None if the fit cannot be computed
-    (fewer than 4 distinct concentrations, or no convergence). scipy is imported lazily.
+    (fewer than 4 distinct concentrations, scipy unavailable, or no convergence).
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -183,10 +192,9 @@ def fit_four_pl(x, y):
     x, y = x[ok], y[ok]
     if len(np.unique(x)) < 4:
         return None
-    try:
-        from scipy.optimize import curve_fit
-    except Exception as e:
-        logger.warning(f"scipy unavailable, skipping 4PL fit: {e}")
+
+    if curve_fit is None:
+        logger.warning(f"4PL fit skipped, scipy import failed: {_SCIPY_ERROR}")
         return None
 
     ymin, ymax = float(np.min(y)), float(np.max(y))
