@@ -1,0 +1,12 @@
+# PyInstaller output
+/build/
+/dist/
+
+# Python / tools
+.venv/
+
+# PyCharm
+.idea/
+
+# local only
+test/data/
