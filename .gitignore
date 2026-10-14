@@ -3,7 +3,10 @@
 /dist/
 
 # Python / tools
+__pycache__/
+*.pyc
 .venv/
+.pytest_cache/
 
 # PyCharm
 .idea/
