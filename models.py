@@ -16,6 +16,10 @@ def build_plate_layout(is_labeling: bool) -> list[range]:
     """Returns the plate column layout. Quadruplicates for labeling correction, triplicates otherwise."""
     return QUADRUPLICATE_LAYOUT if is_labeling else TRIPLICATE_LAYOUT
 
+# Plate layout assumed for protocols without a 'Specify plate layout:' field (<1.09).
+# Name of the built-in concentration-response preset
+DEFAULT_PLATE_MODE = "concentration-response over time"
+
 # Master DataFrame Column Schema
 # Column ordering for the master CSV. Referenced by compile_master_dataframe
 # for building the DF and ensure_master_csv_schema for importing older CSVs.
@@ -183,6 +187,9 @@ class ProtocolData:
     ligand_2: str | None = None
     ligand_2_conc: pd.DataFrame | None = None
     ligand_layout: str | None = None # Only available in protocols > 1.03
+    # Protocol field 'Specify plate layout:' (names the plate layout preset)
+    plate_mode: str = DEFAULT_PLATE_MODE # Only available in protocols > 1.08
+    plate_mode_inferred: bool = False # inferred if not specified in protocol
 
 @dataclass
 class MeasurementFolder:

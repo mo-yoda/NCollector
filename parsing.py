@@ -4,17 +4,21 @@ import pandas as pd
 import re
 from datetime import datetime
 
-from models import ProtocolData, PrResult, MeasurementFolder
+from models import ProtocolData, PrResult, MeasurementFolder, DEFAULT_PLATE_MODE
 
 logger = logging.getLogger("NCollector")
 
 # --- Spreadsheet Navigation Helpers --- #
 
-def get_location(df: pd.DataFrame, marker: str, match_index: int = 0):
+def get_location(df: pd.DataFrame, marker: str, match_index: int = 0, required: bool = True):
     """
     Finds exact coordinates (row_idx, col_idx) of a text marker in the DataFrame.
     match_index: 0 for 1st occurrence, 1 for 2nd, etc.
+    required: False for optional markers (e.g. fields that newer protocol versions
+              have). A missing optional marker is only logged at debug level.
     """
+    report = logger.error if required else logger.debug
+
     # Create a boolean mask of the whole sheet to search the entire sheet
     # .stack() turns the 2D grid into a 1D Series with double index (row, col)
     mask = df.astype(str).apply(lambda x: x.str.contains(marker, na=False, regex=False))
@@ -23,12 +27,12 @@ def get_location(df: pd.DataFrame, marker: str, match_index: int = 0):
     all_matches = mask.stack()[mask.stack()].index.tolist()
 
     if not all_matches:
-        logger.error(f"Marker '{marker}' not found in sheet.")
+        report(f"Marker '{marker}' not found in sheet.")
         return None
 
     # Check if the requested occurrence exists
     if match_index >= len(all_matches):
-        logger.error(
+        report(
             f"Requested occurrence #{match_index + 1} of '{marker}' not found. Only {len(all_matches)} found.")
         return None
 
@@ -40,14 +44,16 @@ def extract_value(
         marker: str,
         col_offset: int = 1,
         row_offset: int = 0,
-        match_index: int = 0
+        match_index: int = 0,
+        required: bool = True
 ):
     """
     Finds a marker and returns the value of the cell at a relative position.
     match_index: 0 for 1st occurrence, 1 for 2nd, etc.
     Default: Returns the value in the cell immediately to the right (col_offset=1).
+    required: False for optional markers -> no logger.error if the marker is missing.
     """
-    coord = get_location(df, marker, match_index)
+    coord = get_location(df, marker, match_index, required=required)
     if coord is None:
         return None
 
@@ -59,7 +65,8 @@ def extract_value(
 
     # Safety check for bounds of sheet
     if target_row >= df.shape[0] or target_col >= df.shape[1]:
-        logger.error(f"Target for '{marker}' is outside the sheet boundaries.")
+        (logger.error if required else logger.debug)(
+            f"Target for '{marker}' is outside the sheet boundaries.")
         return None
 
     # .iloc uses [row, col]
@@ -237,11 +244,16 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
     if check_ligand_2 is not None and str(check_ligand_2).strip().lower() not in ["nan", ""]:
         ligand_2 = check_ligand_2.strip()
         ligand_2_conc = slice_table(protocol_sheet, "final concentration in well (log(M))", match_index=1)
-        ligand_layout = extract_value(protocol_sheet,"Ligand layout", col_offset= 0, row_offset= 1)
+        # Optional, only protocols > 1.03 have a ligand layout field
+        ligand_layout = extract_value(protocol_sheet,"Ligand layout", col_offset= 0, row_offset= 1,
+                                      required=False)
     else:
         ligand_2 = None
         ligand_2_conc = None
         ligand_layout = None
+
+    # Optional, only protocols > 1.08 have plate layout
+    plate_mode, plate_mode_inferred = _read_plate_mode(protocol_sheet)
 
     protocol_info = ProtocolData(file_name=file_name,
                                  exp_date = exp_date,
@@ -255,8 +267,93 @@ def extract_protocol_info(xls_obj: pd.ExcelFile, file_name: str):
                                  ligand_conc=ligand_1_conc,
                                  ligand_2 = ligand_2,
                                  ligand_2_conc= ligand_2_conc,
-                                 ligand_layout = ligand_layout)
+                                 ligand_layout = ligand_layout,
+                                 plate_mode=plate_mode,
+                                 plate_mode_inferred=plate_mode_inferred)
     return protocol_info
+
+def _read_plate_mode(protocol_sheet: pd.DataFrame) -> tuple[str, bool]:
+    """
+    Reads the protocol field 'Specify plate layout:' (value in the cell below the marker).
+    Returns (plate_mode, inferred). Missing field or empty value -> (DEFAULT_PLATE_MODE, True).
+    The text is returned as written (stripped).
+    """
+    raw = extract_value(protocol_sheet, "Specify plate layout", col_offset=0, row_offset=1, required=False)
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)) or not str(raw).strip():
+        return DEFAULT_PLATE_MODE, True
+    return str(raw).strip(), False
+
+
+# --- Plate reader ID3 (transfection IDs) --- #
+
+_ID_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
+
+
+def parse_id_list(raw) -> list[str]:
+    """
+    Splits the ID3 text of a plate reader file into a list of entries.
+      - comma-separated; every entry keeps its position, empty entries ("1,,3", trailing comma)
+      stay as "" (partially used plate);
+      - ranges are expanded: "1-12" -> 1..12, "1-4,7" -> 1, 2, 3, 4, 7;
+      - other entries are returned as written (stripped); check_id3 validates them.
+    Raises ValueError for a descending range such as "4-1" (the plate file is skipped).
+    Empty / missing ID3 text -> [].
+    """
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return []
+    text = str(raw).strip()
+    if not text:
+        return []
+
+    ids = []
+    for token in (t.strip() for t in text.split(',')):
+        m = _ID_RANGE_RE.match(token)
+        if m:
+            start, end = int(m.group(1)), int(m.group(2))
+            if start > end:
+                raise ValueError(f"descending range '{token}'")
+            ids.extend(str(i) for i in range(start, end + 1))
+        else:
+            ids.append(token)
+    return ids
+
+
+def check_id3(ids: list[str], protocol_transfection_ids, n_conditions: int) -> tuple[list[str], list[str]]:
+    """
+    Validates the parsed ID3 entries (parse_id_list) against the protocol.
+    Returns (mapped_ids, warnings):
+      - more entries than n_conditions -> extras ignored + warning (empty extras silently);
+      - non-numeric entry or ID not in the protocol -> entry dropped + warning; its POSITION
+        is kept as "" so that condition gets no transfection and the others keep their IDs;
+      - empty entries and fewer IDs than conditions (partially used plate) -> no warning.
+    protocol_transfection_ids: the protocol's transfection IDs (ProtocolData.transfection_conditions keys).
+    n_conditions: number of conditions of the plate layout.
+    """
+    known = {str(t) for t in protocol_transfection_ids}
+    warnings = []
+
+    ids = list(ids)
+    extras = [t for t in ids[n_conditions:] if t != ""]
+    if extras:
+        warnings.append(f"ID3 lists {len([t for t in ids if t != ''])} IDs for {n_conditions} conditions "
+                        f"– extra IDs ignored: {', '.join(extras)}")
+    ids = ids[:n_conditions]
+
+    mapped = []
+    for pos, token in enumerate(ids, start=1):
+        if token == "":
+            mapped.append("")
+        elif not token.isdigit():
+            warnings.append(f"ID3 entry '{token}' (position {pos}) is not a number "
+                            f"– dropped, its condition gets no transfection")
+            mapped.append("")
+        elif token not in known:
+            warnings.append(f"ID3 entry '{token}' (position {pos}) is not a transfection of the protocol "
+                            f"– dropped, its condition gets no transfection")
+            mapped.append("")
+        else:
+            mapped.append(token)
+    return mapped, warnings
 
 def extract_metadata(pr_export_df):
     """
@@ -385,10 +482,16 @@ def extract_bret_data(pr_export_df):
     }
 
 
+class PlateFileSkip(Exception):
+    """A plate reader file that is skipped with a warning (e.g. unusable ID3 line)."""
+
+
 def extract_measurement_data(xls_obj, file_name: str):
     """
     Gets metadata and BRET ratio from PR export.
     Stores and returns PrResult class with all data.
+    Raises PlateFileSkip (message = reason) for a file without 'ID3:' line or with a
+    descending ID3 range.
     """
     worksheet = "Table All Cycles"
     try:
@@ -402,7 +505,20 @@ def extract_measurement_data(xls_obj, file_name: str):
         logger.error(f"Worksheet '{worksheet}' not found in file.")
         return None
 
+    # ID3 (transfection IDs) is required: without it no condition can be assigned
+    first_col = pr_export_df.iloc[:, 0].astype(str)
+    if not first_col.str.contains(r"ID3\s*:", na=False).any():
+        raise PlateFileSkip("no 'ID3:' line")
+
     metadata_dic = extract_metadata(pr_export_df)
+
+    if metadata_dic is not None:
+        try:
+            # Decode ID3 listings
+            parse_id_list(metadata_dic['transfections'])
+        except ValueError as e:
+            raise PlateFileSkip(f"ID3 '{metadata_dic['transfections']}' contains a {e}") from None
+
     bret_data = extract_bret_data(pr_export_df)
 
     result_obj = PrResult(
@@ -464,10 +580,21 @@ def extract_info_sheet_data(xls_obj) -> dict:
 
 # --- Folder Scanning --- #
 
+def _close_workbooks(workbooks):
+    """Releases the file handles of the opened workbooks (data is already in memory)."""
+    for _name, xls, _sheets in workbooks:
+        try:
+            xls.close()
+        except Exception:
+            pass
+
 def scan_and_load_folders(folder_paths: list[str], log_fn=None) -> list[MeasurementFolder]:
     """
     Scans folder paths for xlsx/xlsm files, classifies them as protocol or measurement,
     and returns a list of MeasurementFolder objects with matched protocol + results.
+
+    Per folder the protocol is read first, before any plate file. A protocol without
+    'Specify plate layout' field gets a [LAYOUT] line.
 
     Args:
         folder_paths: List of directory paths to scan.
@@ -499,26 +626,48 @@ def scan_and_load_folders(folder_paths: list[str], log_fn=None) -> list[Measurem
         )
 
         files = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsm'))]
+
+        # Open every workbook once, protocols are read first
+        workbooks = []  # (file_name, ExcelFile, sheet_names)
         for file_name in files:
-            file_path = os.path.join(folder_path, file_name)
-            is_imported = False
-
             try:
-                xls = pd.ExcelFile(file_path)
-                sheet_names = xls.sheet_names
+                xls = pd.ExcelFile(os.path.join(folder_path, file_name))
+                workbooks.append((file_name, xls, xls.sheet_names))
+            except Exception as e:
+                _log(f"   [ERROR] Could not read {file_name}: {e}")
+                folder_data.skipped_files.append(file_name)
 
-                # Protocol file
-                if "Protocol" in sheet_names:
-                    protocol = extract_protocol_info(xls, file_name)
-                    if protocol and protocol.exp_date == folder_date:
-                        folder_data.protocol = protocol
-                        _log(f"   [PROTOCOL] loaded: {file_name}")
-                        is_imported = True
-                    elif protocol:
-                        _log(f"   [MISMATCH] Protocol {protocol.exp_date} != Folder {folder_date}")
+        # Protocol file(s)
+        for file_name, xls, sheet_names in workbooks:
+            if "Protocol" not in sheet_names:
+                continue
+            is_imported = False
+            try:
+                protocol = extract_protocol_info(xls, file_name)
+                if protocol and protocol.exp_date == folder_date:
+                    folder_data.protocol = protocol
+                    _log(f"   [PROTOCOL] loaded: {file_name}")
+                    is_imported = True
+                elif protocol:
+                    _log(f"   [MISMATCH] Protocol {protocol.exp_date} != Folder {folder_date}")
+            except Exception as e:
+                _log(f"   [ERROR] Could not read {file_name}: {e}")
+            if not is_imported:
+                folder_data.skipped_files.append(file_name)
 
-                # Measurement file
-                elif "Table All Cycles" in sheet_names and set(sheet_names).issubset(
+        # Protocol-level checks
+        protocol = folder_data.protocol
+        if protocol is not None and protocol.plate_mode_inferred:
+            _log(f"   [LAYOUT] Protocol '{protocol.file_name}': no 'plate layout' specified "
+                 f"– assumed '{protocol.plate_mode}'")
+
+        # Measurement files
+        for file_name, xls, sheet_names in workbooks:
+            if "Protocol" in sheet_names:
+                continue
+            is_imported = False
+            try:
+                if "Table All Cycles" in sheet_names and set(sheet_names).issubset(
                         {"Table All Cycles", "Protocol Information"}):
                     result = extract_measurement_data(xls, file_name)
                     if result and result.measurement_date == folder_date:
@@ -531,14 +680,14 @@ def scan_and_load_folders(folder_paths: list[str], log_fn=None) -> list[Measurem
                         is_imported = True
                     elif result:
                         _log(f"   [MISMATCH] Analysis {result.measurement_date} != Folder {folder_date}")
-
-                if not is_imported:
-                    folder_data.skipped_files.append(file_name)
-
+            except PlateFileSkip as e:
+                _log(f"   [SKIP] Plate file '{file_name}': {e}")
             except Exception as e:
                 _log(f"   [ERROR] Could not read {file_name}: {e}")
+            if not is_imported:
                 folder_data.skipped_files.append(file_name)
 
+        _close_workbooks(workbooks)
         loaded_folders.append(folder_data)
         logger.debug(f"Folder '{folder_name}': {len(folder_data.results)} results, "
                      f"protocol={'yes' if folder_data.protocol else 'no'}, "

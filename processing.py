@@ -5,6 +5,7 @@ import pandas as pd
 from models import (PlateColMetadata, PrResult, ProtocolData, ProcessingConfig,
                     BretMetricsBundle, MASTER_COLUMNS, build_plate_layout)
 from mapping import get_cell_line_map, get_transfection_map, get_ligand_map, built_conc_dic
+from parsing import parse_id_list, check_id3
 
 logger = logging.getLogger("NCollector")
 
@@ -326,11 +327,14 @@ def map_plate_metadata(result: PrResult, protocol: ProtocolData, config: Process
     conc_map_2 = built_conc_dic(protocol.ligand_2_conc) if protocol.ligand_2 else {}
 
     # Get transfection map via mapping ID3 info
-    raw_ids = [x.strip() for x in str(result.transfection_id).split(',')] if result.transfection_id else []
+    parsed_ids = parse_id_list(result.transfection_id)
+    checked_t_ids, id3_warnings = check_id3(parsed_ids, protocol.transfection_conditions.keys(), len(plate_blocks))
+    for warning in id3_warnings:
+        logger.warning(f"[WARNING] '{result.file_name}': {warning}")
     mapped_t_ids = get_transfection_map(
         cell_layout_type=protocol.line_layout,
         ligand_layout_type=protocol.ligand_layout,
-        t_ids=raw_ids,
+        t_ids=checked_t_ids,
         block_count=len(plate_blocks)
     )
     logger.debug(f"Mapped Block Sequence: {mapped_t_ids}")
