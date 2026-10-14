@@ -1,0 +1,41 @@
+{
+  "format": "ncollector-plate-layout",
+  "format_version": 1,
+  "name": "concentration-response over time (labeling control)",
+  "protocol_texts": [
+    "concentration-response over time"
+  ],
+  "description": "as above, 3 conditions of 4 columns; 4th column = mock-labeling control",
+  "layers": {
+    "condition": [
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+      [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]
+    ],
+    "treatment": [
+      ["stim1", "stim1", "stim1", "labeling control", "stim1", "stim1", "stim1", "labeling control", "stim1", "stim1", "stim1", "labeling control"],
+      ["stim2", "stim2", "stim2", "labeling control", "stim2", "stim2", "stim2", "labeling control", "stim2", "stim2", "stim2", "labeling control"],
+      ["stim3", "stim3", "stim3", "labeling control", "stim3", "stim3", "stim3", "labeling control", "stim3", "stim3", "stim3", "labeling control"],
+      ["stim4", "stim4", "stim4", "labeling control", "stim4", "stim4", "stim4", "labeling control", "stim4", "stim4", "stim4", "labeling control"],
+      ["stim5", "stim5", "stim5", "labeling control", "stim5", "stim5", "stim5", "labeling control", "stim5", "stim5", "stim5", "labeling control"],
+      ["stim6", "stim6", "stim6", "labeling control", "stim6", "stim6", "stim6", "labeling control", "stim6", "stim6", "stim6", "labeling control"],
+      ["stim7", "stim7", "stim7", "labeling control", "stim7", "stim7", "stim7", "labeling control", "stim7", "stim7", "stim7", "labeling control"],
+      ["vehicle", "vehicle", "vehicle", "labeling control", "vehicle", "vehicle", "vehicle", "labeling control", "vehicle", "vehicle", "vehicle", "labeling control"]
+    ],
+    "replicate": [
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null],
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null],
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null],
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null],
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null],
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null],
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null],
+      ["1", "2", "3", null, "1", "2", "3", null, "1", "2", "3", null]
+    ]
+  }
+}

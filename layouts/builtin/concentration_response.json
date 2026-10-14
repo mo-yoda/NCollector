@@ -1,0 +1,41 @@
+{
+  "format": "ncollector-plate-layout",
+  "format_version": 1,
+  "name": "concentration-response over time",
+  "protocol_texts": [
+    "concentration-response over time"
+  ],
+  "description": "7 concentrations (rows A-G) + vehicle (row H), triplicates in 4 conditions of 3 columns",
+  "layers": {
+    "condition": [
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+      [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+    ],
+    "treatment": [
+      ["stim1", "stim1", "stim1", "stim1", "stim1", "stim1", "stim1", "stim1", "stim1", "stim1", "stim1", "stim1"],
+      ["stim2", "stim2", "stim2", "stim2", "stim2", "stim2", "stim2", "stim2", "stim2", "stim2", "stim2", "stim2"],
+      ["stim3", "stim3", "stim3", "stim3", "stim3", "stim3", "stim3", "stim3", "stim3", "stim3", "stim3", "stim3"],
+      ["stim4", "stim4", "stim4", "stim4", "stim4", "stim4", "stim4", "stim4", "stim4", "stim4", "stim4", "stim4"],
+      ["stim5", "stim5", "stim5", "stim5", "stim5", "stim5", "stim5", "stim5", "stim5", "stim5", "stim5", "stim5"],
+      ["stim6", "stim6", "stim6", "stim6", "stim6", "stim6", "stim6", "stim6", "stim6", "stim6", "stim6", "stim6"],
+      ["stim7", "stim7", "stim7", "stim7", "stim7", "stim7", "stim7", "stim7", "stim7", "stim7", "stim7", "stim7"],
+      ["vehicle", "vehicle", "vehicle", "vehicle", "vehicle", "vehicle", "vehicle", "vehicle", "vehicle", "vehicle", "vehicle", "vehicle"]
+    ],
+    "replicate": [
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"],
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"],
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"],
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"],
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"],
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"],
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"],
+      ["1", "2", "3", "1", "2", "3", "1", "2", "3", "1", "2", "3"]
+    ]
+  }
+}
